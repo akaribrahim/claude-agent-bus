@@ -18,10 +18,11 @@ fi
 trap stop_services EXIT
 
 PORT=$(free_port)
+PORT2=$(free_port)
 REPO=$(make_repo servrepo)
-python3 - "$REPO/.claude/agent-bus.json" "$PORT" <<'PY'
+python3 - "$REPO/.claude/agent-bus.json" "$PORT" "$PORT2" <<'PY'
 import json, os, sys
-path, port = sys.argv[1], int(sys.argv[2])
+path, port, port2 = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 os.makedirs(os.path.dirname(path), exist_ok=True)
 json.dump({"resources": [{
     "name": "web",
@@ -31,6 +32,14 @@ json.dump({"resources": [{
     "port": port,
     "start": "python3 -m http.server %d --bind 127.0.0.1" % port,
     "patterns": [r"\bhttp\.server\b", r":%d\b" % port],
+}, {
+    "name": "forked",
+    "desc": "the same thing, started so the shell cannot exec it",
+    "port": port2,
+    # The trailing `; true` is the point: no shell will replace itself with
+    # this, so the recorded pid is the shell's and the listener is its child.
+    "start": "python3 -m http.server %d --bind 127.0.0.1 ; true" % port2,
+    "patterns": [r":%d\b" % port2],
 }]}, open(path, "w"), indent=2)
 PY
 commit_all "$REPO"
@@ -61,6 +70,18 @@ assert_equal wt1 "$(fetch)" "the port answers with the first worktree's file"
 
 out=$(ab sess-a serves)
 assert_contains "$out" "agent-bus" "agent-bus knows it started the service"
+
+# …and still knows when the shell did not exec the command it was given.
+#
+# `shell=True` execs a simple command on macOS and forks it on Linux, so the pid
+# recorded at start is the listener's on one platform and its parent's on the
+# other. This resource forces the fork on both, which is the case CI caught and
+# a macOS-only run never could.
+out=$(ab sess-a serve forked 2>&1)
+assert_contains "$out" "restarted from your worktree" "a forking start command works"
+out=$(ab sess-a serves)
+assert_equal 2 "$(printf '%s\n' "$out" | grep -c 'agent-bus')" \
+  "both services are recognised as ours, however the shell ran them"
 
 # ---- the other worktree is refused even though no lock is held --------------
 

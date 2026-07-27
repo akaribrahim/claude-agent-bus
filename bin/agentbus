@@ -1201,6 +1201,24 @@ def pid_cwd(pid):
     return None
 
 
+def same_group(a, b):
+    """Whether two pids belong to one process group.
+
+    `shell=True` does not always exec the command it was given. On macOS the
+    shell replaces itself with a simple command, so the pid we recorded when we
+    started the service is the pid listening on the port. On Linux /bin/sh forks
+    it and stays, and those two pids differ — which made agent-bus fail to
+    recognise a service it had started itself, and fall back to probing the
+    port. `start_new_session=True` puts the whole thing in its own group, and
+    that is what they still have in common."""
+    if IS_WIN or not a or not b:
+        return False
+    try:
+        return os.getpgid(int(a)) == os.getpgid(int(b))
+    except (OSError, ValueError):
+        return False
+
+
 def serving(repo_key, res_cfg):
     """Who a declared service is currently serving.
 
@@ -1210,14 +1228,17 @@ def serving(repo_key, res_cfg):
     nothing is."""
     name, port = res_cfg["name"], res_cfg.get("port")
     rec = read_json(serve_path(repo_key, name))
+    # One lsof, not two: it was called again a few lines down for the same port.
+    listener = port_pid(port) if port else None
     if rec and pid_alive(rec.get("pid")):
-        if not port or port_pid(port) == rec.get("pid"):
+        if not port or listener == rec.get("pid") \
+                or same_group(listener, rec.get("pid")):
             return rec.get("root"), "agent-bus"
     if not port:
         return (None, "down") if not rec else (rec.get("root"), "stale")
-    pid = port_pid(port)
-    if not pid:
+    if not listener:
         return None, "down"
+    pid = listener
     cwd = pid_cwd(pid)
     if cwd:
         root = cwd
