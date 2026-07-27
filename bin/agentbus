@@ -444,14 +444,54 @@ def refresh_derived(sessions=None):
     # Union over every live session's root, not one arbitrary root per repo: all
     # worktrees share a repo_key, so reading only the first would let a worktree
     # whose branch predates the config file switch the guard off for everyone.
-    tokens = set()
+    tokens, unfilterable = set(), False
     for s in sessions:
         cfg = repo_config(s.get("repo_key"), s.get("root"))
         for res in cfg.get("resources", []):
-            for tok in resource_tokens(res):
+            if not res.get("patterns"):
+                continue
+            toks = resource_tokens(res)
+            if not toks:
+                unfilterable = True  # nothing mandatory to filter on
+                continue
+            for tok in toks:
                 tokens.add(re.escape(tok))
-    write_text(TOKENFILE, ("|".join(sorted(tokens)) if tokens else "") + "\n")
+    # A resource whose patterns have no mandatory literal cannot be pre-filtered.
+    # Waking the engine on every command costs milliseconds; missing the guard
+    # costs a silently wrong test, so the gate opens for everything instead.
+    write_text(TOKENFILE, ("." if unfilterable
+                           else "|".join(sorted(tokens)) if tokens else "") + "\n")
+    sweep_locks(sessions)
     rebuild_hot(sessions)
+
+
+def sweep_locks(sessions):
+    """Delete locks that already grant nothing — expired, or held by a session
+    that is gone. They confuse `status` and outlive the reason they were taken;
+    leaving them on disk made a session look like it was holding the whole rig
+    an hour after it had finished with it."""
+    try:
+        names = os.listdir(LOCKS)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(LOCKS, name)
+        lock = read_json(path)
+        if not lock:
+            continue
+        holder, stealable, _ = lock_state(lock, sessions)
+        if not stealable:
+            continue
+        with Mutex("lock-" + re.sub(r"[^A-Za-z0-9]", "_",
+                                    lock.get("resource", ""))[:40]):
+            current = read_json(path)
+            if current and current.get("acquired_at") == lock.get("acquired_at"):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
 
 def rebuild_hot(sessions):
@@ -1015,18 +1055,98 @@ def literal_runs(pattern):
     return [r for r in runs if r]
 
 
+def strip_groups(pattern):
+    """The pattern with every (...) removed — what is left is mandatory."""
+    out, depth, i = [], 0, 0
+    while i < len(pattern or ""):
+        ch = pattern[i]
+        if ch == "\\" and i + 1 < len(pattern):
+            if depth == 0:
+                out.append(ch)
+                out.append(pattern[i + 1])
+            i += 2
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def top_level_groups(pattern):
+    groups, depth, start, i = [], 0, 0, 0
+    while i < len(pattern or ""):
+        ch = pattern[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "(":
+            if depth == 0:
+                start = i + 1
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                groups.append(pattern[start:i])
+        i += 1
+    return groups
+
+
+def split_alternatives(body):
+    parts, depth, cur = [], 0, []
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "|" and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return parts
+
+
+def pattern_tokens(pat):
+    """Literals such that EVERY string matching `pat` contains at least one.
+
+    The longest literal run in the raw pattern is not that: in
+    `git\\s+(checkout|add|cherry-pick)` the longest run lives inside the
+    alternation, so filtering on it drops `git add` — the guard silently never
+    fires. What is mandatory is what sits outside the groups; failing that, one
+    literal from every branch of a group, since a match must take some branch."""
+    outside = [r for r in literal_runs(strip_groups(pat)) if len(r) >= 2]
+    if outside:
+        return {max(outside, key=len)}
+    for body in top_level_groups(pat):
+        branches, usable = set(), True
+        for branch in split_alternatives(body):
+            runs = [r for r in literal_runs(branch) if len(r) >= 2]
+            if not runs:
+                usable = False
+                break
+            branches.add(max(runs, key=len))
+        if usable and branches:
+            return branches
+    return set()  # nothing can be pre-filtered on: the caller must always wake
+
+
 def resource_tokens(res):
-    """Literal substrings the shell fast path can filter on before waking the
-    engine. Derived from the patterns, so the two can never drift apart — a
-    hand-written list silently stopped covering `make seed` and `make dev`."""
+    """Literal substrings the shell fast path filters on before waking the
+    engine. Derived from the patterns so the two cannot drift apart — a
+    hand-written list had silently stopped covering `make seed`."""
     out = set(res.get("tokens", []))
     for pat in res.get("patterns", []):
-        runs = literal_runs(pat)
-        if runs:
-            out.add(max(runs, key=len))
-    port = res.get("port")
-    if port:
-        out.add(str(port))
+        toks = pattern_tokens(pat)
+        if not toks:
+            return set()  # signals "cannot filter this resource"
+        out |= toks
+    if res.get("port"):
+        out.add(str(res["port"]))
     return {t for t in out if len(t) >= 2}
 
 
@@ -1126,11 +1246,13 @@ def command_targets(cmd, depth=0):
         head = os.path.basename(toks[0])
         if head in SHELL_HEADS and depth < 3:
             # `bash -c '…'` — that quoted argument is a command, not prose.
-            for i, tok in enumerate(toks[1:], 1):
-                if tok == "-c" and i + 1 < len(toks):
-                    out.extend(command_targets(toks[i + 1], depth + 1))
-                    break
-            continue
+            inline = next((toks[i + 1] for i, tok in enumerate(toks[1:], 1)
+                           if tok == "-c" and i + 1 < len(toks)), None)
+            if inline is not None:
+                out.extend(command_targets(inline, depth + 1))
+                continue
+            # `bash script.sh` — the script cannot be read, but its name and
+            # arguments still can, so fall through rather than going blind.
         if is_readonly(head, toks):
             continue
         out.append(" ".join(t for t in toks if not re.search(r"\s", t)))
