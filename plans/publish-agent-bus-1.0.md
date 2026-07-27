@@ -55,14 +55,53 @@ fix it.
 
 ## Progress
 
-- [ ] (M1) Test harness in the repository — `tests/run.sh`, isolated state, current
+- [x] (M1) Test harness in the repository — `tests/run.sh`, isolated state, current
       behaviour locked in green before anything changes.
-- [ ] (M2) Interference guard — a failing command whose output blames another live
+      Done 2026-07-27. `make test` → 5 files, 135 assertions, 0 failures, ~25s.
+      Files: `Makefile`, `tests/run.sh`, `tests/lib.sh`, `tests/mkpayload.py`,
+      `tests/check_syntax.py`, `tests/test_matcher.py`, `tests/test_locks.sh`,
+      `tests/test_serving.sh`, `tests/test_solo.sh`, `.github/workflows/test.yml`.
+      Proved able to fail: see Surprises & Discoveries.
+- [x] (M2) Interference guard — a failing command whose output blames another live
       session's files produces a "do not fix these" note instead of a repair attempt.
-- [ ] (M3) Declared ownership — `agentbus own` / `disown`, enforced in `PreToolUse`,
+      Done 2026-07-27. `make test` → 6 files, 214 assertions, 0 failures.
+      `bin/agentbus`: `FAILURE_SIGNAL`, `INTERFERENCE_WINDOW`, `MAX_INTERFERENCE_FILES`,
+      `response_text`, `repo_relative`, `output_mentions`, `interference_note`, rewritten
+      `hook_post_bash`, extended `RULES`. `bin/ab-hook`: the auto-claim gate on `post-bash`
+      removed. New `tests/test_interference.sh` (79 assertions). No hook event added or
+      removed, so no `./install.sh` and no `/reload-plugins` were needed.
+      **Redesigned 2026-07-28, because the real-session acceptance failed.** Claude Code does
+      not fire `PostToolUse` for a tool call that errored, so the guard never ran for the one
+      thing it exists for. The guard, and the release of a failed command's claim, both moved
+      to `PostToolBatch`: new `batch_bash_output`, `release_batch_claims`, `release_autoclaim`;
+      `hook_post_bash` is release-only again; `bin/ab-hook` has its auto-claim gate back and
+      its `post-batch` branch wakes the engine only for a batch that actually ran a command.
+      Acceptance now passes against two real Claude Code sessions — `tests/live/acceptance.sh`.
+- [x] (M3) Declared ownership — `agentbus own` / `disown`, enforced in `PreToolUse`,
       shown in the roster and in `status`.
-- [ ] (M4) Handoff summary — `agentbus handoff` and an automatic summary at session end,
+      Done 2026-07-27. `make test` → 7 files, 306 assertions, 0 failures.
+      `bin/agentbus`: `OWNS`, `owns_path`/`load_owns`/`save_owns`, `normalise_glob`,
+      `glob_matches`, `glob_prefix`, `owners_of`, `ownership_text`, `ownership_verdict`,
+      `owns_summary`, `ownership_text_block`, `cli_own`, `cli_disown`; `rebuild_hot`,
+      `guard_file`, `roster_text`, `cli_status`, `forget_session`, `ensure_dirs`,
+      `repo_relative` (moved up from the M2 block) all extended. `bin/ab-hook` unchanged.
+      New `tests/test_ownership.sh` (92 assertions). SKILL.md and README.md document the
+      glob semantics. No hook event added or removed, so no `./install.sh` was needed.
+      Acceptance verified against two real Claude Code sessions on 2026-07-28.
+- [x] (M4) Handoff summary — `agentbus handoff` and an automatic summary at session end,
       delivered into the other sessions' context.
+      Done 2026-07-28. `make test` → 8 files, 356 assertions, 0 failures.
+      `bin/agentbus`: `bump_guarded`, `still_serving`, `did_something`, `handoff_text`,
+      `cli_handoff`; `DELIVERED_KINDS` += `handoff`; `deliver` indents multi-line events;
+      `hook_session_end` writes the summary before `forget_session`; `hook_post_batch` no
+      longer gated on the live count; `positional` learned `--note`.
+      `bin/ab-hook`: the live-count gate now exempts `post-batch` — see Surprises.
+      New `tests/test_handoff.sh` (49 assertions). SKILL.md and README.md updated.
+      No hook event added or removed, so no `./install.sh` was needed.
+      Acceptance verified against two real Claude Code sessions on 2026-07-28.
+- [x] Real-session acceptance harness — `tests/live/acceptance.sh [m2|m3|m4|all]`, 32
+      assertions against Claude Code driven through its own CLI, on an isolated bus.
+      Not part of `make test`: it costs real model calls and takes minutes.
 - [ ] (M5) Zero-config detection — `agentbus init-repo` reads the repository and drafts a
       real config with real ports and start commands.
 - [ ] (M6) Package and publish 1.0 — marketplace entry, rewritten README with a real
@@ -89,6 +128,157 @@ fix it.
   the same tick both proceeded.
   Evidence: 60 of 60 concurrent pairs were both allowed before the fix; 40 of 40 now yield
   exactly one denial.
+
+- Observation (M1): the suite was green on its first run, which proves nothing on its own,
+  so five known-bad states were injected and each had to be caught. All five were, and the
+  first two are the historical bugs above:
+  (1) the pre-filter taking the longest literal run anywhere in a pattern, `768f183` — caught,
+  4 assertions including `git add -A`;
+  (2) `guard_bash` discarding `do_claim`'s answer, `c95399c` — caught by the 40-pair race
+  assertion, and by nothing else;
+  (3) a pattern in the fixture config pointed at the wrong port — caught, 2 assertions;
+  (4) a hook printing a non-JSON line — caught, "hook pre-tool prints valid JSON";
+  (5) a hook exiting 3 — caught, "hook pre-tool exits 0".
+  Every injection was made in a copy of the tree under `$TMPDIR`, never in the working copy:
+  three other Claude Code sessions were live and they execute `bin/agentbus` from disk on
+  every tool call.
+
+- Observation (M1): the first two injections were aimed at code the test I ran did not reach
+  — the solo test exits at the `live-count` gate long before the `pre-tool` branch — and so
+  reported success while the plugin was broken. Re-running them against `test_locks.sh`,
+  which has two live sessions, caught both. Worth remembering when judging any later
+  "the tests still pass": passing only means the paths the tests execute are intact.
+
+- Observation (M1): the fast-path cost assertion was flaky on the first attempt — 509 ms for
+  20 calls against a 400 ms budget — because this Mac was running three other Claude Code
+  sessions and the suite itself. Every source of noise can only make a batch slower, so the
+  measurement is now the best of three batches rather than a single one. Best-of-three has
+  been 60–90 ms for 20 calls, well inside the budget, over six consecutive runs.
+
+- Observation (M1): `hooks/hooks.posix.json` and `hooks/hooks.python.json` express the same
+  wiring in two different shapes — the event is the tail of a shell command line in one and
+  the last element of an `args` array in the other — so nothing was stopping them drifting
+  apart. The syntax gate now reduces both to the same structure and compares them, and
+  compares the generated `hooks/hooks.json` against whichever source produced it, which is
+  what makes "you forgot to re-run ./install.sh" a test failure rather than a silent no-op.
+
+- Observation (M2): anchoring the failure signal as `\berrors?\b` — which reads like the
+  careful choice — silently misses every Python failure. `ImportError`, `SyntaxError`,
+  `TypeError` and `ValueError` have no word boundary before "error", so the guard would
+  have stayed quiet for the single most common way a Python build fails. Caught by the test
+  for a long basename, which failed for a reason that had nothing to do with basenames.
+  The signal is now anchored only at the end (`errors?\b`), and the plan's own list is why:
+  it enumerated both `Error` and `SyntaxError`, which only makes sense if a suffix counts.
+
+- Observation (M2): the obvious optimisation for the removed gate — have `bin/ab-hook`
+  grep the payload for a failure word before waking the engine, the way `pre-tool` greps
+  for guard tokens — is slower, not faster, and measurably so. Bash's `read -r -d ''` is a
+  byte-at-a-time builtin loop, so slurping the payload alone costs 6.8 ms at 200 bytes,
+  18.6 ms at 30 KB and 84.8 ms at 200 KB, while the engine's flat cost is 38.8 ms however
+  large the output is. The crossover is around 5 KB, which is well below a real build's
+  output. So the plan's "always run the engine" is not merely the simpler choice, it is the
+  faster one for anything but a trivial command, and the idea can be retired rather than
+  left as a maybe.
+
+- Observation (M2): a read-only smoke test of the new path against the live bus — four real
+  sessions, real write logs, `AGENTBUS_DEBUG=1` — exited 0 and correctly produced no note.
+  The other live session had seven writes inside the window and all of them were named in
+  the synthetic failure output, but that session is working in a different repository, so
+  the same-repository filter suppressed them. The first real-data exercise of that filter
+  was an accident and it behaved.
+
+- Observation (M3): the milestone as written would have shipped an ownership guard that
+  almost never fired. `guard_file` is only reached when the shell fast path decides to wake
+  the engine, and for `Edit`/`Write` that decision is `grep -qF -f hot-for/<sid>` against
+  paths other sessions have *already written*. A declaration is precisely a statement about
+  files nobody has written yet, so the engine would have been woken only after the owner had
+  edited the file — one edit too late, which is the exact failure declaring scope up front
+  exists to prevent. Fixed by having `rebuild_hot` also write the fixed leading text of every
+  other session's declarations into `hot-for`, which reuses the existing grep instead of
+  adding new shell logic. The first falsification confirms it: dropping that one line makes
+  23 of 77 assertions fail.
+
+- Observation (M3): a test can pass because the fast path exited, not because the engine
+  agreed. "The owner writes freely" passed even with the self-exemption deleted, because a
+  session's own declarations are deliberately kept out of its own `hot-for` file, so the
+  fast path returned before the engine was consulted. On a host without bash — the Windows
+  entry point — the engine *is* consulted, and the owner would have been blocked by their
+  own declaration there and nowhere else. The suite now asserts the owner case through
+  `ab_engine` as well, and with that the falsification is caught. This is the second time
+  in this plan that a green assertion was measuring the wrong thing (see M1), and both
+  times the tell was the same: the assertion passed in a state where the feature was
+  obviously broken.
+
+- Observation (M3): adding a `record-write` to a test contaminated four later assertions,
+  which then passed or failed through the fifteen-minute reactive collision guard rather
+  than through ownership. Caught because one of them expected an allow and got a denial
+  quoting the wrong guard entirely. Fixtures that write state are shared state; the fix was
+  a dedicated file for that case and an assertion on *which* guard produced the block, not
+  merely that something did.
+
+- Observation (M4): the handoff could not be delivered in the two-session case — the common
+  one — and the bug was older than this milestone. The shell fast path gave up on every
+  gated event when `live-count` was not greater than one, and a session ending is precisely
+  what takes the count from two to one. So the departing session's own exit swallowed its
+  message: it was written to `events.jsonl` and the survivor's `PostToolBatch` never looked.
+  It was not lost for ever — `prompt-submit` is ungated, so it would surface at the human's
+  next prompt — but "at the next turn" is what the milestone promises and what a session
+  mid-work needs. The same hole applies to any `note` or `serve` event emitted just before
+  its author left. Fixed by exempting `post-batch` from the live-count gate and having it
+  ask the question that actually matters instead: is any live session behind the end of the
+  stream. `hook_post_batch` lost its matching Python-side gate for the same reason.
+
+- Observation (M4): a benchmark said that gate was worthless — 105 ms against 107 ms for
+  twenty calls — and the benchmark was measuring nothing. The patched copy of `bin/ab-hook`
+  had been dropped into a bare temporary directory, so `[ -x "$ENGINE" ] || exit 0` fired on
+  line 21 of both variants and every run was timing bash's startup. Re-run with the whole
+  plugin tree copied, the same comparison is 109 ms against 405 ms at a 65 KB payload, and
+  109 ms against 845 ms at 128 KB. The gate is worth keeping, and the test that guards it
+  now uses a payload large enough for the difference to exist: at 143 bytes the two are
+  indistinguishable, which is why the first version of that assertion passed against a
+  deliberately broken build.
+
+- Observation (M4): `matched/` cannot answer "how many commands did this session claim for",
+  which the plan offered as one of two ways to get that number. It holds one file per
+  repository and resource for the whole machine and its mtime records when that resource
+  last matched *anybody's* command. The counter lives in the session record instead.
+
+- Observation (M2, found while running the real acceptance): **Claude Code does not fire
+  `PostToolUse` when a tool call errors.** M2 was built on `PostToolUse` exactly as the plan
+  specifies, and it therefore never fired for the only thing it exists to catch — a failing
+  build. All 79 synthetic assertions passed, because they fed the engine payloads by hand.
+  In two real sessions, session B ran the build, saw the SyntaxError naming a file session A
+  had written seconds earlier, reported "No agent-bus message was shown", and set about
+  fixing it. Confirmed twice: `--include-hook-events` shows `PostToolUse:Bash` for a
+  successful command and no such event at all for a failing one, and an independent hook
+  installed through `--settings` recorded zero `PostToolUse` invocations for a batch whose
+  command exited 1. Claude Code 2.1.220.
+  It has a second consequence nobody had noticed: a guarded command that *fails* never
+  reached `hook_post_bash` either, so its automatic claim was never released and the other
+  session was blocked for the full fifteen-minute soft TTL. That bug predates M2.
+  Both are fixed by moving the work to `PostToolBatch`, whose payload carries `tool_calls`
+  with each call's `tool_response` whatever the outcome, and which fires either way.
+
+- Observation (M2): the synthetic suite could not have caught this. It fed `hook_post_bash`
+  the payloads the plan said it would receive, so it was testing the engine against an
+  assumption rather than against Claude Code. The lesson is narrow and worth keeping: a test
+  that constructs its own inputs verifies the code, and only a real session verifies that
+  the inputs are real. `tests/live/acceptance.sh` exists because of this.
+
+- Observation (M2/M3/M4, harness): asserting on what the model *said* measures how talkative
+  it felt like being. The cross-worktree ownership note passed on one run and failed on the
+  next with identical plugin behaviour, because the note is injected into the model's
+  context and nothing obliges the model to repeat it. `--include-hook-events` reports each
+  hook's own stdout, which is the plugin's actual output; the live harness asserts on that
+  for anything delivered as `additionalContext`, and on the tool result for denials, which
+  Claude Code does put in front of the model.
+
+- Observation (live harness): three facts about driving Claude Code that cost time to learn.
+  A session cannot be held alive across the orchestrating agent's own turns — the turn
+  latency exceeds any sleep worth waiting for, so the whole scenario has to run inside one
+  invocation. `claude -p --input-format stream-json` does **not** exit when its stdin is
+  closed. SIGTERM is a clean end: the SessionEnd hooks run, the session deregisters, and its
+  handoff is written — which is also why a killed session does not leak its ownership.
 
 ## Decision Log
 
@@ -120,6 +310,168 @@ fix it.
   for; denying it would be wrong and would train agents to distrust the tool. Inside one
   checkout it is a genuine overwrite.
   Date/Author: 2026-07-27, Ibrahim + Claude.
+
+- Decision (M1): the hook-output invariant — exit 0, print nothing or valid JSON — is
+  asserted inside the `ab_hook` helper rather than in each test, so every hook invocation
+  anywhere in the suite checks it and no test can forget to.
+  Rationale: it is the one failure mode that breaks other people's sessions rather than this
+  repository, and it is the kind of thing a test author only remembers to assert when they
+  are already thinking about it.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M1): assertion counts are kept in append-only files under the test's temporary
+  directory, not in shell variables.
+  Rationale: `out=$(ab_hook …)` runs the helper in a subshell, so a failure recorded in a
+  variable there is discarded when the subshell exits — the suite would have silently
+  under-reported exactly the failures that happen inside a captured hook call.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M1): `tests/test_serving.sh` skips itself, visibly, when neither `lsof` nor
+  `netstat` is on the host, rather than failing or quietly passing.
+  Rationale: attributing a listening port to a checkout is the one thing in this plugin that
+  genuinely needs an external tool. A skip that is printed and counted is honest; a green
+  line for a test that did not run is not.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M1): `tests/test_matcher.py` asserts that `git commit -m "restart uvicorn"`
+  matches the `worktree` resource and *not* `server`, rather than matching nothing at all.
+  Rationale: the plan's phrase "a commit message naming a tool matches nothing" is about the
+  tool named in the message. `git commit` legitimately claims the checkout it commits, which
+  is the whole reason the `worktree` resource exists, so asserting "nothing" would have been
+  asserting a bug.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M1): the pre-filter invariant is checked through bash's own `[[ =~ ]]` with
+  `nocasematch` set, in addition to Python's `re`.
+  Rationale: bash is what actually makes the decision in `bin/ab-hook`. A token that Python
+  matches and bash does not would be a guard that never fires — the same class of silent
+  failure as `768f183`, arrived at from a different direction.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M1): the suite writes to stdout only through the CLI verbs and the two functions
+  that emit hook JSON, and the syntax gate enforces that with an AST walk over `bin/agentbus`
+  (prints to `sys.stderr` are exempt, since stderr never reaches the session's parser).
+  Rationale: the invariant the plan states is easy to break by adding one debugging `print`
+  to a helper, and the damage is invisible until somebody's session breaks. Checking it
+  statically costs nothing and catches it before it ships.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M2): `interference_note` considers only sessions sharing this session's
+  `repo_key`. The plan said "every other live session".
+  Rationale: a session working an unrelated repository cannot have broken this build, so
+  naming its files is a coincidence presented as a cause — the exact false accusation the
+  milestone says is worse than silence. Sessions in a *different worktree of the same*
+  repository are still considered, because a shared dev server serving their checkout
+  genuinely does put their code in this session's failures. The delivery layer already
+  draws the line in the same place (`interesting_to` requires a matching repo).
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M2): a file the current session also wrote inside the window is dropped by
+  repository-relative path as well as by absolute path.
+  Rationale: two worktrees give the same file two absolute paths, so comparing only the
+  absolute one would tell an agent not to fix a file whose broken state may well be its
+  own doing — the one outcome that would make this feature actively harmful.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M2): `hook_post_bash` releases automatic claims before any of the new work and
+  regardless of `AGENTBUS_OFF` or the live count, and only the interference half is gated.
+  Rationale: the release is the second half of a claim this session already took. Skipping
+  it because the other session happened to end mid-command would strand a soft lock for
+  its full fifteen-minute TTL. `AGENTBUS_OFF` is a recovery switch for a misbehaving hook,
+  not a licence to leak state that is already on disk.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M2): the timestamp in the note uses `held_for(ts) + " ago"` rather than `ago(ts)`.
+  Rationale: `ago` collapses everything under a minute to "just now", and "40s ago" is the
+  shape the plan's own example asks for. The difference matters here: the note's whole claim
+  is that somebody is mid-edit *right now*, and "just now" is vaguer than the evidence is.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M3): a declaration containing no wildcard is read as a directory — `agentbus own
+  api` covers `api/` and everything under it, not a single file named `api`.
+  Rationale: that is what a person typing it means, and the alternative is a guard somebody
+  believes they have set which silently protects nothing. The plan already required the
+  `*`-crosses-`/` simplification to be stated rather than discovered; this is the same
+  argument applied to the other end of the syntax, and it is documented in both files.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M3): `glob_matches` uses `fnmatch.fnmatchcase` on a `/`-normalised path, not
+  `fnmatch.fnmatch`.
+  Rationale: `fnmatch` runs both arguments through `os.path.normcase`, which on Windows
+  rewrites `/` as `\` — in the glob as well as the path — so a declaration written with
+  forward slashes would match nothing at all on the one platform we cannot test.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M3): `own` and `disown` emit a `note`-kind event, and `own` calls
+  `refresh_derived` before returning.
+  Rationale: the plan asked for ownership to appear in the roster and in `status`, both of
+  which the other sessions only read when they start or when they ask. A declaration that
+  the others learn about at their next restart is not a declaration. `note` is already in
+  `DELIVERED_KINDS`, so it reaches their context at their next turn; the refresh is what
+  makes the fast path see it in the same second rather than at the declarer's next prompt.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M3): `ownership_verdict` considers only sessions sharing this session's
+  `repo_key`, and `guard_file` returns immediately after whichever of the two guards speaks
+  first.
+  Rationale: a glob is written against a repository root, so one from another project cannot
+  describe this file even when the text happens to fit. And two `note_ctx` calls would put
+  two JSON documents on stdout, which corrupts the session's view of the hook result — the
+  invariant this whole plugin is built on. There is now a test that both guards apply to one
+  edit and that exactly one hook result is printed.
+  Date/Author: 2026-07-27, Claude.
+
+- Decision (M4): the count of guarded commands is a counter in the session record, bumped in
+  `guard_bash` when a command actually takes something, rather than derived from `matched/`.
+  Rationale: the plan offered both and only one of them exists. See Surprises. The write is
+  one small atomic replace per guarded command, and it re-reads the record first so it does
+  not undo a concurrent `doing` or `name`.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (M4): the handoff also names the scopes the session had declared and is now
+  releasing, which is not in the plan's list of contents.
+  Rationale: a session blocked from `api/**` learning that `api/**` is now free is the most
+  immediately actionable line the summary can carry, it costs one line, and it comes from
+  state that is about to be deleted a few statements later.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (M4): `deliver` indents multi-line events under their own heading instead of
+  folding them into the existing one-line form.
+  Rationale: a handoff is inherently several lines. Folded, it runs into the sender and
+  timestamp and the one message worth reading becomes the one that gets skimmed.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (M4): `SessionEnd` emits the handoff *and* the existing `leave` event, rather
+  than replacing one with the other.
+  Rationale: `leave` is not in `DELIVERED_KINDS` — it is the log line `status` and `inbox`
+  read — and a handoff is not always written. Keeping both means the log stays complete for
+  sessions that leave quietly, and neither reader changes behaviour.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (M2, revised): the interference guard and the release of a failed command's
+  automatic claim live on `PostToolBatch`, not `PostToolUse` as the plan specified.
+  Rationale: `PostToolUse` does not fire for a tool call that errored, so the guard could
+  never see a failing build and a failing guarded command never gave its claim back. See
+  Surprises for the evidence. `PostToolBatch` fires either way and its payload carries every
+  call's `tool_response`. `PostToolUse` keeps the prompt release for commands that succeed,
+  because giving a resource back a few hundred milliseconds sooner is worth having.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (M2, revised): the fast path wakes the engine on `post-batch` only for a batch
+  that actually ran a Bash call, falling back to the cursor check otherwise.
+  Rationale: a batch of nothing but edits cannot have printed a build failure and cannot
+  have claimed anything, and an agent editing files produces a great many of those. It is an
+  exact test rather than a heuristic — the payload lists every call — and it is the
+  difference between ~22 ms and ~42 ms on every such batch while somebody else is live.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision: acceptance against real Claude Code sessions is a checked-in harness,
+  `tests/live/acceptance.sh`, rather than something done by hand once.
+  Rationale: it found a defect that 79 synthetic assertions could not, because the synthetic
+  ones fed the engine the payloads the plan *said* it would get. It has to be re-runnable
+  after anything that touches the hooks. It is kept out of `make test` because it needs a
+  logged-in CLI, costs real money and takes minutes.
+  Date/Author: 2026-07-28, Claude.
 
 ## Outcomes & Retrospective
 
@@ -674,6 +1026,34 @@ milestone removes a gate:
     two sessions, nothing shared touched       ~6 ms
     engine actually runs                       ~30 ms
 
+Re-measured after M2 as first written, on the same Mac (Python 3.14.3, best of three batches of twenty, while
+four sessions were live and the suite was running — so these are upper bounds):
+
+    alone, post-bash (live-count gate)          5.0 ms    unchanged
+    alone, pre-tool on a guarded command        5.1 ms    unchanged
+    two sessions, pre-tool, token gate misses   5.2 ms    unchanged
+    two sessions, post-bash                    38.8 ms    NEW: was ~5 ms without a claim
+    two sessions, pre-tool, engine + claim      42.0 ms    ~30 ms predicted, 42 measured
+
+Re-measured again after M2 was moved onto `PostToolBatch`, with the machine quiet:
+
+    alone, post-batch                           5.0 ms    unchanged
+    alone, post-bash                            5.0 ms    unchanged
+    two sessions, post-bash, nothing to release 5.2 ms    the auto-claim gate is back
+    two sessions, post-batch that ran a command 42.1 ms   NEW: one engine start per batch
+    two sessions, post-batch of edits only      ~22 ms    short-circuits; the cost is bash
+                                                          slurping a large payload, which is
+                                                          unavoidable — the session id is in it
+
+The 42 ms line is what M2 costs now. It is one engine start per tool *batch* rather than per
+Bash *call*, so a batch that runs three commands is cheaper than it was under the first
+design, and a batch that runs none falls back to the cursor check. The engine's cost is flat
+in the size of the command's output, which is why the shell-side pre-filter that would seem
+to avoid it does not (see Surprises & Discoveries).
+
+Numbers taken while three other Claude Code sessions were working measure about three times
+these. Anything here is a floor, not a typical figure.
+
 ## Interfaces and Dependencies
 
 No new third-party dependencies. The engine uses only the Python standard library and must
@@ -709,6 +1089,7 @@ New functions in `bin/agentbus`:
 New files:
 
     Makefile                     a `test` target only
+    tests/live/acceptance.sh     M2/M3/M4 against real Claude Code sessions (not in `make test`)
     tests/run.sh                 runner; isolates AGENTBUS_HOME; takes an optional filter
     tests/lib.sh                 assertions and fixture builders
     tests/test_matcher.py        argv matching and pre-filter invariant
