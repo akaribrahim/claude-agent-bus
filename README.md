@@ -70,8 +70,30 @@ locks, which is the right default for a project with nothing to contend for.
 
 ```bash
 cd your-repo
-agentbus init-repo     # writes .claude/agent-bus.json — edit it, then commit it
+agentbus init-repo     # reads the repo, writes .claude/agent-bus.json — check it, commit it
 ```
+
+The first run reads the repository instead of writing a template you have to
+fill in:
+
+```
+agent-bus: looked at this repository and found
+
+  server     :3000   bun run dev                    from package.json scripts.dev
+  db                 (no start command)             from docker-compose.yml (postgres:16)
+  e2e                implies server                 from playwright config
+  worktree           this checkout's tree and index
+```
+
+It reads `package.json` scripts and the lockfile that says which package manager
+runs them, `Makefile` targets, a `Procfile`, Django's `manage.py`, uvicorn or
+FastAPI in the Python dependencies, database images in a compose file, and
+Playwright/Cypress/Maestro. Every line says where it came from so you can check
+it. A detected database gets **no** `start`: agent-bus must never restart
+somebody's database. `--dry-run` prints without writing, `--force` overwrites.
+
+`why` and `hint` come out empty, deliberately — that is the part only you can
+write, and it is the part that stops an agent working around a block.
 
 ```json
 {

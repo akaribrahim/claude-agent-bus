@@ -128,8 +128,20 @@ resource — for the length of the command only.
 Guarding is per-repository and opt-in. Without a config you still get presence
 and messaging.
 
-    agentbus init-repo          # writes <repo>/.claude/agent-bus.json — commit it
-    agentbus init-repo --local  # machine-only override instead
+    agentbus init-repo          # reads the repo, writes <repo>/.claude/agent-bus.json
+    agentbus init-repo --dry-run  # print what it would write, write nothing
+    agentbus init-repo --local    # machine-only override instead
+    agentbus init-repo --force    # overwrite an existing config
+
+The first run reads the repository rather than guessing: `package.json` scripts
+and their lockfile, `Makefile` targets, a `Procfile`, Django's `manage.py`,
+uvicorn or FastAPI in the Python dependencies, database images in a compose
+file, and a Playwright/Cypress/Maestro setup. It tells you where every line came
+from, so you can check it. A database is never given a `start` — agent-bus must
+not restart somebody's database.
+
+`why` and `hint` come out empty on purpose. Filling them in is what stops an
+agent working around a block, and nothing generic can be written for you.
 
 A resource entry:
 

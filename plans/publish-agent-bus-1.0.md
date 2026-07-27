@@ -102,8 +102,15 @@ fix it.
 - [x] Real-session acceptance harness — `tests/live/acceptance.sh [m2|m3|m4|all]`, 32
       assertions against Claude Code driven through its own CLI, on an isolated bus.
       Not part of `make test`: it costs real model calls and takes minutes.
-- [ ] (M5) Zero-config detection — `agentbus init-repo` reads the repository and drafts a
+- [x] (M5) Zero-config detection — `agentbus init-repo` reads the repository and drafts a
       real config with real ports and start commands.
+      Done 2026-07-28. `make test` → 9 files, 430 assertions, 0 failures.
+      `bin/agentbus`: `CONFIG_README`, `WORKTREE_RESOURCE`, `FRAMEWORK_PORTS`, `DB_IMAGES`,
+      `lit`, `read_text`, `port_in`, `package_manager`, `unique_name`, `detect_node`,
+      `detect_make`, `detect_procfile`, `detect_python`, `detect_db`, `detect_e2e`,
+      `detect_resources`, `detection_summary`, rewritten `cli_init_repo` with `--force` and
+      `--dry-run`; `TEMPLATE` deleted. New `tests/test_detect.sh` (62 assertions).
+      SKILL.md and README.md updated. Both acceptance cases in Validation run verbatim.
 - [ ] (M6) Package and publish 1.0 — marketplace entry, rewritten README with a real
       transcript, CHANGELOG, clean-clone install verified on this Mac.
 - [ ] (M7) Community distribution — submissions to plugin directories, a short write-up
@@ -279,6 +286,17 @@ fix it.
   invocation. `claude -p --input-format stream-json` does **not** exit when its stdin is
   closed. SIGTERM is a clean end: the SessionEnd hooks run, the session deregisters, and its
   handoff is written — which is also why a killed session does not leak its ownership.
+
+- Observation (M5): `re.escape` escapes the hyphen, so a detected `redis-cli` pattern came
+  out as `\bredis\-cli\b` and `react-scripts` as `react\-scripts`. Correct, unnecessary
+  outside a character class, and unreadable in a file whose entire purpose is to be read and
+  corrected by a person. Replaced with a `lit()` helper that escapes only what is special.
+
+- Observation (M5): the obvious pattern for a detected framework, `\bnext\b`, would claim
+  the dev server for `git commit -m "bump next to 15"` — the token has no whitespace, so
+  `command_targets` keeps it and the word boundary at the hyphen matches. The detector now
+  pins the subcommand the script actually runs, `\bnext\s+dev\b`, the way a hand-written
+  config would. There is a test for the commit message specifically.
 
 ## Decision Log
 
@@ -471,6 +489,35 @@ fix it.
   ones fed the engine the payloads the plan *said* it would get. It has to be re-runnable
   after anything that touches the hooks. It is kept out of `make test` because it needs a
   logged-in CLI, costs real money and takes minutes.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (M5): a detected database is written with no `start`, and the detector will not
+  add one.
+  Rationale: the plan says so and the reason is worth restating — the guard exists because a
+  reseed or a destructive migration invalidates the rows the other sessions are holding, and
+  taking the service down to prove ownership would be the same damage by another route. The
+  test asserts the absence, and the falsification that adds a `start` is caught.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (M5): `why` and `hint` are written empty on every detected resource, including
+  `worktree` and `db`, where a generic sentence would have been easy and true.
+  Rationale: the plan's closing message tells the reader they are empty and that filling
+  them in is what stops an agent working around a block. Pre-filling them with plausible
+  prose would let the reader skip the one step that matters, and the message would be a lie.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (M5): the plan lists a fixed set of `db` patterns; the detector writes the client
+  for the images it actually found, plus the migration patterns, rather than all of them.
+  Rationale: guarding `psql` in a repository whose only database is Redis is a pattern that
+  can never match, which is exactly the silent failure `doctor`'s "NEVER matched" line
+  exists to report. Fewer, accurate patterns beat a complete list of guesses.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (M5): each detector names its resource, and `unique_name` resolves collisions, so
+  a monorepo with a Node dev server and a FastAPI app gets `server` and `api` rather than one
+  of them silently winning.
+  Rationale: the plan's list of detectors can plainly fire more than once in one repository,
+  and a draft that quietly drops half of what it found is worse than one that names both.
   Date/Author: 2026-07-28, Claude.
 
 ## Outcomes & Retrospective

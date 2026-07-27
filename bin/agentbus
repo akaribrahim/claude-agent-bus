@@ -2801,78 +2801,374 @@ def cli_disown(args):
          "no longer owns %s" % ", ".join(dropped))
 
 
-TEMPLATE = {
-    "_readme": "Delete what you do not have and fix the ports and commands. "
-               "patterns: regexes matched against each command's argv. "
-               "port/cwd/start/ready: let agent-bus own the service, so it can "
-               "say which checkout it is serving and move it to yours. "
-               "implies: resources a command needs indirectly. "
-               "scope 'worktree': contended only within one checkout. "
-               "why/hint: shown verbatim when a command is blocked — this is "
-               "where the knowledge that stops a workaround goes.",
-    "resources": [
-        {"name": "server", "desc": "the dev server on :3000",
-         "why": "A reloader watches the tree it was started in, so a request to "
-                "that port exercises whichever checkout owns it — not yours.",
-         "port": 3000,
-         "start": "npm run dev",
-         "ready": "curl -sf localhost:3000/",
-         "patterns": [r"\bnodemon\b", r"\bnext\s+dev\b", r":3000\b"]},
-        {"name": "db", "desc": "the shared development database",
-         "why": "One database for every worktree. Additive migrations are fine; a "
-                "reseed or a destructive migration invalidates the fixtures and "
-                "ids the other sessions are holding.",
-         "hint": "Say exactly what loses rows before you run it: agentbus post \"...\"",
-         "patterns": [r"\balembic\b", r"\bpsql\b", r"\bprisma\s+migrate\b",
-                      r"\bmake\s+seed"]},
-        {"name": "e2e", "desc": "the end-to-end runner and whatever it drives",
-         "why": "One browser or device on this machine, and the run only means "
-                "something against the server serving your checkout.",
-         "implies": ["server"],
-         "patterns": [r"\bplaywright\b", r"\bcypress\b", r"\bmaestro\b"]},
-        {"name": "worktree", "desc": "this checkout's working tree and git index",
-         "scope": "worktree",
-         "why": "Two sessions in ONE checkout ruin each other through the tree, "
-                "not through edits: one runs git stash and the other's files "
-                "change mid-task; git add -A sweeps their half-finished work "
-                "into a commit.",
-         "patterns": [r"\bgit\s+(checkout|switch|stash|reset|rebase|add|commit)\b",
-                      r"\b(npm|pnpm|yarn|bun)\s+(install|ci)\b"]},
-    ],
+CONFIG_README = (
+    "Delete what you do not have and fix the ports and commands. "
+    "patterns: regexes matched against each command's argv. "
+    "port/cwd/start/ready: let agent-bus own the service, so it can "
+    "say which checkout it is serving and move it to yours. "
+    "implies: resources a command needs indirectly. "
+    "scope 'worktree': contended only within one checkout. "
+    "why/hint: shown verbatim when a command is blocked — this is "
+    "where the knowledge that stops a workaround goes."
+)
+
+WORKTREE_RESOURCE = {
+    "name": "worktree",
+    "desc": "this checkout's working tree and git index",
+    "why": "",
+    "scope": "worktree",
+    "patterns": [r"\bgit\s+(checkout|switch|stash|reset|rebase|add|commit)\b",
+                 r"\b(npm|pnpm|yarn|bun)\s+(install|ci)\b"],
+    "_from": "",   # not detected from anything: every repository has one
 }
+
+# The port a framework listens on when nobody told it otherwise. Only defaults
+# that are actually defaults — a wrong guess here writes a config that silently
+# guards nothing, which is worse than a resource the reader has to fill in.
+FRAMEWORK_PORTS = (
+    ("next", 3000), ("nuxt", 3000), ("nest", 3000), ("remix", 3000),
+    ("react-scripts", 3000), ("vite", 5173), ("astro", 4321), ("expo", 8081),
+)
+
+DB_IMAGES = (("postgres", "psql"), ("postgis", "psql"), ("mysql", "mysql"),
+             ("mariadb", "mysql"), ("redis", "redis-cli"), ("mongo", "mongosh"))
+
+
+def lit(word):
+    """A regex matching this literal word.
+
+    Not `re.escape`: that escapes the hyphen in `redis-cli` and
+    `react-scripts`, which is correct, unnecessary outside a character class,
+    and unreadable in a file somebody is being asked to read and edit."""
+    return re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", word or "")
+
+
+# ------------------------------------------------------------- detection ----
+#
+# A stranger installs the plugin, opens two sessions, and nothing happens,
+# because their repository has no config and the old `init-repo` wrote a generic
+# template they had to fill in by hand. Most people conclude it is broken and
+# stop. So the first run reads the repository instead of guessing, and what it
+# writes has this project's real ports and real start commands in it.
+#
+# Everything here is best-effort and silent about what it cannot find. A draft
+# with three of the four resources is useful; an exception during `init-repo` is
+# not. The reader is told where every line came from so they can check it.
+
+def read_text(path, limit=200000):
+    try:
+        with open(path, "r") as fh:
+            return fh.read(limit)
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def port_in(text):
+    """The port a command line pins, or None."""
+    for pat in (r"--port[=\s]+(\d{2,5})\b", r"\bPORT\s*=\s*(\d{2,5})\b",
+                r"-p\s+(\d{2,5})\b", r"\blocalhost:(\d{2,5})\b",
+                r"--inspect-port[=\s]+(\d{2,5})\b"):
+        m = re.search(pat, text or "")
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def package_manager(root):
+    for lock, form in (("bun.lock", "bun run"), ("bun.lockb", "bun run"),
+                       ("pnpm-lock.yaml", "pnpm run"), ("yarn.lock", "yarn"),
+                       ("package-lock.json", "npm run")):
+        if os.path.exists(os.path.join(root, lock)):
+            return form
+    return "npm run"
+
+
+def unique_name(base, taken):
+    if base not in taken:
+        return base
+    for n in range(2, 20):
+        cand = "%s%d" % (base, n)
+        if cand not in taken:
+            return cand
+    return base
+
+
+def detect_node(root, taken):
+    pkg = read_text(os.path.join(root, "package.json"))
+    if not pkg:
+        return []
+    try:
+        scripts = (json.loads(pkg) or {}).get("scripts") or {}
+    except ValueError:
+        return []
+    runner = package_manager(root)
+    out = []
+    for key in ("dev", "start", "serve"):
+        script = scripts.get(key)
+        if not isinstance(script, str) or not script.strip():
+            continue
+        port = port_in(script)
+        framework, framework_pattern = "", ""
+        for name, default in FRAMEWORK_PORTS:
+            m = re.search(r"\b%s\b(\s+([A-Za-z][\w-]*))?" % lit(name), script)
+            if not m:
+                continue
+            framework = name
+            port = port or default
+            # `\bnext\b` on its own would claim the server for `git commit -m
+            # next-release`. Pin the subcommand the script actually runs when
+            # there is one, the way a hand-written config would.
+            framework_pattern = (r"\b%s\s+%s\b" % (lit(name), lit(m.group(2)))
+                                 if m.group(2) else r"\b%s\b" % lit(name))
+            break
+        name = unique_name("server", taken)
+        taken.add(name)
+        patterns = []
+        if framework_pattern:
+            patterns.append(framework_pattern)
+        patterns.append(r"\b(npm|pnpm|yarn|bun)\s+(run\s+)?%s\b" % lit(key))
+        if port:
+            patterns.append(r":%d\b" % port)
+        res = {"name": name, "desc": "the dev server%s" % (" on :%d" % port if port else ""),
+               "why": "", "hint": "",
+               "start": "%s %s" % (runner, key), "patterns": patterns,
+               "_from": "package.json scripts.%s" % key}
+        if port:
+            res["port"] = port
+        out.append(res)
+        break   # one server per package.json; dev wins over start wins over serve
+    return out
+
+
+def detect_make(root, taken):
+    body = read_text(os.path.join(root, "Makefile"))
+    if not body:
+        return []
+    out = []
+    lines = body.split("\n")
+    for i, line in enumerate(lines):
+        m = re.match(r"^([A-Za-z0-9_.-]+)\s*:(?!=)", line)
+        if not m:
+            continue
+        target = m.group(1)
+        if target not in ("dev", "dev-api", "dev-web", "serve", "start", "run"):
+            continue
+        recipe = []
+        for nxt in lines[i + 1:]:
+            if nxt.startswith("\t") or nxt.startswith("    "):
+                recipe.append(nxt)
+            elif nxt.strip():
+                break
+        port = port_in("\n".join(recipe))
+        base = "server" if target in ("dev", "serve", "start", "run") else target
+        name = unique_name(base, taken)
+        taken.add(name)
+        patterns = [r"\bmake\s+%s\b" % lit(target)]
+        if port:
+            patterns.append(r":%d\b" % port)
+        res = {"name": name,
+               "desc": "what `make %s` starts%s" % (target, " on :%d" % port if port else ""),
+               "why": "", "hint": "", "start": "make %s" % target,
+               "patterns": patterns, "_from": "Makefile target `%s`" % target}
+        if port:
+            res["port"] = port
+        out.append(res)
+    return out
+
+
+def detect_procfile(root, taken):
+    body = read_text(os.path.join(root, "Procfile"))
+    if not body:
+        return []
+    out = []
+    for line in body.split("\n"):
+        m = re.match(r"^([A-Za-z0-9_-]+)\s*:\s*(\S.*)$", line.strip())
+        if not m:
+            continue
+        proc, command = m.group(1), m.group(2)
+        port = port_in(command)
+        name = unique_name(proc, taken)
+        taken.add(name)
+        head = os.path.basename((command.split() or [""])[0])
+        patterns = [r"\b%s\b" % lit(head)] if head else []
+        if port:
+            patterns.append(r":%d\b" % port)
+        res = {"name": name, "desc": "the `%s` process" % proc, "why": "", "hint": "",
+               "start": command, "patterns": patterns or [r"\b%s\b" % lit(proc)],
+               "_from": "Procfile"}
+        if port:
+            res["port"] = port
+        out.append(res)
+    return out
+
+
+def detect_python(root, taken):
+    out = []
+    manage = os.path.join(root, "manage.py")
+    if os.path.exists(manage):
+        has_settings = any(
+            os.path.exists(os.path.join(root, d, "settings.py"))
+            for d in ([""] + [e for e in os.listdir(root)
+                              if os.path.isdir(os.path.join(root, e))][:60]))
+        if has_settings:
+            name = unique_name("server", taken)
+            taken.add(name)
+            out.append({"name": name, "desc": "the Django dev server on :8000",
+                        "why": "", "hint": "", "port": 8000,
+                        "start": "python manage.py runserver",
+                        "patterns": [r"\bmanage\.py\s+runserver\b", r":8000\b"],
+                        "_from": "manage.py next to a settings.py"})
+    deps = (read_text(os.path.join(root, "pyproject.toml"))
+            + read_text(os.path.join(root, "requirements.txt")))
+    if re.search(r"\b(uvicorn|fastapi)\b", deps, re.I):
+        name = unique_name("api", taken)
+        taken.add(name)
+        out.append({"name": name, "desc": "the ASGI app on :8000", "why": "", "hint": "",
+                    "port": 8000, "patterns": [r"\buvicorn\b", r":8000\b"],
+                    "_from": "uvicorn/fastapi in %s" % (
+                        "pyproject.toml" if os.path.exists(
+                            os.path.join(root, "pyproject.toml")) else "requirements.txt")})
+    return out
+
+
+def detect_db(root, taken):
+    """A `db` resource, and deliberately without a `start`.
+
+    agent-bus must never restart somebody's database: the point of the guard is
+    that a reseed or a destructive migration invalidates the rows the other
+    sessions are holding, and taking the service down to prove it would be the
+    same damage by another route."""
+    for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml",
+                 "compose.yaml"):
+        body = read_text(os.path.join(root, name))
+        if not body:
+            continue
+        images = re.findall(r"^\s*image:\s*[\"']?([^\s\"']+)", body, re.M)
+        found, clients = [], []
+        for image in images:
+            for key, client in DB_IMAGES:
+                if key in image.lower():
+                    found.append(image)
+                    if client not in clients:
+                        clients.append(client)
+                    break
+        if not found:
+            continue
+        res_name = unique_name("db", taken)
+        taken.add(res_name)
+        patterns = [r"\b%s\b" % lit(c) for c in clients]
+        patterns += [r"\balembic\b", r"\bprisma\s+migrate\b", r"\bmake\s+seed\b"]
+        return [{"name": res_name, "desc": "the shared development database",
+                 "why": "", "hint": "", "patterns": patterns,
+                 "_from": "%s (%s)" % (name, ", ".join(found[:3]))}]
+    return []
+
+
+def detect_e2e(root, taken, servers):
+    import glob as globmod
+    found = []
+    for pattern, tool in (("playwright.config.*", "playwright"),
+                          ("cypress.config.*", "cypress"),
+                          ("wdio.conf.*", "wdio")):
+        if globmod.glob(os.path.join(root, pattern)):
+            found.append(tool)
+    if os.path.isdir(os.path.join(root, "maestro")):
+        found.append("maestro")
+    if not found:
+        return []
+    name = unique_name("e2e", taken)
+    taken.add(name)
+    res = {"name": name, "desc": "the end-to-end runner and whatever it drives",
+           "why": "", "hint": "",
+           "patterns": [r"\b%s\b" % lit(t) for t in found],
+           "_from": ", ".join("%s config" % t for t in found)}
+    if servers:
+        res["implies"] = list(servers)
+    return [res]
+
+
+def detect_resources(root):
+    """Draft resource entries read from the repository's own files."""
+    taken = set()
+    out = []
+    for finder in (detect_node, detect_make, detect_procfile, detect_python):
+        try:
+            out.extend(finder(root, taken))
+        except Exception:
+            pass   # a malformed file is not a reason for init-repo to fail
+    try:
+        out.extend(detect_db(root, taken))
+    except Exception:
+        pass
+    servers = [r["name"] for r in out if r.get("port") or r.get("start")]
+    try:
+        out.extend(detect_e2e(root, taken, servers))
+    except Exception:
+        pass
+    worktree = dict(WORKTREE_RESOURCE)
+    worktree["name"] = unique_name("worktree", taken)
+    out.append(worktree)
+    return out
+
+
+def detection_summary(resources):
+    lines = ["agent-bus: looked at this repository and found", ""]
+    for res in resources:
+        port = ":%d" % res["port"] if res.get("port") else ""
+        if res.get("start"):
+            what = res["start"]
+        elif res.get("implies"):
+            what = "implies %s" % ", ".join(res["implies"])
+        elif res["name"].startswith("worktree"):
+            what = "this checkout's tree and index"
+        else:
+            what = "(no start command)"
+        origin = res.get("_from", "")
+        lines.append(("  %-10s %-7s %-30s %s" % (
+            res["name"], port, what, "from " + origin if origin else "")).rstrip())
+    return "\n".join(lines)
 
 
 def cli_init_repo(args):
     ensure_dirs()
     root, repo_key, label, _ = git_facts(os.getcwd())
     local = flag(args, "--local")
+    dry = flag(args, "--dry-run")
     if local:
         path = os.path.join(REPOS, "%s.json" % repo_key)
     else:
         path = os.path.join(root, ".claude", "agent-bus.json")
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-        except OSError:
-            pass
-    if os.path.exists(path):
-        print("already configured: %s" % path)
+    if os.path.exists(path) and not flag(args, "--force") and not dry:
+        print("already configured: %s\nPass --force to overwrite it." % path)
         return
-    cfg = dict(TEMPLATE)
-    cfg["label"] = label
+
+    resources = detect_resources(root)
+    print(detection_summary(resources))
+    print()
+
+    cfg = {"_readme": CONFIG_README, "label": label,
+           "resources": [{k: v for k, v in r.items() if not k.startswith("_")}
+                         for r in resources]}
     if local:
         cfg["repo_key"] = repo_key
+    if dry:
+        print("--dry-run: nothing was written. This is what it would be:\n")
+        print(json.dumps(cfg, indent=2))
+        return
     try:
-        with open(path, "w") as fh:
-            json.dump(cfg, fh, indent=2)
-            fh.write("\n")
-    except OSError as exc:
-        print("could not write %s: %s" % (path, exc), file=sys.stderr)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError:
+        pass
+    if not write_json_pretty(path, cfg):
+        print("could not write %s" % path, file=sys.stderr)
         sys.exit(1)
     refresh_derived()
-    print("wrote %s\nEdit it: delete what you do not have, fix the ports." % path)
-    if not local:
-        print("Commit it — then every machine and every collaborator gets the "
-              "same guards. Use --local for a machine-only override.")
+    print("Wrote %s. Read it, fix anything wrong, then commit it so every\n"
+          "worktree and machine gets the same guards. `why` and `hint` are "
+          "empty — filling\nthem in is what stops an agent working around a "
+          "block." % path)
+    if local:
+        print("\nThis one is machine-local and overrides the committed config by name.")
 
 
 def cli_register(_args):
