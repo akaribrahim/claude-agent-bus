@@ -120,10 +120,11 @@ fix it.
       the installer's location check, `doctor`'s command line, and `git_facts` on an unborn
       HEAD. Both halves of the Validation acceptance run from a temporary `HOME` against a
       real `git clone`.
-      **Not done:** the acceptance names `claude plugin marketplace add
-      akaribrahim/claude-agent-bus`, which needs these commits pushed. Everything was
-      verified against a local clone of this repository instead, which is what that command
-      would fetch. Pushing is the author's call.
+      Pushed 2026-07-28, and the acceptance then run verbatim against GitHub: `claude
+      plugin marketplace add akaribrahim/claude-agent-bus` followed by `claude plugin
+      install agent-bus` in a temporary `HOME` installs 1.0.0 enabled with its hooks wired,
+      and `agentbus doctor` in a fresh shell reports hooks installed, the command on PATH
+      and no resources configured.
 - [ ] (M7) Community distribution — submissions to plugin directories, a short write-up
       and a recorded demo.
 - [ ] (post-1.0) Windows verification on the author's work machine; README claim upgraded
