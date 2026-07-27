@@ -84,6 +84,40 @@ them instead:
 Different worktrees editing the same file is fine and only noted; that is what
 branches are for.
 
+## Declaring what is yours
+
+That guard is reactive: it fires once somebody has already written the file,
+which is one edit too late. Say it up front instead — before you start on a
+subsystem, not after somebody has wandered into it:
+
+    agentbus own "api/**" --why "rewriting the auth flow"
+    agentbus own --list                     who has declared what
+    agentbus disown "api/**" | --all
+
+Other sessions **in your checkout** are then denied edits under that scope, with
+your name and your reason. Sessions in **another worktree** are warned instead —
+they are on their own branch, so nothing is being overwritten, and blocking them
+would be wrong. Add `--strict` when the parallel edit would still be painful to
+merge and you want it stopped there too.
+
+Two things worth knowing before you rely on it:
+
+- **`*` crosses directory separators here.** `src/*` covers `src/a/b/c.ts`, not
+  just `src/c.ts`. A glob with no wildcard at all means the directory and
+  everything under it, so `agentbus own api` is the whole of `api/`.
+- **Quote the glob.** Unquoted, your shell expands it before agentbus sees it.
+
+Globs are matched against the path relative to the repository root, so one
+declaration means the same thing in every worktree. Ownership dies with the
+session that declared it — nothing to clean up, and nothing left behind to
+puzzle the next agent.
+
+The way through, when you genuinely need a file somebody owns, is the same as
+for any other block: ask them, then take the file explicitly once they agree.
+
+    agentbus post --to <agent> "I need api/routes.py — what are you doing with it?"
+    agentbus claim 'file:/abs/path.py' --why "agreed with <agent>"
+
 The same checkout also shares a working tree and a git index. `git checkout`,
 `stash`, `reset`, `add`, `commit` and package installs are serialised against
 other sessions **in that same checkout** when the repo declares a `worktree`
@@ -108,6 +142,21 @@ A resource entry:
 | `implies` | resources a command needs indirectly |
 | `scope: "worktree"` | contended only by sessions in the *same* checkout |
 | `hint` | extra text shown when blocking |
+
+## Handing over
+
+When your session ends, agent-bus writes a summary into the other sessions'
+context by itself — branch, worktree, what you wrote, what you claimed, and in
+particular **any service you started that is still running and still serving
+your tree**. You do not have to do anything for that.
+
+Do it by hand when you are about to be interrupted or compacted, or when there
+is something the state on disk cannot show:
+
+    agentbus handoff --note "auth rewrite is half done; token.py is not wired up yet"
+
+A session that only read things hands over nothing, and a session that is the
+last one on the machine hands over nothing. Both would be noise.
 
 ## Escape hatch
 

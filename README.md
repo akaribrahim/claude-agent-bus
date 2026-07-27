@@ -33,6 +33,9 @@ fix it.
 | **Presence** | Every session registers itself. New ones open knowing who else is live, in which worktree, on which branch, and what is currently held. |
 | **Locks** | A command touching a declared shared resource takes it **for the length of that command** and gives it straight back. If another live session has it, the command is denied with the holder, the worktree and what they are doing. |
 | **Service ownership** | Separately from the lock, agent-bus tracks *which checkout each service is actually serving* — and blocks a command that would talk to somebody else's tree, even when the lock is free. `agentbus serve <res>` stops that service and starts it from your worktree. |
+| **Declared ownership** | A session can say `agentbus own "api/**"` before it starts. Other sessions in that checkout are then denied edits under it, with the owner's name and reason; sessions in another worktree are warned instead, since they are on their own branch. Ownership dies with the session, so there is nothing to clean up. |
+| **Interference guard** | When a Bash command fails and its output names a file another live session wrote in the last few minutes, the agent is told — by name, with the timestamp — not to fix it and to re-run in a moment. This is the one that stops an agent "helpfully" repairing somebody else's half-finished edit. |
+| **Handoff** | When a session ends, a summary of what it did is written into the surviving sessions' context: branch, files written, resources claimed, and above all any service it started that is *still running and still serving its tree*. A session that only read things leaves quietly. |
 | **Messages** | An append-only stream. What agents write to each other is delivered into their context at their next turn; lock churn is not, because nobody can act on it. |
 
 ## Install
@@ -122,12 +125,27 @@ agentbus inbox                        everything addressed to this repo / to you
 agentbus run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
 agentbus serve <res>                  restart a service so it serves YOUR worktree
 agentbus serves                       which checkout each service is answering for
+agentbus handoff [--note ".."]        summarise what you did, for the others
+agentbus own "<glob>" [--why ".."] [--strict]   declare part of the tree yours
+agentbus own --list                   who has declared what
+agentbus disown "<glob>" | --all
 agentbus claim <res> [--why ".."] [--steal]
 agentbus wait <res> [--timeout 90]    queue for a held resource
 agentbus release <res> | --all
 agentbus doing "..."                  one line others see in their roster
 agentbus init-repo | doctor | whois | forget <agent|--stale> | install
 ```
+
+Ownership globs are matched against the path **relative to the repository
+root**, so one declaration means the same thing in every worktree. Two
+properties to know rather than discover:
+
+- **`*` crosses directory separators.** `src/*` covers `src/a/b/c.ts`. A glob
+  with no wildcard means that directory and everything under it, so
+  `agentbus own api` is the whole of `api/`. This is `fnmatch`, not shell
+  globbing, and the difference is deliberate — claiming `src/*` and getting only
+  its immediate children is the surprising direction.
+- **Quote the glob**, or your shell expands it before agentbus sees it.
 
 `agentbus doctor` reports what is installed, which config is in force, which
 services are running and for whom, and which resources have **never matched a
@@ -138,10 +156,11 @@ command** — the silent failure mode when a port moves.
 | Hook | Job |
 |---|---|
 | `SessionStart` | Register; inject the roster, held resources, running services, and anything unread. |
-| `UserPromptSubmit`, `PostToolBatch` | Heartbeat; deliver new messages mid-work. |
-| `PreToolUse` | Take the resources a Bash command needs, or deny it — because someone holds them, or because the service is serving another checkout. Block an `Edit`/`Write` to a file another session is editing in the same checkout. |
-| `PostToolUse` | Give back what the command took; record what was written. |
-| `SessionEnd` | Release everything and deregister. |
+| `UserPromptSubmit` | Heartbeat; deliver new messages between turns. |
+| `PreToolUse` | Take the resources a Bash command needs, or deny it — because someone holds them, or because the service is serving another checkout. Block an `Edit`/`Write` to a file another session has declared theirs, or is editing right now in the same checkout. |
+| `PostToolUse` | Give back what a command took as soon as it finishes; record what was written. |
+| `PostToolBatch` | Deliver messages; give back what a *failed* command took, since `PostToolUse` does not fire for those; and if something in the batch failed and blamed a file somebody else is mid-edit in, say so. |
+| `SessionEnd` | Write the handoff, release everything, deregister. |
 
 State lives in `~/.claude/agent-bus/` — sessions, cursors, locks, service
 ownership, an append-only `events.jsonl`, and the derived files the shell fast

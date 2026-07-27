@@ -31,13 +31,51 @@ esac
 # ---- gated events -----------------------------------------------------------
 [ -d "$BUS" ] || exit 0
 
+# Is any live session behind the end of the event stream? Builtins only, and it
+# runs only on the path where we are otherwise about to give up, so it costs two
+# reads in the case that matters.
+#
+# Cursors of sessions that no longer exist are skipped: one left behind by a
+# crash would lag for ever and hold this gate open on every batch.
+unread() {
+  local seq=0 cur c s
+  [ -r "$BUS/events.seq" ] && read -r seq < "$BUS/events.seq"
+  [ "${seq:-0}" != 0 ] || return 1
+  for c in "$BUS"/cursors/*; do
+    [ -f "$c" ] || continue
+    s="${c##*/}"
+    [ -f "$BUS/sessions/$s.json" ] || continue
+    cur=0
+    read -r cur < "$c"
+    [ "$cur" = "$seq" ] || return 0
+  done
+  return 1
+}
+
 live=0
 [ -r "$BUS/live-count" ] && read -r live < "$BUS/live-count"
-[ "${live:-0}" -gt 1 ] 2>/dev/null || exit 0
+if [ "${live:-0}" -gt 1 ] 2>/dev/null; then
+  :
+else
+  # Alone: nothing can collide, nothing needs claiming, and every event below
+  # short-circuits — with one exception. A session that has just left may have
+  # handed something over that nobody has read yet, and its own exit is what
+  # took the count back to one. Dropping the message there would lose exactly
+  # the handoff the two-session case exists to deliver, which is the common one.
+  case "$ev" in
+    post-batch) unread || exit 0 ;;
+    *) exit 0 ;;
+  esac
+fi
 
 case "$ev" in
   post-bash)
     # Only worth a look if some command actually took a lock automatically.
+    #
+    # This event cannot carry the interference guard, however tempting it looks:
+    # Claude Code does not fire PostToolUse when a tool call errors, so it never
+    # arrives for a failing build — which is the only case that guard is about.
+    # That work happens on post-batch instead.
     set -- "$BUS"/autoclaim/*
     [ -e "$1" ] || exit 0
     exec "$ENGINE" hook post-bash
@@ -58,10 +96,23 @@ case "$ev" in
     # `date` subprocess and no write of any content.
     [ -n "$sid" ] && : > "$BUS/sessions/$sid.beat" 2>/dev/null
     [ -n "$sid" ] || exit 0
-    seq=0; cur=0
-    [ -r "$BUS/events.seq" ] && read -r seq < "$BUS/events.seq"
-    [ -r "$BUS/cursors/$sid" ] && read -r cur < "$BUS/cursors/$sid"
-    [ "$seq" = "$cur" ] && exit 0
+    # While somebody else is live the engine runs on every batch that ran a
+    # command. It is not only asking "are there messages waiting" any more: it
+    # reads what those commands printed, and gives back what the ones that
+    # failed took, because a failing command never reaches PostToolUse at all.
+    # One engine start per batch, in place of one per Bash call, which is what
+    # this cost while the guard lived on post-bash.
+    #
+    # A batch that ran no Bash call cannot have printed anybody's build failure
+    # and cannot have claimed anything, so it falls back to the cursor check.
+    # This is an exact test, not a heuristic: the payload lists every call.
+    bash_re='"tool_name"[[:space:]]*:[[:space:]]*"Bash"'
+    if [ "${live:-0}" -le 1 ] || ! [[ "$payload" =~ $bash_re ]]; then
+      seq=0; cur=0
+      [ -r "$BUS/events.seq" ] && read -r seq < "$BUS/events.seq"
+      [ -r "$BUS/cursors/$sid" ] && read -r cur < "$BUS/cursors/$sid"
+      [ "$seq" = "$cur" ] && exit 0
+    fi
     "$ENGINE" hook post-batch <<< "$payload"
     exit $?
     ;;

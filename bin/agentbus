@@ -63,6 +63,7 @@ HOTFOR = os.path.join(BUS, "hot-for")
 WRITES = os.path.join(BUS, "writes")
 LOCKS = os.path.join(BUS, "locks")
 AUTOCLAIM = os.path.join(BUS, "autoclaim")
+OWNS = os.path.join(BUS, "owns")
 SERVES = os.path.join(BUS, "serves")
 MATCHED = os.path.join(BUS, "matched")
 REPOS = os.path.join(BUS, "repos")
@@ -79,6 +80,30 @@ HARD_TTL = 45 * 60        # explicitly claimed lock
 COLLIDE_WINDOW = 15 * 60  # two sessions editing one file inside this window collide
 MAX_DELIVER = 12          # events shown at once; the rest are summarised
 ROTATE_AT = 5000          # events.jsonl lines before trimming
+
+# Deliberately shorter than COLLIDE_WINDOW: a collision is about two sessions
+# working the same file at all, while this is about a failure happening RIGHT
+# NOW because somebody is mid-edit. Blaming an edit from ten minutes ago for a
+# build that just broke is a guess, and a wrong guess here is worse than silence.
+INTERFERENCE_WINDOW = 5 * 60
+MAX_INTERFERENCE_FILES = 3
+
+# What a failed command looks like from the outside: the shapes compilers, test
+# runners and interpreters use.
+#
+# `errors?\b` is anchored only at the end, deliberately. Anchoring the front as
+# well reads better and is wrong: Python names its failures ImportError,
+# SyntaxError, TypeError, ValueError, and a leading `\b` misses every one of
+# them. The cost of the loose end is that "0 errors" also matches — which does
+# not matter here, because a note still requires the output to name a file
+# another live session wrote in the last five minutes.
+FAILURE_SIGNAL = re.compile(
+    r"errors?\b"             # error, ERROR, ImportError, error TS2304, error[E0432]
+    r"|\bfailed\b|\bfail:"    # FAILED, FAIL:
+    r"|\btraceback\b|\bexception\b"
+    r"|\bcannot find\b|\bundefined reference\b|\bpanic:"
+    r"|✗|✘",
+    re.I)
 
 # Command heads that cannot start a service or reach a port, so a guarded token
 # appearing after one of them is a mention, not a use: `grep -r uvicorn api/`.
@@ -114,7 +139,7 @@ def now():
 
 def ensure_dirs():
     for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS, AUTOCLAIM,
-              SERVES, MATCHED):
+              OWNS, SERVES, MATCHED):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -284,6 +309,20 @@ def git_facts(cwd):
     return root, key, label, branch
 
 
+def repo_relative(path, root):
+    """`path` as the repository sees it, or "" when it is outside `root`.
+
+    This is the form two worktrees of one repository have in common: the same
+    file has two absolute paths and one repository-relative one, so anything
+    that has to mean the same thing in both checkouts — an ownership glob, a
+    filename in a build failure — is written and compared in this form."""
+    try:
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root or "/"))
+    except ValueError:
+        return ""   # different drives on Windows
+    return "" if rel.startswith("..") else rel.replace(os.sep, "/")
+
+
 def agent_name_from(branch, label, taken):
     base = (branch or "").split("/")[-1].strip() or label or "agent"
     if base in ("HEAD", "main", "master", "develop"):
@@ -428,6 +467,7 @@ def forget_session(sid):
     release_all(sid, quiet=True)
     for p in (os.path.join(SESSIONS, "%s.json" % sid), beat_path(sid),
               os.path.join(CURSORS, sid), os.path.join(HOTFOR, sid),
+              os.path.join(OWNS, "%s.json" % sid),
               os.path.join(WRITES, "%s.log" % sid)):
         try:
             os.unlink(p)
@@ -495,19 +535,29 @@ def sweep_locks(sessions):
 
 
 def rebuild_hot(sessions):
-    """hot-for/<sid> lists absolute paths other live sessions wrote recently. The
-    pre-tool fast path greps the tool payload against it and stops there when
-    nothing matches, which is the usual case."""
+    """hot-for/<sid> is what the pre-tool fast path greps a tool payload against
+    before deciding whether to wake the engine, and it holds two kinds of thing:
+
+      - absolute paths other live sessions wrote recently, for the reactive
+        collision guard;
+      - the fixed leading text of anything they have declared they own.
+
+    The second is not an optimisation, it is what makes ownership work at all.
+    Without it the engine is woken only once the owner has already written the
+    file, so a declaration would be enforced one edit too late — which is
+    exactly the failure declaring scope up front is meant to prevent."""
     cutoff = now() - COLLIDE_WINDOW
-    per = {}
+    per, owned = {}, {}
     for s in sessions:
         per[s["sid"]] = recent_writes(s["sid"], cutoff)
+        owned[s["sid"]] = [glob_prefix(d.get("glob")) for d in load_owns(s["sid"])]
     for s in sessions:
         paths = set()
-        for other, writes in per.items():
+        for other in per:
             if other == s["sid"]:
                 continue
-            paths.update(p for _, p in writes)
+            paths.update(p for _, p in per[other])
+            paths.update(owned[other])
         write_text(os.path.join(HOTFOR, s["sid"]),
                    "".join(p + "\n" for p in sorted(paths)))
 
@@ -616,7 +666,7 @@ def rotate_events():
 # automatic claims lasting one command, "took 'api'" / "released 'api'" would be
 # two context injections per scoped run carrying nothing anyone can act on. They
 # stay in the stream for `status` and `inbox`; they just do not get delivered.
-DELIVERED_KINDS = {"note", "serve"}
+DELIVERED_KINDS = {"note", "serve", "handoff"}
 
 
 def interesting_to(rec, me):
@@ -655,7 +705,15 @@ def deliver(me, advance=True):
     for r in shown:
         who = r.get("agent", "?")
         direct = " → you" if r.get("to") else ""
-        lines.append("  - %s%s, %s: %s" % (who, direct, ago(r.get("ts")), r.get("text", "")))
+        text = r.get("text", "")
+        if "\n" in text:
+            # A handoff is inherently several lines; folding it into the
+            # one-line form would run the whole summary together and make the
+            # thing that is worth reading the thing that gets skimmed.
+            body = "\n".join("      " + ln for ln in text.split("\n"))
+            lines.append("  - %s%s, %s:\n%s" % (who, direct, ago(r.get("ts")), body))
+        else:
+            lines.append("  - %s%s, %s: %s" % (who, direct, ago(r.get("ts")), text))
     head = "agent-bus — %d new message%s from other sessions:" % (
         len(mine), "" if len(mine) == 1 else "s")
     if len(mine) > len(shown):
@@ -780,6 +838,298 @@ def held_by(sid):
     except OSError:
         pass
     return out
+
+
+# ------------------------------------------------------------- ownership ----
+#
+# A lock says "I am using this right now". Ownership says "this part of the tree
+# is mine for the next while — do not drift into it".
+#
+# The file guard that already exists is reactive: it blocks a write to a file
+# another session touched in the last fifteen minutes. That is one edit too
+# late, and it cannot express the thing people running several agents actually
+# need, which is to say up front what an agent must NOT touch. Ownership is
+# declared, enforced, and dies with the session that declared it — nobody has to
+# remember to clean it up, and nobody has to maintain a "never touch" list by
+# hand in CLAUDE.md.
+
+def owns_path(sid):
+    return os.path.join(OWNS, "%s.json" % sid)
+
+
+def load_owns(sid):
+    rec = read_json(owns_path(sid)) or {}
+    globs = rec.get("globs")
+    return globs if isinstance(globs, list) else []
+
+
+def save_owns(sid, globs):
+    if globs:
+        return write_json(owns_path(sid), {"globs": globs})
+    try:
+        os.unlink(owns_path(sid))
+    except OSError:
+        pass
+    return True
+
+
+def normalise_glob(glob, root=None):
+    """A declaration in the form everything else compares against: repository-
+    relative, forward slashes, no leading or trailing separator. An absolute
+    path inside the worktree is accepted and converted, because that is what
+    tab-completion produces."""
+    glob = (glob or "").strip().replace(os.sep, "/")
+    if root and os.path.isabs(glob):
+        rel = repo_relative(glob, root)
+        if rel:
+            glob = rel
+    return glob.strip("/")
+
+
+def glob_matches(glob, rel):
+    """Does this declaration cover this repository-relative path?
+
+    `fnmatch`, not pathlib globbing, and the difference is deliberate: here `*`
+    crosses directory separators, so `src/*` covers `src/a/b.ts`. Somebody
+    claiming `src/*` means the subtree, and the surprising direction would be
+    the other one. It is a simplification and it is documented in SKILL.md and
+    README.md rather than left to be discovered.
+
+    A declaration with no wildcard at all is read as a directory: `agentbus own
+    api` is what a person types when they mean the whole of `api/`, and owning
+    exactly one file named `api` and nothing under it would be a silent no-op —
+    the worst possible outcome for a guard somebody thought they had set."""
+    import fnmatch
+    glob = normalise_glob(glob)
+    rel = (rel or "").replace(os.sep, "/")
+    if not glob or not rel:
+        return False
+    if not any(ch in glob for ch in "*?["):
+        return rel == glob or rel.startswith(glob + "/")
+    # fnmatchcase, not fnmatch: fnmatch normalises case *and* separators through
+    # os.path.normcase, which on Windows turns the `/` in a glob into `\` and
+    # stops it matching anything at all.
+    return fnmatch.fnmatchcase(rel, glob)
+
+
+def glob_prefix(glob):
+    """The fixed leading text of a declaration — what the shell fast path can
+    grep a tool payload for before deciding to wake the engine.
+
+    Empty when the declaration starts with a wildcard. `grep -F` reads an empty
+    pattern as one that matches everything, which is the right answer: a
+    declaration that cannot be pre-filtered must not become a declaration that
+    is never enforced."""
+    glob = normalise_glob(glob)
+    cut = len(glob)
+    for ch in "*?[":
+        i = glob.find(ch)
+        if i >= 0:
+            cut = min(cut, i)
+    return glob[:cut]
+
+
+def owners_of(path, me, sessions):
+    """[(session, declaration)] for every live session that has declared this
+    path — this session included, so callers can see their own claim."""
+    real = os.path.realpath(path)
+    out = []
+    for s in sessions:
+        # A glob is written against a repository root, so one from another
+        # project cannot describe this file even if the text happens to fit.
+        if s.get("repo_key") != me.get("repo_key"):
+            continue
+        rel = repo_relative(real, me.get("root")) or \
+            repo_relative(real, s.get("root"))
+        if not rel:
+            continue
+        for dec in load_owns(s["sid"]):
+            if glob_matches(dec.get("glob"), rel):
+                out.append((s, dec))
+                break
+    return out
+
+
+def ownership_text(me, path, owner, dec, same_tree):
+    rel = repo_relative(os.path.realpath(path), me.get("root")) or path
+    lines = [
+        'agent-bus: BLOCKED. %s has declared this part of the tree theirs.'
+        % owner.get("agent"),
+        "",
+        "  file    : %s" % rel,
+        "  owner   : %s   branch %s" % (owner.get("agent"),
+                                        owner.get("branch") or "-"),
+        "  claimed : %s, %s ago" % (dec.get("glob"), held_for(dec.get("at"))),
+    ]
+    if dec.get("why"):
+        lines.append('  reason  : "%s"' % dec["why"])
+    if same_tree:
+        lines.append("  worktree: %s   (the same one you are in)"
+                     % short_path(owner.get("root", "")))
+    else:
+        # Without this the agent can see it is in a different checkout, knows
+        # that means no overwrite, and concludes the bus is wrong — which is how
+        # an agent learns to route around it.
+        lines += [
+            "  worktree: %s   (not yours)" % short_path(owner.get("root", "")),
+            "",
+            "  They marked this scope --strict, which means they want it left "
+            "alone even",
+            "  from another checkout — usually because they are restructuring "
+            "it and any",
+            "  parallel edit will be painful to merge.",
+        ]
+    lines += [
+        "",
+        "Ask before taking it:",
+        '  agentbus post --to %s "I need %s — what are you doing with it?"'
+        % (owner.get("agent"), rel),
+        "",
+        "Once they have agreed, take the file itself and the block lifts:",
+        "  agentbus claim 'file:%s' --why \"agreed with %s\""
+        % (os.path.realpath(path), owner.get("agent")),
+        "",
+        "(Or the human can rerun the edit with AGENTBUS_OFF=1 in front of it.)",
+    ]
+    return "\n".join(lines)
+
+
+def ownership_verdict(me, path, sessions):
+    """("deny"|"note"|"", text) for an Edit/Write against declared ownership.
+
+    Denies inside one checkout and warns across worktrees, because two sessions
+    editing one path in two branches is what branches are for — denying it would
+    be wrong, and a guard that is wrong is a guard agents learn to work around.
+    Inside one checkout it is a genuine overwrite. `--strict` is how an owner
+    says the cross-worktree case matters to them too."""
+    owners = owners_of(path, me, sessions)
+    if not owners:
+        return "", ""
+    if any(s["sid"] == me.get("sid") for s, _ in owners):
+        return "", ""   # my own declaration is not a block on me
+    mine_root = os.path.realpath(me.get("root") or "")
+    same_tree = [(s, d) for s, d in owners
+                 if os.path.realpath(s.get("root") or "") == mine_root]
+    if same_tree:
+        s, dec = same_tree[0]
+        return "deny", ownership_text(me, path, s, dec, True)
+    strict = [(s, d) for s, d in owners if d.get("strict")]
+    if strict:
+        s, dec = strict[0]
+        return "deny", ownership_text(me, path, s, dec, False)
+    s, dec = owners[0]
+    rel = repo_relative(os.path.realpath(path), me.get("root")) or path
+    return "note", (
+        "agent-bus: %s has declared '%s' theirs on %s%s. You are in a different "
+        "worktree, so this edit is allowed and nothing is being overwritten — "
+        "but you are both changing %s, and that lands at merge time. Worth a "
+        "word first if it is more than a line:\n"
+        '  agentbus post --to %s "I am also editing %s"'
+        % (s.get("agent"), dec.get("glob"), s.get("branch") or "-",
+           (' — "%s"' % dec["why"]) if dec.get("why") else "",
+           rel, s.get("agent"), rel))
+
+
+# ---------------------------------------------------------------- handoff ----
+#
+# A session ends and what it learned goes with it. The next agent re-derives it
+# from the diff, or does not, and repeats the work. Everything needed to write
+# the summary is already on disk — this is only the part nobody would think to
+# write down, assembled at the one moment somebody is guaranteed not to be
+# around to do it by hand.
+
+def bump_guarded(me):
+    """Count the commands this session took a shared resource for.
+
+    This is the one number in a handoff that cannot be reconstructed afterwards.
+    `matched/` looked like the place to get it and is not: it holds one file per
+    repository and resource for the whole machine, and its mtime says when that
+    resource last matched *anybody's* command, not how many of them were this
+    session's."""
+    sid = me.get("sid")
+    if not sid:
+        return
+    path = os.path.join(SESSIONS, "%s.json" % sid)
+    rec = read_json(path)
+    if not rec:
+        return
+    # Re-read rather than mutate the caller's copy: the record is also written
+    # by `doing`, `name` and re-registration, and writing back a stale dict here
+    # would silently undo whichever of those happened most recently.
+    rec["guarded"] = int(rec.get("guarded", 0) or 0) + 1
+    write_json(path, rec)
+
+
+def still_serving(me):
+    """[(resource, root)] — services this session started that are still up.
+
+    These outlive the session, which is the founding bug this whole plugin
+    exists for: the process keeps answering on the port long after the session
+    that started it has gone, and the next request from any worktree is silently
+    served that dead session's code. It is the most useful line in a handoff."""
+    out = []
+    mine = os.path.realpath(me.get("root") or "")
+    try:
+        names = os.listdir(SERVES)
+    except OSError:
+        return out
+    for name in sorted(names):
+        rec = read_json(os.path.join(SERVES, name))
+        if not rec or rec.get("repo") != me.get("repo_key"):
+            continue
+        if os.path.realpath(rec.get("root") or "") != mine:
+            continue
+        if not pid_alive(rec.get("pid")):
+            continue
+        out.append((rec.get("resource"), rec.get("root")))
+    return out
+
+
+def did_something(me):
+    """Whether this session is worth writing a handoff about at all.
+
+    A summary from a session that only read things is noise, and noise is
+    precisely what makes the useful ones get skimmed past."""
+    if recent_writes(me.get("sid"), 0):
+        return True
+    if int(me.get("guarded", 0) or 0):
+        return True
+    return bool(held_by(me.get("sid")))
+
+
+def handoff_text(me, note=""):
+    """A summary of what this session did, for the sessions that outlive it."""
+    sid = me.get("sid")
+    seen, files = set(), []
+    for _, path in reversed(recent_writes(sid, 0)):   # newest first
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        files.append(repo_relative(real, me.get("root")) or short_path(path))
+    lines = ["agent-bus: %s finished on %s (%s)." % (
+        me.get("agent"), me.get("branch") or "-", short_path(me.get("root", "")))]
+    if me.get("doing"):
+        lines.append("  was doing : %s" % me["doing"])
+    if files:
+        lines.append("  wrote     : %d file%s, most recently %s"
+                     % (len(files), "" if len(files) == 1 else "s",
+                        ", ".join(files[:10])))
+    guarded = int(me.get("guarded", 0) or 0)
+    if guarded:
+        lines.append("  claimed   : %d command%s took a shared resource"
+                     % (guarded, "" if guarded == 1 else "s"))
+    for res, root in still_serving(me):
+        lines.append("  still up  : '%s' is STILL RUNNING and still serving %s — "
+                     "it will answer with THAT tree until somebody runs "
+                     "`agentbus serve %s`" % (res, short_path(root), res))
+    owned = [d.get("glob") for d in load_owns(sid)]
+    if owned:
+        lines.append("  freed     : %s — declared theirs, now nobody's"
+                     % ", ".join(owned))
+    if note:
+        lines.append("  note      : %s" % note)
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------- serving ----
@@ -1307,6 +1657,9 @@ def roster_text(me, sessions):
                 ago(s.get("beat")), idle))
             if s.get("doing"):
                 lines.append("      doing: %s" % s["doing"])
+            owned = owns_summary(s["sid"])
+            if owned:
+                lines.append("      owns: %s" % owned)
     if other:
         labels = sorted({s.get("repo_label", "?") for s in other})
         lines.append("Elsewhere on this Mac: %d session%s (%s)." % (
@@ -1360,6 +1713,33 @@ def short_path(p):
     return p.replace(HOME, "~") if p else "?"
 
 
+def owns_summary(sid, limit=4):
+    """One line naming what a session has declared, for the roster."""
+    decs = load_owns(sid)
+    if not decs:
+        return ""
+    shown = ", ".join("%s%s" % (d.get("glob", "?"),
+                                " (strict)" if d.get("strict") else "")
+                      for d in decs[:limit])
+    if len(decs) > limit:
+        shown += ", +%d more" % (len(decs) - limit)
+    return shown
+
+
+def ownership_text_block(me, sessions):
+    """The ownership section of `status` and of the session-start banner."""
+    lines = []
+    for s in sessions:
+        summary = owns_summary(s["sid"], limit=8)
+        if not summary or s.get("repo_key") != me.get("repo_key"):
+            continue
+        who = "you" if s["sid"] == me.get("sid") else s.get("agent")
+        lines.append("  - %s: %s" % (who, summary))
+    if not lines:
+        return ""
+    return "Declared ownership:\n" + "\n".join(lines)
+
+
 RULES = (
     "How this works: a command that touches a shared resource takes it for the "
     "length of that command. You hear about it only when someone else holds it, "
@@ -1368,6 +1748,11 @@ RULES = (
     "`agentbus serve <res>` to point a service at your worktree, "
     "`agentbus run <res> -- <cmd>` to do that and run one command, "
     "`agentbus post \"...\"` to tell the others something they cannot see."
+    "\n\nOne rule that is not enforced by a block: if a build or test failure "
+    "names files you did not edit, do not fix them. Another session is probably "
+    "mid-edit and the error will disappear on its own — wait and re-run. If it "
+    "persists, ask them (`agentbus post --to <agent> \"...\"`) rather than "
+    "editing. Fix only files you own."
 )
 
 
@@ -1469,18 +1854,73 @@ def hook_prompt_submit(payload):
         "hookEventName": "UserPromptSubmit", "additionalContext": text}}))
 
 
+def batch_bash_output(payload):
+    """Everything the Bash calls in this batch printed.
+
+    This is where the interference guard has to read from, and not from
+    PostToolUse, because **PostToolUse does not fire when a tool call errors** —
+    which is every single case this guard exists for. Verified against Claude
+    Code 2.1.220: a batch whose Bash command exits non-zero produces
+    PreToolUse and PostToolBatch and no PostToolUse at all. PostToolBatch
+    carries `tool_calls`, each with its `tool_response`, whatever the outcome.
+
+    Only Bash calls are read. A Read of a file that happens to contain the word
+    "error" is not a failing build, and treating it as one would produce an
+    accusation out of a coincidence."""
+    calls = payload.get("tool_calls")
+    if not isinstance(calls, list):
+        return ""
+    parts = []
+    for call in calls:
+        if not isinstance(call, dict) or call.get("tool_name") != "Bash":
+            continue
+        text = response_text(call.get("tool_response"))
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def release_batch_claims(me, payload):
+    """Give back what the commands in this batch took.
+
+    PostToolUse releases a claim the moment its command finishes, but it never
+    runs for a command that failed — so without this, a failing guarded command
+    would hold the resource for its full soft TTL and block the other session
+    for a quarter of an hour."""
+    calls = payload.get("tool_calls")
+    if not isinstance(calls, list):
+        return
+    for call in calls:
+        if isinstance(call, dict):
+            release_autoclaim(me, call.get("tool_use_id"))
+
+
 def hook_post_batch(payload):
-    if os.environ.get("AGENTBUS_OFF") or read_int(LIVEFILE, 0) < 2:
+    # Deliberately not gated on the live count. What matters is whether there is
+    # anything this session has not been shown, and the two are not the same
+    # thing: a session that ends hands over on its way out, and its exit is what
+    # drops the count. `deliver` reads a cursor and a counter and returns "" when
+    # there is nothing, which is the usual case and is cheap.
+    if os.environ.get("AGENTBUS_OFF"):
         return
     sid, me = current_session(payload)
     if not me:
         return
     touch_beat(sid)
+    release_batch_claims(me, payload)
+    blocks = []
+    if read_int(LIVEFILE, 0) >= 2:
+        note = interference_note(me, batch_bash_output(payload), load_sessions())
+        if note:
+            blocks.append(note)
     text = deliver(me)
-    if not text:
+    if text:
+        blocks.append(text)
+    if not blocks:
         return
     print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PostToolBatch", "additionalContext": text}}))
+        "hookEventName": "PostToolBatch",
+        "additionalContext": "\n\n".join(blocks)}}))
 
 
 def deny(reason):
@@ -1528,20 +1968,142 @@ def remember_autoclaim(me, tool_use_id, names):
                {"sid": me.get("sid"), "repo": me.get("repo_key"), "resources": names})
 
 
-def hook_post_bash(payload):
-    """Release what the finished command took automatically."""
-    sid, me = current_session(payload)
-    tool_use_id = payload.get("tool_use_id")
-    if not tool_use_id:
+def response_text(tool_response):
+    """Everything a finished Bash call printed, as one string.
+
+    The shape varies — a dict of stdout/stderr, or a bare string — and a hook
+    that assumes one of them raises on the other, which would silently disable
+    this check on whichever host disagreed."""
+    if isinstance(tool_response, str):
+        text = tool_response
+    elif isinstance(tool_response, dict):
+        parts = [tool_response.get(k) for k in
+                 ("stdout", "stderr", "output", "error", "content")]
+        text = "\n".join(p for p in parts if isinstance(p, str) and p)
+    else:
+        return ""
+    if len(text) > 200000:
+        # Compilers put the failure at the top and test runners at the bottom,
+        # so keep both ends rather than an arbitrary prefix.
+        text = text[:100000] + "\n" + text[-100000:]
+    return text
+
+
+def output_mentions(text, path, rel):
+    """Does this output actually name that file?
+
+    The basename is allowed only when it is long enough and carries an
+    extension. `x.ts` appears in the error message of every TypeScript file in
+    the project, and `main` appears in half of all output; matching on those
+    would produce an accusation from a coincidence."""
+    if path and path in text:
+        return True
+    if rel and rel in text:
+        return True
+    base = os.path.basename(path or "")
+    return len(base) >= 6 and "." in base and base in text
+
+
+def interference_note(me, tool_response, sessions):
+    """Text warning that a failure names another live session's in-flight files,
+    or "" when nothing applies.
+
+    This is the part of the plugin no amount of documentation can replace: the
+    agent reading a build failure cannot tell that the broken file belongs to
+    somebody else who is halfway through editing it, and its instinct is to fix
+    it. Only the bus knows who touched what and when.
+
+    Conservative on purpose. Two independent conditions must both hold — the
+    command must look like it failed, and its output must name a file another
+    live session in this repository wrote in the last few minutes. A false
+    accusation is worse than silence: an agent that catches the bus being wrong
+    about ownership is an agent that starts working around it."""
+    text = response_text(tool_response)
+    if not text or not FAILURE_SIGNAL.search(text):
+        return ""
+    cutoff = now() - INTERFERENCE_WINDOW
+
+    # Anything this session also touched inside the window is dropped: the
+    # failure may legitimately be its own, and telling an agent not to fix its
+    # own broken edit is the one mistake that would make this feature harmful.
+    ours = set()
+    for _, path in recent_writes(me.get("sid"), cutoff):
+        ours.add(os.path.realpath(path))
+        rel = repo_relative(path, me.get("root"))
+        if rel:
+            ours.add(rel)
+
+    found = {}
+    for s in sessions:
+        if s["sid"] == me.get("sid"):
+            continue
+        # A session in a different repository cannot have broken this build, so
+        # naming it would be a coincidence dressed up as a cause.
+        if s.get("repo_key") != me.get("repo_key"):
+            continue
+        seen = set()
+        for ts, path in reversed(recent_writes(s["sid"], cutoff)):
+            real = os.path.realpath(path)
+            if real in seen:
+                continue
+            seen.add(real)
+            rel = repo_relative(path, s.get("root"))
+            if real in ours or (rel and rel in ours):
+                continue
+            if not output_mentions(text, path, rel):
+                continue
+            shown = rel or short_path(path)
+            if shown not in found or ts > found[shown][1]:
+                found[shown] = (s.get("agent"), ts)
+    if not found:
+        return ""
+
+    ordered = sorted(((p, a, t) for p, (a, t) in found.items()),
+                     key=lambda f: -f[2])[:MAX_INTERFERENCE_FILES]
+    who = ordered[0][1]
+    base = os.path.basename(ordered[0][0])
+    lines = ["agent-bus: this failure names files another live session is "
+             "editing right now:"]
+    for shown, agent, ts in ordered:
+        lines.append("  %s — %s, %s ago" % (shown, agent, held_for(ts)))
+    lines += [
+        "Do not fix them. That session is mid-edit and the error is probably "
+        "transient;",
+        "re-run the command in a moment. If it persists, ask rather than edit:",
+        '  agentbus post --to %s "your edit to %s breaks my build — done soon?"'
+        % (who, base),
+        "Fix only files you own.",
+    ]
+    return "\n".join(lines)
+
+
+def release_autoclaim(me, tool_use_id):
+    """Give back what one command took automatically."""
+    if not tool_use_id or not me:
         return
     rec = read_json(autoclaim_path(tool_use_id))
     forget_autoclaim(tool_use_id)
-    if not rec or not me or rec.get("sid") != me.get("sid"):
+    if not rec or rec.get("sid") != me.get("sid"):
         return
     for name in rec.get("resources", []):
         lock = load_lock(me.get("repo_key"), name)
-        if lock and lock.get("sid") == me.get("sid") and lock.get("mode") == "soft":
+        if lock and lock.get("sid") == me.get("sid") \
+                and lock.get("mode") == "soft":
             do_release(me, name, quiet=True)
+
+
+def hook_post_bash(payload):
+    """Give a finished command's claim back as soon as it finishes.
+
+    The interference check is deliberately NOT here. This event does not fire
+    when a tool call errors, which is every case that check exists for — so it
+    lives in PostToolBatch, where the output arrives whatever the outcome, and
+    where the same batch's claims are released again for the commands that
+    failed and never reached this hook at all."""
+    sid, me = current_session(payload)
+    if not me:
+        return
+    release_autoclaim(me, payload.get("tool_use_id"))
 
 
 def lock_name(me, res):
@@ -1660,6 +2222,8 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
             break
         if not blocked:
             remember_autoclaim(me, payload_tool_use_id, taken)
+            if taken:
+                bump_guarded(me)
             verdict, text = serving_check(me, hits)
             if verdict == "deny":
                 for name in taken:
@@ -1752,6 +2316,17 @@ def guard_file(me, path, sessions):
                     held_for(mine.get("acquired_at")), mine.get("why") or "-",
                     holder.get("agent"), path))
             return
+    # Declared ownership comes before the reactive check: it is the whole point
+    # of declaring one that the block does not wait for somebody to write the
+    # file first. At most one of these speaks — two note_ctx calls would put two
+    # JSON documents on stdout and corrupt the session's view of the hook.
+    verdict, text = ownership_verdict(me, path, sessions)
+    if verdict == "deny":
+        deny(text)
+        return
+    if verdict == "note":
+        note_ctx(text)
+        return
     cutoff = now() - COLLIDE_WINDOW
     same_tree, same_repo = [], []
     for s in sessions:
@@ -1804,6 +2379,12 @@ def hook_session_end(payload):
         return
     rec = read_json(os.path.join(SESSIONS, "%s.json" % sid))
     if rec and len(load_sessions()) > 1:
+        rec["sid"] = sid
+        # Before forget_session, which deletes the writes log and the ownership
+        # record the summary is assembled from.
+        if did_something(rec):
+            emit(sid, rec.get("agent"), rec.get("repo_key"), "handoff",
+                 handoff_text(rec))
         emit(sid, rec.get("agent"), rec.get("repo_key"), "leave", "session ended")
     forget_session(sid)
     refresh_derived()
@@ -1858,6 +2439,9 @@ def cli_status(_args):
     lk = locks_text(me, sessions)
     print(lk if lk else "No shared resources declared for this repo "
                         "(`agentbus init-repo` to add some).")
+    owned = ownership_text_block(me, sessions)
+    if owned:
+        print("\n" + owned)
     recent = read_events(after=max(0, read_int(SEQFILE, 0) - 15))
     if recent:
         print("\nRecent:")
@@ -1890,7 +2474,7 @@ def positional(args):
             skip = False
             continue
         if a.startswith("--"):
-            if a in ("--why", "--to", "--timeout", "--as"):
+            if a in ("--why", "--to", "--timeout", "--as", "--note"):
                 skip = True
             continue
         out.append(a)
@@ -2109,6 +2693,112 @@ def cli_doing(args):
     me["doing"] = " ".join(positional(args))[:160]
     write_json(os.path.join(SESSIONS, "%s.json" % me["sid"]), me)
     print("noted")
+
+
+def cli_handoff(args):
+    """Hand over deliberately, rather than waiting for the session to end.
+
+    Worth running before a long compaction or when you are about to be
+    interrupted: the automatic one at SessionEnd only fires if the session ends
+    the way it is supposed to."""
+    me = need_me()
+    note = opt(args, "--note", "") or " ".join(positional(args))
+    text = handoff_text(me, note)
+    print(text)
+    others = [s for s in load_sessions()
+              if s["sid"] != me["sid"] and s.get("repo_key") == me.get("repo_key")]
+    if not others:
+        print("\n(nobody else is live in this repo, so this went nowhere)")
+        return
+    emit(me["sid"], me["agent"], me["repo_key"], "handoff", text)
+    print("\nsent to %d session%s" % (len(others), "" if len(others) == 1 else "s"))
+
+
+def cli_own(args):
+    """Declare a part of the tree yours. The one thing here that is not a lock:
+    it is not about a command that is running now, it is about where the other
+    agents should not be working for the next while."""
+    me = need_me()
+    sessions = load_sessions()
+    if flag(args, "--list"):
+        shown = 0
+        for s in sessions:
+            summary = owns_summary(s["sid"], limit=20)
+            if not summary or s.get("repo_key") != me.get("repo_key"):
+                continue
+            shown += 1
+            print("%-18s %s%s" % (s.get("agent"), summary,
+                                  "   (you)" if s["sid"] == me["sid"] else ""))
+        if not shown:
+            print("nobody in this repo has declared anything")
+        return
+    pos = positional(args)
+    if not pos:
+        print('usage: agentbus own "<glob>" [...] [--why "..."] [--strict]\n'
+              "       agentbus own --list\n\n"
+              "Quote the glob, or the shell expands it before agentbus sees it.",
+              file=sys.stderr)
+        sys.exit(1)
+    why = opt(args, "--why", "")
+    strict = flag(args, "--strict")
+    decs = load_owns(me["sid"])
+    added = []
+    for raw in pos:
+        glob = normalise_glob(raw, me.get("root"))
+        if not glob:
+            continue
+        decs = [d for d in decs if d.get("glob") != glob]
+        decs.append({"glob": glob, "why": why, "at": now(), "strict": strict})
+        added.append(glob)
+    if not added:
+        print("nothing to own", file=sys.stderr)
+        sys.exit(1)
+    if not save_owns(me["sid"], decs):
+        print("could not record that", file=sys.stderr)
+        sys.exit(1)
+    refresh_derived(sessions)   # the fast path filters on this; make it live now
+    print("you now own:")
+    for d in decs:
+        print("  %-28s %s%s" % (d.get("glob"), d.get("why") or "",
+                                "  [strict]" if d.get("strict") else ""))
+    others = [s for s in sessions
+              if s["sid"] != me["sid"] and s.get("repo_key") == me.get("repo_key")]
+    if others:
+        print("\nSessions in this checkout are now blocked from editing these; "
+              "in another\nworktree they are warned instead%s."
+              % (" — except --strict, which blocks there too" if strict else ""))
+        emit(me["sid"], me["agent"], me["repo_key"], "note",
+             "owns %s%s%s" % (", ".join(added), " [strict]" if strict else "",
+                              (' — ' + why) if why else ""))
+    else:
+        print("\nNobody else is live in this repo, so nothing is blocked yet.")
+
+
+def cli_disown(args):
+    me = need_me()
+    decs = load_owns(me["sid"])
+    if not decs:
+        print("you own nothing")
+        return
+    if flag(args, "--all"):
+        dropped = [d.get("glob") for d in decs]
+        keep = []
+    else:
+        pos = positional(args)
+        if not pos:
+            print('usage: agentbus disown "<glob>" | --all', file=sys.stderr)
+            sys.exit(1)
+        wanted = {normalise_glob(p, me.get("root")) for p in pos}
+        dropped = [d.get("glob") for d in decs if d.get("glob") in wanted]
+        keep = [d for d in decs if d.get("glob") not in wanted]
+    if not dropped:
+        print("not yours: %s" % ", ".join(positional(args)), file=sys.stderr)
+        sys.exit(1)
+    save_owns(me["sid"], keep)
+    refresh_derived()
+    print("released %s" % ", ".join(dropped))
+    emit(me["sid"], me["agent"], me["repo_key"], "note",
+         "no longer owns %s" % ", ".join(dropped))
 
 
 TEMPLATE = {
@@ -2368,6 +3058,7 @@ COMMANDS = {
     "status": cli_status, "whois": cli_whois, "claim": cli_claim,
     "release": cli_release, "wait": cli_wait, "post": cli_post,
     "note": cli_post, "inbox": cli_inbox, "run": cli_run, "name": cli_name,
+    "own": cli_own, "disown": cli_disown, "handoff": cli_handoff,
     "doing": cli_doing, "init-repo": cli_init_repo, "doctor": cli_doctor,
     "register": cli_register, "install": cli_install, "serve": cli_serve,
     "serves": cli_serves, "forget": cli_forget,
@@ -2388,9 +3079,12 @@ USAGE = """agentbus — coordination between parallel Claude Code sessions
   run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
   serve <res>                  restart a service so it serves YOUR worktree
   serves                       which checkout each service is answering for
+  own "<glob>" [--why ".."] [--strict]   declare part of the tree yours
+  own --list | disown "<glob>" | disown --all
   claim <res> [--why ".."] [--steal]
   wait <res> [--timeout 90]    queue for a held resource
   release <res> | --all
+  handoff [--note "..."]       summarise what you did, for the others
   doing "..."                  one line others see in their roster
   name [<new>]                 read or set this session's name
   init-repo                    declare this repo's shared resources
