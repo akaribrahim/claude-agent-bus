@@ -294,9 +294,20 @@ def git_facts(cwd):
              "--abbrev-ref", "HEAD"],
             cwd=cwd, capture_output=True, text=True, timeout=5,
         )
-        if out.returncode != 0:
-            raise RuntimeError
         common, root, branch = (out.stdout.strip().split("\n") + ["", "", ""])[:3]
+        # Not gated on the exit status. In a repository with no commits yet,
+        # `--abbrev-ref HEAD` fails and takes the whole call down with it — but
+        # the two answers that matter are already on stdout. Throwing them away
+        # gave a brand-new repository a path-derived key that changed the moment
+        # somebody made their first commit, quietly orphaning anything written
+        # against the old one.
+        if not common or not root:
+            raise RuntimeError
+        if branch in ("", "HEAD"):
+            # Unborn, or detached. symbolic-ref answers for the first.
+            ref = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"],
+                                 cwd=cwd, capture_output=True, text=True, timeout=5)
+            branch = ref.stdout.strip() if ref.returncode == 0 else ""
     except Exception:
         root = cwd
         key = "path:" + hashlib.sha1(cwd.encode()).hexdigest()[:8]

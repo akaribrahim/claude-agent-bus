@@ -66,6 +66,32 @@ assert_contains "$out" "looked at this repository" "and is told what was found"
 assert_equal "worktree" "$(field "$EMPTY" worktree scope)" \
   "which is scoped to one checkout"
 
+# ---- a repository with no commits yet --------------------------------------
+#
+# Which is what `git init` leaves you with, and `init-repo` is one of the first
+# things a new user runs. `git rev-parse --abbrev-ref HEAD` fails on an unborn
+# HEAD and used to take the whole call down with it, so the repository got a
+# key derived from its path — and that key changed the moment somebody made
+# their first commit, orphaning anything written against the old one.
+
+FRESH="$TEST_TMP/detfresh"
+mkdir -p "$FRESH" && git -C "$FRESH" init -q . > /dev/null 2>&1
+git -C "$FRESH" symbolic-ref HEAD refs/heads/main
+git -C "$FRESH" config user.email t@e.i
+git -C "$FRESH" config user.name t
+key_of() {   # <repo> → the repo key doctor reports
+  ( cd "$1" && "$AB_ROOT/bin/agentbus" doctor 2>/dev/null ) \
+    | sed -n 's/^repo *: .*(\(.*\))$/\1/p'
+}
+before=$(key_of "$FRESH")
+assert_not_contains "$before" "path:" \
+  "a repository with no commits is still identified as a repository"
+printf 'x\n' > "$FRESH/README"
+git -C "$FRESH" add -A > /dev/null 2>&1
+git -C "$FRESH" commit -qm first > /dev/null 2>&1
+assert_equal "$before" "$(key_of "$FRESH")" \
+  "and its key does not change when the first commit lands"
+
 # ---- Next.js ---------------------------------------------------------------
 
 NEXT=$(new_repo detnext)
