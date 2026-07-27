@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # Linux as well as macOS: the engine shells out to lsof, ps and git, and
+    # the point of the second job is to catch anything that only works because
+    # of how macOS happens to behave.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show what we are testing against
+        shell: bash
+        run: |
+          python3 -V
+          bash --version | head -1
+          git --version
+      - name: make test
+        shell: bash
+        run: make test
