@@ -49,6 +49,17 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "post-bash"],
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolBatch": [

@@ -28,15 +28,16 @@ so updating the plugin never loses it.
 """
 
 import errno
-import hashlib
 import json
 import os
 import re
-import shutil
-import stat
-import subprocess
 import sys
 import time
+
+# hashlib, shlex, shutil, stat and subprocess are imported where they are used.
+# Every hook on every tool call pays for this module's import list, and those
+# five cost more than the rest of the interpreter start put together — on the
+# Windows entry point, where hooks call Python directly, that is the whole bill.
 
 # ---------------------------------------------------------------- layout ----
 #
@@ -61,6 +62,9 @@ CURSORS = os.path.join(BUS, "cursors")
 HOTFOR = os.path.join(BUS, "hot-for")
 WRITES = os.path.join(BUS, "writes")
 LOCKS = os.path.join(BUS, "locks")
+AUTOCLAIM = os.path.join(BUS, "autoclaim")
+SERVES = os.path.join(BUS, "serves")
+MATCHED = os.path.join(BUS, "matched")
 REPOS = os.path.join(BUS, "repos")
 EVENTS = os.path.join(BUS, "events.jsonl")
 SEQFILE = os.path.join(BUS, "events.seq")
@@ -68,6 +72,7 @@ LIVEFILE = os.path.join(BUS, "live-count")
 TOKENFILE = os.path.join(BUS, "guard-tokens")
 
 STALE_BEAT = 45 * 60      # no heartbeat this long and no pid: the session is gone
+ABANDONED_BEAT = 3 * 3600  # this long without a heartbeat retires it either way
 IDLE_SECS = 5 * 60        # holder quiet this long: a soft lock may be taken
 SOFT_TTL = 15 * 60        # auto-taken lock, measured from last use
 HARD_TTL = 45 * 60        # explicitly claimed lock
@@ -80,13 +85,25 @@ ROTATE_AT = 5000          # events.jsonl lines before trimming
 READONLY_HEADS = {
     "grep", "rg", "cat", "bat", "ls", "ll", "head", "tail", "find", "fd", "tree",
     "echo", "printf", "jq", "yq", "wc", "sed", "awk", "cut", "sort", "uniq",
-    "less", "more", "file", "stat", "which", "type", "man", "diff", "git",
+    "less", "more", "file", "stat", "which", "type", "man", "diff",
     "pwd", "date", "true", "false", "test", "basename", "dirname", "realpath",
     "code", "open", "agentbus",
 }
 
+# `git` is not read-only as a whole: checkout, switch, stash, reset, rebase,
+# merge, add and commit all rewrite the working tree or the index, which is how
+# two sessions in one checkout actually destroy each other's work.
+GIT_READONLY_SUBCOMMANDS = {
+    "status", "log", "diff", "show", "rev-parse", "branch", "ls-files", "blame",
+    "describe", "remote", "config", "grep", "shortlog", "reflog", "tag",
+    "worktree", "fetch", "cat-file", "for-each-ref", "check-ignore",
+}
+
 # Wrappers to strip before deciding what a segment really runs.
 WRAPPERS = {"sudo", "time", "nohup", "exec", "command", "env", "caffeinate"}
+
+# Heads whose `-c` argument is a command rather than text.
+SHELL_HEADS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
 
 
 # ------------------------------------------------------------- utilities ----
@@ -96,7 +113,8 @@ def now():
 
 
 def ensure_dirs():
-    for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS):
+    for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS, AUTOCLAIM,
+              SERVES, MATCHED):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -126,6 +144,23 @@ def write_json(path, obj):
         return False
 
 
+def write_json_pretty(path, obj):
+    """For files a human reads and edits — atomically, like everything else."""
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(obj, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
 def read_int(path, default=0):
     try:
         with open(path, "r") as fh:
@@ -140,8 +175,16 @@ def write_text(path, text):
         with open(tmp, "w") as fh:
             fh.write(text)
         os.replace(tmp, path)
+        return True
     except Exception:
-        pass
+        # On Windows os.replace onto a file another process has open raises. A
+        # cursor that silently fails to advance would replay the same messages
+        # every turn, so callers that care are told.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
 
 
 class Mutex:
@@ -158,13 +201,18 @@ class Mutex:
             try:
                 os.mkdir(self.path)
                 self.held = True
+                write_text(os.path.join(self.path, "owner"), "%d\n" % os.getpid())
                 return self
             except OSError as exc:
                 if exc.errno != errno.EEXIST:
                     return self
-                # A mutex older than a minute belongs to a process that died.
+                # Break it only when the process that took it is gone. Breaking
+                # on age alone lets a slow holder be robbed mid-section, and then
+                # its __exit__ removes somebody else's mutex.
+                owner = read_int(os.path.join(self.path, "owner"), 0)
                 try:
-                    if time.time() - os.path.getmtime(self.path) > 60:
+                    stale = time.time() - os.path.getmtime(self.path) > 60
+                    if (owner and not pid_alive(owner)) or (not owner and stale):
                         os.rmdir(self.path)
                         continue
                 except OSError:
@@ -175,6 +223,10 @@ class Mutex:
 
     def __exit__(self, *_):
         if self.held:
+            try:
+                os.unlink(os.path.join(self.path, "owner"))
+            except OSError:
+                pass
             try:
                 os.rmdir(self.path)
             except OSError:
@@ -209,6 +261,8 @@ def held_for(ts):
 def git_facts(cwd):
     """(worktree root, repo key, label, branch) — the repo key is shared by all
     worktrees of one repository, because it is derived from the common git dir."""
+    import hashlib
+    import subprocess
     try:
         out = subprocess.run(
             ["git", "rev-parse", "--git-common-dir", "--show-toplevel",
@@ -248,6 +302,7 @@ def agent_name_from(branch, label, taken):
 def claude_pid():
     """The pid of the Claude Code process this hook belongs to. Used for liveness:
     a heartbeat can be stale during a long turn, but the process is proof."""
+    import subprocess
     env = os.environ.get("CLAUDE_PID")
     if env and env.isdigit():
         return int(env)
@@ -291,7 +346,10 @@ def pid_alive(pid):
             k32.CloseHandle.argtypes = [ctypes.c_void_p]
             handle = k32.OpenProcess(0x1000, 0, pid)  # QUERY_LIMITED_INFORMATION
             if not handle:
-                return False
+                # ERROR_ACCESS_DENIED means the process exists and belongs to
+                # somebody else — an elevated session, say. Reading that as dead
+                # would reap a live session and drop its locks.
+                return k32.GetLastError() == 5
             code = ctypes.c_ulong()
             k32.GetExitCodeProcess.argtypes = [ctypes.c_void_p,
                                                ctypes.POINTER(ctypes.c_ulong)]
@@ -349,7 +407,12 @@ def load_sessions(reap=False):
         rec["sid"] = sid
         rec["beat"] = last_beat(sid) or rec.get("started", 0)
         alive = pid_alive(rec.get("pid", 0))
-        if not alive and now() - rec["beat"] > STALE_BEAT:
+        quiet = now() - rec["beat"]
+        # The pid is evidence, not proof: it can be recorded wrong, or reused by
+        # an unrelated process, and then the record would never expire and would
+        # hold locks and a roster line forever. Long enough silence retires a
+        # session regardless — it re-registers by itself the moment it acts.
+        if quiet > ABANDONED_BEAT or (not alive and quiet > STALE_BEAT):
             dead.append(sid)
             continue
         rec["alive_pid"] = alive
@@ -378,16 +441,14 @@ def refresh_derived(sessions=None):
     if sessions is None:
         sessions = load_sessions()
     write_text(LIVEFILE, "%d\n" % len(sessions))
+    # Union over every live session's root, not one arbitrary root per repo: all
+    # worktrees share a repo_key, so reading only the first would let a worktree
+    # whose branch predates the config file switch the guard off for everyone.
     tokens = set()
-    seen = set()
     for s in sessions:
-        key = s.get("repo_key")
-        if key in seen:
-            continue
-        seen.add(key)
-        cfg = repo_config(key, s.get("root"))
+        cfg = repo_config(s.get("repo_key"), s.get("root"))
         for res in cfg.get("resources", []):
-            for tok in res.get("tokens", []):
+            for tok in resource_tokens(res):
                 tokens.add(re.escape(tok))
     write_text(TOKENFILE, ("|".join(sorted(tokens)) if tokens else "") + "\n")
     rebuild_hot(sessions)
@@ -411,7 +472,10 @@ def rebuild_hot(sessions):
                    "".join(p + "\n" for p in sorted(paths)))
 
 
-def recent_writes(sid, cutoff):
+def recent_writes(sid, cutoff, compact=False):
+    """Compact only your OWN log. Rewriting another session's file races with the
+    shell hook appending to it, and the append that lands mid-rewrite is lost —
+    which means a real edit vanishes from the collision record."""
     path = os.path.join(WRITES, "%s.log" % sid)
     out = []
     try:
@@ -427,7 +491,7 @@ def recent_writes(sid, cutoff):
             continue
         if ts >= cutoff:
             out.append((ts, p))
-    if len(lines) > 400:
+    if compact and len(lines) > 400:
         write_text(path, "".join("%d %s\n" % (t, p) for t, p in out))
     return out
 
@@ -492,26 +556,39 @@ def read_events(after=0):
 
 def rotate_events():
     try:
-        with open(EVENTS, "r") as fh:
-            lines = fh.readlines()
+        if os.path.getsize(EVENTS) < ROTATE_AT * 120:
+            return
     except OSError:
         return
-    if len(lines) < ROTATE_AT:
-        return
+    # Read and write under the same mutex: reading first and trimming afterwards
+    # discards everything appended in between.
     with Mutex("events"):
-        write_text(EVENTS, "".join(lines[-1000:]))
+        try:
+            with open(EVENTS, "r") as fh:
+                lines = fh.readlines()
+        except OSError:
+            return
+        if len(lines) >= ROTATE_AT:
+            write_text(EVENTS, "".join(lines[-1000:]))
+
+
+# Kinds worth interrupting another agent's turn for. Lock churn is not: with
+# automatic claims lasting one command, "took 'api'" / "released 'api'" would be
+# two context injections per scoped run carrying nothing anyone can act on. They
+# stay in the stream for `status` and `inbox`; they just do not get delivered.
+DELIVERED_KINDS = {"note", "serve"}
 
 
 def interesting_to(rec, me):
     """An event reaches a session when it is addressed to it, or when it happened
-    in the same repository. Work in another project stays out of the way."""
+    in the same repository and says something. Work in another project stays out
+    of the way entirely."""
     if rec.get("sid") == me.get("sid"):
         return False
-    to = rec.get("to")
-    if to:
-        return to == me.get("agent")
-    if rec.get("kind") == "note":
-        return rec.get("repo") == me.get("repo_key")
+    if rec.get("to"):
+        return rec["to"] == me.get("agent")
+    if rec.get("kind") not in DELIVERED_KINDS:
+        return False
     return rec.get("repo") == me.get("repo_key")
 
 
@@ -520,11 +597,17 @@ def deliver(me, advance=True):
     sid = me.get("sid")
     cursor = read_int(os.path.join(CURSORS, sid), 0)
     seq = read_int(SEQFILE, 0)
+    if cursor > seq:
+        cursor = 0  # the counter was reset or restored under us; do not wedge
     if seq <= cursor:
         return ""
-    mine = [r for r in read_events(after=cursor) if interesting_to(r, me)]
+    fresh = read_events(after=cursor)
+    mine = [r for r in fresh if interesting_to(r, me)]
     if advance:
-        write_text(os.path.join(CURSORS, sid), "%d\n" % seq)
+        # Advance to what was actually read, not to the sequence number sampled
+        # before reading: an event appended in between would be shown twice.
+        top = max([seq] + [r.get("i", 0) for r in fresh])
+        write_text(os.path.join(CURSORS, sid), "%d\n" % top)
     if not mine:
         return ""
     shown = mine[-MAX_DELIVER:]
@@ -589,7 +672,10 @@ def do_claim(me, res, why="", mode="soft", steal=False, sessions=None):
                "agent": me.get("agent"), "worktree": me.get("root"),
                "branch": me.get("branch"), "mode": mode, "why": why,
                "acquired_at": now(), "last_used": now(), "queue": queue}
-        write_json(lock_path(repo_key, res), new)
+        if not write_json(lock_path(repo_key, res), new):
+            # Reporting a claim we could not record would hand out the resource
+            # to everyone who asks.
+            return False, lock, holder, "could not write the lock file"
     if holder:
         emit(me.get("sid"), me.get("agent"), repo_key, "lock",
              "took '%s' from %s (%s)%s" % (res, holder.get("agent"),
@@ -603,14 +689,18 @@ def do_claim(me, res, why="", mode="soft", steal=False, sessions=None):
 
 def do_release(me, res, quiet=False):
     repo_key = me.get("repo_key", "")
-    lock = load_lock(repo_key, res)
-    if not lock or lock.get("sid") != me.get("sid"):
-        return False
-    waiting = lock.get("queue", [])
-    try:
-        os.unlink(lock_path(repo_key, res))
-    except OSError:
-        return False
+    # Check and unlink under the same mutex do_claim uses: between a bare check
+    # and the unlink, another session can legitimately take the lock, and then
+    # this would delete theirs.
+    with Mutex("lock-" + re.sub(r"[^A-Za-z0-9]", "_", res)[:40]):
+        lock = load_lock(repo_key, res)
+        if not lock or lock.get("sid") != me.get("sid"):
+            return False
+        waiting = lock.get("queue", [])
+        try:
+            os.unlink(lock_path(repo_key, res))
+        except OSError:
+            return False
     if not quiet:
         tail = ""
         if waiting:
@@ -652,6 +742,227 @@ def held_by(sid):
     return out
 
 
+# --------------------------------------------------------------- serving ----
+#
+# A lock says who may use a service. It does not say which checkout that service
+# is actually serving, and those are different facts: a session can end, its
+# detached dev server keeps answering on the same port, the lock is released, and
+# the next request from any worktree is silently answered by the dead session's
+# code. That is the original bug this whole plugin exists for, and only this part
+# of it closes the case.
+#
+# So ownership is tracked separately from the lock, and agent-bus owns the
+# lifecycle: it starts the service, therefore it knows which tree it serves. A
+# service it did not start is reported as unknown rather than guessed — the
+# working directory of a foreign process is readable on macOS and Linux, and not
+# on Windows, and a wrong guess here is worse than no answer.
+
+def serve_path(repo_key, res):
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", "%s__%s" % (repo_key, res))
+    return os.path.join(SERVES, "%s.json" % safe)
+
+
+def port_pid(port):
+    """The pid listening on a TCP port, or None."""
+    import subprocess
+    try:
+        if IS_WIN:
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                                 capture_output=True, text=True, timeout=8)
+            for line in out.stdout.splitlines():
+                cols = line.split()
+                if len(cols) >= 5 and cols[3] == "LISTENING" \
+                        and cols[1].endswith(":%d" % port):
+                    return int(cols[4])
+            return None
+        out = subprocess.run(["lsof", "-ti", "tcp:%d" % port, "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=8)
+        first = out.stdout.split()
+        return int(first[0]) if first else None
+    except Exception:
+        return None
+
+
+def pid_cwd(pid):
+    """The working directory of a running process, or None where the platform
+    will not say (Windows does not expose it to another process)."""
+    import subprocess
+    if IS_WIN or not pid:
+        return None
+    try:
+        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                             capture_output=True, text=True, timeout=8)
+        for line in out.stdout.splitlines():
+            if line.startswith("n"):
+                return line[1:]
+    except Exception:
+        pass
+    return None
+
+
+def serving(repo_key, res_cfg):
+    """Who a declared service is currently serving.
+
+    Returns (root, how) where `how` is 'agent-bus' when we started it, 'probe'
+    when the platform let us read a foreign process's directory, 'unknown' when
+    something is listening that we cannot attribute, and (None, 'down') when
+    nothing is."""
+    name, port = res_cfg["name"], res_cfg.get("port")
+    rec = read_json(serve_path(repo_key, name))
+    if rec and pid_alive(rec.get("pid")):
+        if not port or port_pid(port) == rec.get("pid"):
+            return rec.get("root"), "agent-bus"
+    if not port:
+        return (None, "down") if not rec else (rec.get("root"), "stale")
+    pid = port_pid(port)
+    if not pid:
+        return None, "down"
+    cwd = pid_cwd(pid)
+    if cwd:
+        root = cwd
+        for _ in range(6):  # the service may run from a subdirectory of the tree
+            if os.path.isdir(os.path.join(root, ".git")) or \
+               os.path.isfile(os.path.join(root, ".git")):
+                return root, "probe"
+            parent = os.path.dirname(root)
+            if parent == root:
+                break
+            root = parent
+        return cwd, "probe"
+    return None, "unknown"
+
+
+def stop_service(repo_key, res_cfg):
+    import signal
+    import subprocess
+    name, port = res_cfg["name"], res_cfg.get("port")
+    rec = read_json(serve_path(repo_key, name)) or {}
+    pid = rec.get("pid")
+    if not pid or not pid_alive(pid):
+        # The record can outlive the process — another worktree's session may
+        # have replaced the service since. Whatever is on the port now is what
+        # has to go, not what we last wrote down.
+        pid = port_pid(port) if port else None
+    if not pid:
+        try:
+            os.unlink(serve_path(repo_key, name))
+        except OSError:
+            pass
+        return True  # nothing is running: the goal state is already reached
+    try:
+        if IS_WIN:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=15)
+        else:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except Exception:
+                os.kill(pid, signal.SIGTERM)
+            for _ in range(40):
+                if not pid_alive(pid):
+                    break
+                time.sleep(0.25)
+            if pid_alive(pid):
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except Exception:
+                    os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass  # it may have exited between the probe and the signal
+    try:
+        os.unlink(serve_path(repo_key, name))
+    except OSError:
+        pass
+    if port:
+        for _ in range(20):
+            if port_pid(port) is None:
+                return True
+            time.sleep(0.25)
+        return False
+    return not pid_alive(pid)
+
+
+def wait_ready(res_cfg, root, timeout=60):
+    import socket
+    import subprocess
+    deadline = time.time() + timeout
+    ready, port = res_cfg.get("ready"), res_cfg.get("port")
+    while time.time() < deadline:
+        if ready:
+            try:
+                if subprocess.run(ready, shell=True, cwd=root, capture_output=True,
+                                  timeout=10).returncode == 0:
+                    return True
+            except Exception:
+                pass
+        elif port:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    return True
+            except OSError:
+                pass
+        else:
+            return True
+        time.sleep(1)
+    return False
+
+
+def start_service(me, res_cfg):
+    import subprocess
+    name = res_cfg["name"]
+    root = me.get("root")
+    cwd = os.path.join(root, res_cfg["cwd"]) if res_cfg.get("cwd") else root
+    logs = os.path.join(BUS, "logs")
+    try:
+        os.makedirs(logs, exist_ok=True)
+    except OSError:
+        pass
+    log = os.path.join(logs, "%s__%s.log" % (
+        re.sub(r"[^A-Za-z0-9_.-]", "_", me.get("repo_key", "")), name))
+    kwargs = {}
+    if IS_WIN:
+        kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED | NEW_GROUP
+    else:
+        kwargs["start_new_session"] = True                  # its own process group
+    try:
+        fh = open(log, "ab")
+        proc = subprocess.Popen(res_cfg["start"], shell=True, cwd=cwd,
+                                stdout=fh, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, **kwargs)
+    except Exception as exc:
+        return False, "could not start: %s" % exc
+    write_json(serve_path(me.get("repo_key"), name), {
+        "resource": name, "repo": me.get("repo_key"), "root": root,
+        "cwd": cwd, "by": me.get("agent"), "pid": proc.pid,
+        "port": res_cfg.get("port"), "started": now(), "log": log,
+    })
+    if not wait_ready(res_cfg, cwd):
+        return False, "started but never became ready — see %s" % log
+    return True, log
+
+
+def ensure_serving(me, res_cfg, sessions=None):
+    """Make this resource serve MY worktree. (ok, message)"""
+    if not res_cfg.get("start"):
+        return True, ""
+    repo_key = me.get("repo_key")
+    root, how = serving(repo_key, res_cfg)
+    if how in ("agent-bus", "probe") and root and \
+            os.path.realpath(root) == os.path.realpath(me.get("root") or ""):
+        return True, "already serving your worktree"
+    if how != "down":
+        if not stop_service(repo_key, res_cfg):
+            return False, ("something is on %s that agent-bus could not stop; "
+                           "stop it yourself and retry"
+                           % (res_cfg.get("port") or res_cfg["name"]))
+    ok, detail = start_service(me, res_cfg)
+    if not ok:
+        return False, detail
+    emit(me.get("sid"), me.get("agent"), repo_key, "serve",
+         "'%s' now serves %s" % (res_cfg["name"], short_path(me.get("root"))))
+    return True, "restarted from your worktree (log: %s)" % detail
+
+
 # ------------------------------------------------------ resource matching ----
 
 def repo_config(repo_key, root=None):
@@ -676,44 +987,170 @@ def repo_config(repo_key, root=None):
     return merged
 
 
+def literal_runs(pattern):
+    """The runs of plain characters in a regex — every match must contain the
+    longest of them, which is what makes it usable as a cheap pre-filter."""
+    runs, cur, i, n = [], [], 0, len(pattern or "")
+    while i < n:
+        ch = pattern[i]
+        if ch == "\\" and i + 1 < n:
+            nxt = pattern[i + 1]
+            if nxt.isalnum():          # \b \d \s \w … : a class or an anchor
+                runs.append("".join(cur))
+                cur = []
+            else:                       # \. \- \/ … : an escaped literal
+                cur.append(nxt)
+            i += 2
+            continue
+        if ch in "*?" and cur:
+            cur.pop()                   # the preceding character is optional
+        if ch in "[](){}|?*+^$.":
+            runs.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    runs.append("".join(cur))
+    return [r for r in runs if r]
+
+
+def resource_tokens(res):
+    """Literal substrings the shell fast path can filter on before waking the
+    engine. Derived from the patterns, so the two can never drift apart — a
+    hand-written list silently stopped covering `make seed` and `make dev`."""
+    out = set(res.get("tokens", []))
+    for pat in res.get("patterns", []):
+        runs = literal_runs(pat)
+        if runs:
+            out.add(max(runs, key=len))
+    port = res.get("port")
+    if port:
+        out.add(str(port))
+    return {t for t in out if len(t) >= 2}
+
+
+def strip_heredocs(cmd):
+    """Drop heredoc bodies. What a command feeds to stdin is data — a commit
+    message, a plan, a JSON payload — and matching resource patterns against it
+    is how `git commit -m "$(cat <<EOF ... restart uvicorn ... EOF)"` ends up
+    claiming the API."""
+    lines = (cmd or "").split("\n")
+    kept, i = [], 0
+    while i < len(lines):
+        kept.append(lines[i])
+        m = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", lines[i])
+        if m:
+            word, j = m.group(2), i + 1
+            while j < len(lines) and lines[j].strip() != word:
+                j += 1
+            i = j
+        i += 1
+    return "\n".join(kept)
+
+
 def split_segments(cmd):
-    return [s for s in re.split(r"&&|\|\||[;|\n]", cmd or "") if s.strip()]
+    """Split on `;`, `&&`, `||`, `|` and newlines that are not inside quotes.
+    A quote-blind split invents segments out of the middle of message text."""
+    segments, cur, quote, i = [], [], None, 0
+    n = len(cmd or "")
+    while i < n:
+        ch = cmd[i]
+        if quote:
+            cur.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+            cur.append(ch)
+            i += 1
+        elif ch == "\\" and i + 1 < n:
+            cur.append(ch)
+            cur.append(cmd[i + 1])
+            i += 2
+        elif cmd.startswith("&&", i) or cmd.startswith("||", i):
+            segments.append("".join(cur))
+            cur = []
+            i += 2
+        elif ch in ";|\n":
+            segments.append("".join(cur))
+            cur = []
+            i += 1
+        else:
+            cur.append(ch)
+            i += 1
+    segments.append("".join(cur))
+    return [s for s in segments if s.strip()]
 
 
-def head_token(segment):
-    s = segment.strip()
-    while True:
-        m = re.match(r"^[A-Za-z_][A-Za-z0-9_]*=\S*\s+", s)
-        if not m:
-            break
-        s = s[m.end():]
-    parts = s.split()
-    if not parts:
-        return ""
-    head = os.path.basename(parts[0].strip("\"'()"))
-    while head in WRAPPERS and len(parts) > 1:
-        parts = parts[1:]
-        head = os.path.basename(parts[0].strip("\"'()"))
-    return head
+def tokens_of(segment):
+    import shlex
+    try:
+        lex = shlex.shlex(segment, posix=True)
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        return segment.split()
+
+
+def is_readonly(head, toks):
+    """A guarded word behind a read-only command is a mention, not a use.
+
+    `git` is only read-only in its reading subcommands: `git checkout`, `stash`,
+    `reset` and `add -A` rewrite the working tree, which is exactly what two
+    sessions sharing one checkout destroy each other with."""
+    if head == "git":
+        sub = next((t for t in toks[1:] if not t.startswith("-")), "")
+        return sub in GIT_READONLY_SUBCOMMANDS
+    return head in READONLY_HEADS
+
+
+def command_targets(cmd, depth=0):
+    """The words of a command that are plausibly things it acts on.
+
+    A shell command carries two kinds of words: what it operates on, and text it
+    merely transports — a commit message, a PR body, a heredoc. Matching a
+    resource pattern against the second kind is how a commit message that names
+    a tool claims that tool and blocks the commit. The rule that separates them
+    cheaply: a token containing whitespace is prose. Real targets — paths,
+    ports, URLs, flags — do not have spaces in them."""
+    out = []
+    for seg in split_segments(strip_heredocs(cmd)):
+        toks = tokens_of(seg)
+        while toks and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0])
+                        or os.path.basename(toks[0]) in WRAPPERS):
+            toks = toks[1:]
+        if not toks:
+            continue
+        head = os.path.basename(toks[0])
+        if head in SHELL_HEADS and depth < 3:
+            # `bash -c '…'` — that quoted argument is a command, not prose.
+            for i, tok in enumerate(toks[1:], 1):
+                if tok == "-c" and i + 1 < len(toks):
+                    out.extend(command_targets(toks[i + 1], depth + 1))
+                    break
+            continue
+        if is_readonly(head, toks):
+            continue
+        out.append(" ".join(t for t in toks if not re.search(r"\s", t)))
+    return out
 
 
 def resources_for(cmd, cfg):
-    """Which declared resources this command would touch. A guarded word behind a
-    read-only head (grep, cat, git) is a mention, not a use."""
+    """Which declared resources this command would touch."""
     hits = []
     resources = cfg.get("resources", [])
     if not resources:
         return hits
     by_name = {r["name"]: r for r in resources}
-    for seg in split_segments(cmd):
-        if head_token(seg) in READONLY_HEADS:
-            continue
+    for text in command_targets(cmd):
         for res in resources:
             if res["name"] in [h["name"] for h in hits]:
                 continue
             for pat in res.get("patterns", []):
                 try:
-                    if re.search(pat, seg, re.I):
+                    if re.search(pat, text, re.I):
                         hits.append(res)
                         break
                 except re.error:
@@ -755,28 +1192,45 @@ def roster_text(me, sessions):
     return "\n".join(lines)
 
 
-def locks_text(me, sessions):
+def locks_text(me, sessions, with_serving=True):
     cfg = repo_config(me.get("repo_key", ""), me.get("root"))
-    names = [r["name"] for r in cfg.get("resources", [])]
-    if not names:
+    resources = cfg.get("resources", [])
+    if not resources:
         return ""
-    held, free = [], []
-    for res in names:
-        lock = load_lock(me.get("repo_key"), res)
+    mine = os.path.realpath(me.get("root") or "")
+    held, free, serves = [], [], []
+    for res in resources:
+        lock = load_lock(me.get("repo_key"), lock_name(me, res))
         holder, stealable, _ = lock_state(lock, sessions)
         if lock and holder and not stealable:
-            mine = " (yours)" if lock.get("sid") == me.get("sid") else ""
+            yours = " (yours)" if lock.get("sid") == me.get("sid") else ""
             held.append("  - %s → %s%s, %s%s" % (
-                res, lock.get("agent"), mine, held_for(lock.get("acquired_at")),
+                res["name"], lock.get("agent"), yours,
+                held_for(lock.get("acquired_at")),
                 (', "%s"' % lock["why"]) if lock.get("why") else ""))
         else:
-            free.append(res)
+            free.append(res["name"])
+        if with_serving and (res.get("port") or res.get("start")):
+            root, how = serving(me.get("repo_key"), res)
+            if how == "down":
+                continue
+            if root and os.path.realpath(root) == mine:
+                serves.append("  - %s serves YOUR worktree" % res["name"])
+            elif root:
+                serves.append("  - %s serves %s — a request to it answers with "
+                              "THAT checkout's code" % (res["name"], short_path(root)))
+            else:
+                serves.append("  - %s is up but agent-bus did not start it; which "
+                              "checkout it serves is unknown" % res["name"])
     out = []
     if held:
         out.append("Shared resources in use:")
         out.extend(held)
     if free:
         out.append("Free: %s" % ", ".join(free))
+    if serves:
+        out.append("Running services:")
+        out.extend(serves)
     return "\n".join(out)
 
 
@@ -785,21 +1239,27 @@ def short_path(p):
 
 
 RULES = (
-    "How this works: commands that touch a shared resource take it automatically. "
-    "If another live session holds it, the command is blocked and you are told by "
-    "whom — coordinate instead of taking it. Useful: `agentbus status`, "
-    "`agentbus post \"...\"` to tell the others something, "
-    "`agentbus run <res> -- <cmd>` to hold a resource for exactly one command."
+    "How this works: a command that touches a shared resource takes it for the "
+    "length of that command. You hear about it only when someone else holds it, "
+    "or when the service is answering for a different checkout than yours — both "
+    "are blocked with the reason. Useful: `agentbus status`, "
+    "`agentbus serve <res>` to point a service at your worktree, "
+    "`agentbus run <res> -- <cmd>` to do that and run one command, "
+    "`agentbus post \"...\"` to tell the others something they cannot see."
 )
 
 
 # ----------------------------------------------------------------- hooks ----
 
-def hook_session_start(payload):
+def register(payload):
+    """Create or refresh this session's record. Also reachable from the other
+    hooks: a session that missed SessionStart — installed mid-session, hook timed
+    out, wrongly reaped — would otherwise stay invisible and unguarded forever,
+    with nothing to tell anyone."""
     ensure_dirs()
-    sid = payload.get("session_id")
+    sid = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid:
-        return
+        return None, False
     cwd = payload.get("cwd") or os.getcwd()
     root, repo_key, label, branch = git_facts(cwd)
     sessions = load_sessions(reap=True)
@@ -815,15 +1275,22 @@ def hook_session_start(payload):
         rec["agent"] = agent_name_from(branch, label, taken)
     write_json(os.path.join(SESSIONS, "%s.json" % sid), rec)
     touch_beat(sid)
-
-    first_time = existing is None
-    if first_time:
+    if existing is None:
+        # Start at the current end of the stream: nobody wants a backlog.
         write_text(os.path.join(CURSORS, sid), "%d\n" % read_int(SEQFILE, 0))
-        if sessions:
-            emit(sid, rec["agent"], repo_key, "join",
-                 "joined on %s (%s)" % (branch or "-", short_path(root)))
+    return rec, existing is None
 
+
+def hook_session_start(payload):
+    rec, first_time = register(payload)
+    if not rec:
+        return
+    sid, repo_key = rec["sid"], rec["repo_key"]
+    root, branch, label = rec["root"], rec["branch"], rec["repo_label"]
     sessions = load_sessions()
+    if first_time and len(sessions) > 1:
+        emit(sid, rec["agent"], repo_key, "join",
+             "joined on %s (%s)" % (branch or "-", short_path(root)))
     refresh_derived(sessions)
     rotate_events()
 
@@ -855,15 +1322,24 @@ def hook_session_start(payload):
 
 
 def hook_prompt_submit(payload):
+    if os.environ.get("AGENTBUS_OFF"):
+        return
     sid, me = current_session(payload)
     if not me:
-        return
+        me, _ = register(payload)
+        if not me:
+            return
+        sid = me["sid"]
     touch_beat(sid)
     sessions = load_sessions(reap=True)
     refresh_derived(sessions)
     rotate_events()
+    # Keep an explicit claim from expiring under a session that is still working.
+    # This has to be written back: mutating the parsed dict changed nothing.
     for lock in held_by(sid):
-        lock["last_used"] = lock.get("last_used", now())
+        if lock.get("mode") == "hard":
+            lock["last_used"] = now()
+            write_json(lock_path(lock.get("repo"), lock.get("resource")), lock)
     text = deliver(me)
     if not text:
         return
@@ -872,6 +1348,8 @@ def hook_prompt_submit(payload):
 
 
 def hook_post_batch(payload):
+    if os.environ.get("AGENTBUS_OFF") or read_int(LIVEFILE, 0) < 2:
+        return
     sid, me = current_session(payload)
     if not me:
         return
@@ -896,78 +1374,262 @@ def note_ctx(text):
 
 
 def hook_pre_tool(payload):
+    if os.environ.get("AGENTBUS_OFF"):
+        return
+    if read_int(LIVEFILE, 0) < 2:
+        return  # alone: nothing to collide with, and Windows calls us directly
     sid, me = current_session(payload)
     if not me:
-        return
+        me, _ = register(payload)  # missing SessionStart is not an exemption
+        if not me:
+            return
     tool = payload.get("tool_name")
     ti = payload.get("tool_input") or {}
     sessions = load_sessions()
     if tool == "Bash":
-        return guard_bash(me, ti.get("command", ""), sessions)
+        return guard_bash(me, ti.get("command", ""), sessions,
+                          payload.get("tool_use_id"))
     if tool in ("Edit", "Write", "NotebookEdit"):
         return guard_file(me, ti.get("file_path") or ti.get("notebook_path") or "",
                           sessions)
 
 
-def guard_bash(me, cmd, sessions):
+def remember_autoclaim(me, tool_use_id, names):
+    """What this one command took, so PostToolUse can give it straight back.
+
+    An automatic claim means "for the length of this command" — otherwise a
+    one-second curl holds the API for the full soft TTL and the other session
+    waits a quarter of an hour for a service nobody is using."""
+    if not tool_use_id or not names:
+        return
+    write_json(autoclaim_path(tool_use_id),
+               {"sid": me.get("sid"), "repo": me.get("repo_key"), "resources": names})
+
+
+def hook_post_bash(payload):
+    """Release what the finished command took automatically."""
+    sid, me = current_session(payload)
+    tool_use_id = payload.get("tool_use_id")
+    if not tool_use_id:
+        return
+    rec = read_json(autoclaim_path(tool_use_id))
+    forget_autoclaim(tool_use_id)
+    if not rec or not me or rec.get("sid") != me.get("sid"):
+        return
+    for name in rec.get("resources", []):
+        lock = load_lock(me.get("repo_key"), name)
+        if lock and lock.get("sid") == me.get("sid") and lock.get("mode") == "soft":
+            do_release(me, name, quiet=True)
+
+
+def lock_name(me, res):
+    """The name this resource is locked under.
+
+    Most resources are one per machine. A `scope: "worktree"` resource is one per
+    checkout — the working tree and the git index, which only sessions sharing a
+    root can corrupt for each other. Since automatic claims now last exactly one
+    command, this serialises `git commit` against a concurrent `git stash` in the
+    same tree without ever making two sessions in different worktrees wait."""
+    if res.get("scope") == "worktree":
+        import hashlib
+        digest = hashlib.sha1(
+            os.path.realpath(me.get("root") or "").encode()).hexdigest()[:6]
+        return "%s@%s" % (res["name"], digest)
+    return res["name"]
+
+
+def autoclaim_path(tool_use_id):
+    return os.path.join(AUTOCLAIM, "%s.json"
+                        % re.sub(r"[^A-Za-z0-9_.-]", "_", tool_use_id or "none"))
+
+
+def forget_autoclaim(tool_use_id):
+    try:
+        os.unlink(autoclaim_path(tool_use_id))
+    except OSError:
+        pass
+
+
+def serving_check(me, hits):
+    """Is the service this command is about to talk to actually serving MY tree?
+
+    Holding the lock does not make :8082 answer with your code. This is the check
+    that turns "nobody else has it booked" into "the answer you get is yours",
+    and it has to run even when the lock is free — the dangerous case is a
+    session that ended while its detached server kept answering."""
+    mine = os.path.realpath(me.get("root") or "")
+    for res in hits:
+        if not res.get("start") and not res.get("port"):
+            continue
+        root, how = serving(me.get("repo_key"), res)
+        if how == "down":
+            continue
+        if root and os.path.realpath(root) == mine:
+            continue
+        if how == "unknown":
+            return "warn", (
+                "agent-bus: something is listening on %s that agent-bus did not "
+                "start, so which checkout it serves is unknown — the result you "
+                "get may belong to another worktree. `agentbus serve %s` restarts "
+                "it from yours." % (res.get("port") or res["name"], res["name"]))
+        rec = read_json(serve_path(me.get("repo_key"), res["name"])) or {}
+        lines = [
+            'agent-bus: BLOCKED. "%s" (%s) is serving a different checkout, so '
+            "this command would exercise that code and report it as yours."
+            % (res["name"], res.get("desc", "shared service")),
+            "",
+            "  serving   : %s" % short_path(root or "?"),
+            "  you are in: %s" % short_path(me.get("root", "")),
+        ]
+        if rec.get("by"):
+            lines.append("  started by: %s, %s" % (rec["by"], ago(rec.get("started"))))
+        if res.get("why"):
+            lines += ["", "  " + res["why"]]
+        lines += [
+            "",
+            "Point it at your worktree — this stops the current one and starts",
+            "yours, and tells the other sessions it moved:",
+            "  agentbus serve %s" % res["name"],
+            "",
+            "Or run one command against your own tree and leave it there:",
+            "  agentbus run %s -- <your command>" % res["name"],
+        ]
+        return "deny", "\n".join(lines)
+    return "", ""
+
+
+def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
     cfg = repo_config(me.get("repo_key", ""), me.get("root"))
     hits = resources_for(cmd, cfg)
     if not hits:
         return
+    # A resource whose patterns stop matching — a port moved, a script was
+    # renamed — fails silently and looks exactly like a resource nobody is
+    # using. Recording the last match lets `doctor` say so.
+    for res in hits:
+        try:
+            open(os.path.join(MATCHED, re.sub(r"[^A-Za-z0-9_.-]", "_", "%s__%s" % (
+                me.get("repo_key"), res["name"]))), "w").close()
+        except OSError:
+            pass
     # Check every resource before taking any. A command that is going to be
     # denied must not leave half the rig claimed behind it.
     blocked = []
     for res in hits:
-        lock = load_lock(me.get("repo_key"), res["name"])
+        lock = load_lock(me.get("repo_key"), lock_name(me, res))
         if lock and lock.get("sid") == me.get("sid"):
             continue
         holder, stealable, _ = lock_state(lock, sessions)
         if holder and not stealable:
             blocked.append((res, lock, holder))
     if not blocked:
+        taken = []
         for res in hits:
-            do_claim(me, res["name"], mode="soft", sessions=sessions)
-        return
+            ok, lock, holder, _ = do_claim(me, lock_name(me, res), mode="soft",
+                                           sessions=sessions)
+            if ok:
+                taken.append(lock_name(me, res))
+                continue
+            # The check above ran outside the mutex; do_claim re-tested inside it
+            # and lost. Ignoring that answer is how two sessions both proceed.
+            for name in taken:
+                do_release(me, name, quiet=True)
+            blocked = [(res, lock, holder)]
+            break
+        if not blocked:
+            remember_autoclaim(me, payload_tool_use_id, taken)
+            verdict, text = serving_check(me, hits)
+            if verdict == "deny":
+                for name in taken:
+                    do_release(me, name, quiet=True)
+                forget_autoclaim(payload_tool_use_id)
+                deny(text)
+            elif verdict == "warn":
+                note_ctx(text)
+            return
     res, lock, holder = blocked[0]
+    same_tree = (os.path.realpath(holder.get("root") or "")
+                 == os.path.realpath(me.get("root") or ""))
     lines = [
-        'agent-bus: BLOCKED. "%s" (%s) is held by another live Claude Code '
+        'agent-bus: BLOCKED. "%s" (%s) is in use by another live Claude Code '
         'session.' % (res["name"], res.get("desc", "shared resource")),
         "",
-        "  holder    : %s   branch %s" % (holder.get("agent"), holder.get("branch") or "-"),
-        "  worktree  : %s" % short_path(holder.get("root", "")),
-        "  held for  : %s   (%s lock%s)" % (
-            held_for(lock.get("acquired_at")), lock.get("mode", "soft"),
-            (', "%s"' % lock["why"]) if lock.get("why") else ""),
+        "  holder    : %s   branch %s" % (holder.get("agent"),
+                                          holder.get("branch") or "-"),
+        "  worktree  : %s%s" % (short_path(holder.get("root", "")),
+                                "   (the same one you are in)" if same_tree else ""),
+        "  held for  : %s   (%s lock)" % (held_for(lock.get("acquired_at")),
+                                          lock.get("mode", "soft")),
         "  last seen : %s" % ago(holder.get("beat")),
     ]
+    if lock.get("why"):
+        lines.append('  doing     : "%s"' % lock["why"])
+    elif holder.get("doing"):
+        lines.append('  doing     : "%s"' % holder["doing"])
     if res.get("_implied_by"):
-        lines += ["", "  Your command drives '%s', which is only meaningful against the "
-                      "'%s' serving your worktree — so it needs that too."
+        lines += ["", "  Your command drives '%s', which is only meaningful against "
+                      "the '%s' serving your worktree — so it needs that too."
                   % (res["_implied_by"], res["name"])]
-    if res.get("why"):
+    if same_tree:
+        # The configured `why` explains cross-worktree damage. Two sessions in
+        # ONE checkout are running the same code, so quoting it here would state
+        # something the agent can see is false — and an agent that catches the
+        # bus being wrong is an agent that starts working around it.
+        lines += ["", "  You are both in this checkout, so the result would be "
+                      "yours either way — but you would be running it twice at "
+                      "once against one service. Wait for their command to end; "
+                      "automatic claims last only as long as the command."]
+    elif res.get("why"):
         lines += ["", "  " + res["why"]]
     if len(blocked) > 1:
-        lines.append("  Also held: %s" % ", ".join(b[0]["name"] for b in blocked[1:]))
+        lines.append("  Also in use: %s" % ", ".join(b[0]["name"] for b in blocked[1:]))
     lines += [
         "",
-        "Do not work around this by editing the command. Options:",
-        "  agentbus status",
-        '  agentbus post --to %s "..."        ask them to hand it over'
-        % holder.get("agent"),
-        '  agentbus wait %s --why "..."       queue; claims it the moment it frees'
-        % res["name"],
-        '  agentbus claim %s --steal --why "..."   only when you know they are done'
+        "Do not work around this by editing the command: a different port, a",
+        "direct binary path or a subshell all reach the same service.",
+        "",
+        "  agentbus status                       what is going on",
+        '  agentbus post --to %s "..."   ask them' % holder.get("agent"),
+        '  agentbus wait %s --why "..."  queue; takes it the moment it frees'
         % res["name"],
     ]
     if res.get("hint"):
         lines += ["", "  " + res["hint"]]
+    lines += [
+        "",
+        "(If this is wrong, the human can rerun it themselves with "
+        "`AGENTBUS_OFF=1 <command>`.)",
+        '(Last resort, only when you know they have finished: '
+        '`agentbus claim %s --steal --why "..."`.)' % res["name"],
+    ]
     deny("\n".join(lines))
+
+
+def file_lock_name(path):
+    return "file:%s" % path
 
 
 def guard_file(me, path, sessions):
     if not path:
         return
     path = os.path.realpath(path)
+    # An explicit claim is the way out of a file block, so it has to actually do
+    # something: the previous message advertised a command that guard_file never
+    # consulted, which left a blocked session with no exit but the clock.
+    mine = load_lock(me.get("repo_key"), file_lock_name(path))
+    if mine and mine.get("sid") == me.get("sid"):
+        return
+    if mine:
+        holder = next((s for s in sessions if s["sid"] == mine.get("sid")), None)
+        if holder:
+            deny("agent-bus: BLOCKED. %s has explicitly claimed this file:\n\n"
+                 "  file  : %s\n  since : %s\n  reason: %s\n\n"
+                 "Ask before taking it:\n  agentbus post --to %s \"...\"\n"
+                 "  agentbus claim 'file:%s' --steal --why \"they agreed\""
+                 % (holder.get("agent"), short_path(path),
+                    held_for(mine.get("acquired_at")), mine.get("why") or "-",
+                    holder.get("agent"), path))
+            return
     cutoff = now() - COLLIDE_WINDOW
     same_tree, same_repo = [], []
     for s in sessions:
@@ -997,11 +1659,14 @@ def guard_file(me, path, sessions):
             "  worktree: %s   (the same one you are in)" % short_path(s.get("root", "")),
             "",
             "Split the work or take turns:",
-            '  agentbus post --to %s "I need <file> for <reason>"' % s.get("agent"),
+            '  agentbus post --to %s "I need this file for <reason>"' % s.get("agent"),
             "  agentbus status",
             "",
-            "If you have already agreed who owns it, retry after "
-            "`agentbus claim file --why \"...\"` or set AGENTBUS_OFF=1 for one command.",
+            "Once they have agreed, take it and the block lifts for you and",
+            "applies to them instead:",
+            "  agentbus claim 'file:%s' --why \"agreed with %s\"" % (path, s.get("agent")),
+            "",
+            "(Or the human can rerun the edit with AGENTBUS_OFF=1 in front of it.)",
         ]))
         return
     if same_repo:
@@ -1024,6 +1689,8 @@ def hook_session_end(payload):
 
 def hook_record_write(payload):
     """Fallback only: the shell fast path normally records writes itself."""
+    if read_int(LIVEFILE, 0) < 2:
+        return
     sid, me = current_session(payload)
     if not me:
         return
@@ -1145,7 +1812,9 @@ def cli_wait(args):
               file=sys.stderr)
         sys.exit(1)
     res, why = pos[0], opt(args, "--why", "")
-    timeout = int(opt(args, "--timeout", "300"))
+    # Below the Bash tool's own default timeout, so the wait reports back rather
+    # than being killed with its queue entry left behind.
+    timeout = int(opt(args, "--timeout", "90"))
     deadline = time.time() + timeout
     announced = False
     while True:
@@ -1203,7 +1872,57 @@ def cli_inbox(_args):
         print("(nothing yet)")
 
 
+def find_resource(me, name):
+    cfg = repo_config(me.get("repo_key"), me.get("root"))
+    return next((r for r in cfg.get("resources", []) if r["name"] == name), None)
+
+
+def cli_serve(args):
+    """Point a declared service at this worktree, restarting it if it is serving
+    another one. This is the half `sim-lock.sh` had and a lock alone cannot do."""
+    me = need_me()
+    pos = positional(args)
+    if not pos:
+        print("usage: agentbus serve <resource>", file=sys.stderr)
+        sys.exit(1)
+    res = find_resource(me, pos[0])
+    if not res:
+        print("no resource named '%s' in this repo's config" % pos[0], file=sys.stderr)
+        sys.exit(1)
+    if not res.get("start"):
+        print("'%s' declares no `start` command, so agent-bus cannot move it. "
+              "Add one to .claude/agent-bus.json." % pos[0], file=sys.stderr)
+        sys.exit(1)
+    ok, lock, holder, _ = do_claim(me, res["name"], why="handover", mode="hard")
+    if not ok:
+        print("'%s' is held by %s (%s) — ask before moving it out from under them:"
+              "\n  agentbus post --to %s \"I need %s pointed at my worktree\""
+              % (res["name"], holder.get("agent"),
+                 held_for(lock.get("acquired_at")), holder.get("agent"),
+                 res["name"]), file=sys.stderr)
+        sys.exit(1)
+    good, detail = ensure_serving(me, res)
+    do_release(me, res["name"], quiet=True)
+    if not good:
+        print("agent-bus: %s" % detail, file=sys.stderr)
+        sys.exit(1)
+    print("'%s' %s" % (res["name"], detail))
+
+
+def cli_serves(_args):
+    me = need_me()
+    cfg = repo_config(me.get("repo_key"), me.get("root"))
+    for res in cfg.get("resources", []):
+        if not res.get("port") and not res.get("start"):
+            continue
+        root, how = serving(me.get("repo_key"), res)
+        mark = "you" if root and os.path.realpath(root) == os.path.realpath(
+            me.get("root") or "") else ""
+        print("%-12s %-9s %-46s %s" % (res["name"], how, short_path(root or "-"), mark))
+
+
 def cli_run(args):
+    import subprocess
     me = need_me()
     if "--" not in args:
         print("usage: agentbus run <res>[,<res>] [--why \"...\"] -- <command>",
@@ -1228,6 +1947,17 @@ def cli_run(args):
                       file=sys.stderr)
                 sys.exit(75)
             taken.append(res)
+        # Holding the lock is not enough: make the services actually answer with
+        # this worktree's code before the command runs.
+        for res in names:
+            declared = find_resource(me, res)
+            if declared and declared.get("start"):
+                good, detail = ensure_serving(me, declared)
+                if not good:
+                    print("agent-bus: %s" % detail, file=sys.stderr)
+                    sys.exit(75)
+                if "restarted" in (detail or ""):
+                    print("agent-bus: '%s' %s" % (res, detail), file=sys.stderr)
         # cmd is already word-split by the calling shell, so run it directly:
         # joining it back into a shell string would destroy the quoting in
         # forms like `-- bash -c 'cd x && maestro test'`.
@@ -1260,32 +1990,42 @@ def cli_doing(args):
 
 
 TEMPLATE = {
-    "_readme": "Delete the resources you do not have and fix the ports. "
-               "tokens: plain substrings, the cheap pre-filter. patterns: regexes "
-               "matched per command segment. implies: other resources a command "
-               "needs indirectly. why: what silently goes wrong when two sessions "
-               "share it. hint: how to hand it over.",
+    "_readme": "Delete what you do not have and fix the ports and commands. "
+               "patterns: regexes matched against each command's argv. "
+               "port/cwd/start/ready: let agent-bus own the service, so it can "
+               "say which checkout it is serving and move it to yours. "
+               "implies: resources a command needs indirectly. "
+               "scope 'worktree': contended only within one checkout. "
+               "why/hint: shown verbatim when a command is blocked — this is "
+               "where the knowledge that stops a workaround goes.",
     "resources": [
-        {"name": "server", "desc": "the dev server",
+        {"name": "server", "desc": "the dev server on :3000",
          "why": "A reloader watches the tree it was started in, so a request to "
                 "that port exercises whichever checkout owns it — not yours.",
-         "hint": "Restart it from your own checkout before you rely on the result.",
-         "tokens": ["uvicorn", "runserver", "nodemon", "3000"],
-         "patterns": [r"\buvicorn\b", r"\brunserver\b", r"\bnodemon\b", r":3000\b"]},
+         "port": 3000,
+         "start": "npm run dev",
+         "ready": "curl -sf localhost:3000/",
+         "patterns": [r"\bnodemon\b", r"\bnext\s+dev\b", r":3000\b"]},
         {"name": "db", "desc": "the shared development database",
          "why": "One database for every worktree. Additive migrations are fine; a "
                 "reseed or a destructive migration invalidates the fixtures and "
                 "ids the other sessions are holding.",
          "hint": "Say exactly what loses rows before you run it: agentbus post \"...\"",
-         "tokens": ["alembic", "psql", "migrate", "prisma", "seed"],
          "patterns": [r"\balembic\b", r"\bpsql\b", r"\bprisma\s+migrate\b",
                       r"\bmake\s+seed"]},
         {"name": "e2e", "desc": "the end-to-end runner and whatever it drives",
          "why": "One browser or device on this machine, and the run only means "
                 "something against the server serving your checkout.",
          "implies": ["server"],
-         "tokens": ["playwright", "cypress", "maestro"],
          "patterns": [r"\bplaywright\b", r"\bcypress\b", r"\bmaestro\b"]},
+        {"name": "worktree", "desc": "this checkout's working tree and git index",
+         "scope": "worktree",
+         "why": "Two sessions in ONE checkout ruin each other through the tree, "
+                "not through edits: one runs git stash and the other's files "
+                "change mid-task; git add -A sweeps their half-finished work "
+                "into a commit.",
+         "patterns": [r"\bgit\s+(checkout|switch|stash|reset|rebase|add|commit)\b",
+                      r"\b(npm|pnpm|yarn|bun)\s+(install|ci)\b"]},
     ],
 }
 
@@ -1340,6 +2080,8 @@ def plugin_root():
 def cli_install(args):
     """Wire this machine up. Both installer scripts are thin wrappers around this,
     so Windows and POSIX get the same decisions made by the same code."""
+    import shutil
+    import stat
     root = plugin_root()
     want = os.path.join(HOME, ".claude", "skills", "agent-bus")
     print("agent-bus installer\n")
@@ -1409,23 +2151,54 @@ def cli_install(args):
                   '"Bash(agentbus:*)" to permissions.allow yourself')
         else:
             cfg = cfg or {}
-            allow = cfg.setdefault("permissions", {}).setdefault("allow", [])
+            perms = cfg.get("permissions")
+            if not isinstance(perms, dict):
+                perms = {}
+                cfg["permissions"] = perms
+            allow = perms.get("allow")
+            if not isinstance(allow, list):
+                allow = []
+                perms["allow"] = allow
             if "Bash(agentbus:*)" in allow:
                 print("  + permission: already allowlisted")
             else:
                 allow.append("Bash(agentbus:*)")
                 os.makedirs(os.path.dirname(settings), exist_ok=True)
-                with open(settings, "w") as fh:
-                    json.dump(cfg, fh, indent=2)
-                    fh.write("\n")
-                print("  + permission: Bash(agentbus:*) allowlisted")
-    except OSError as exc:
-        print("  ! could not update settings.json: %s" % exc)
+                # Atomic: this is the user's global settings file, and a crash
+                # between truncate and flush would leave it empty.
+                if write_json_pretty(settings, cfg):
+                    print("  + permission: Bash(agentbus:*) allowlisted")
+                else:
+                    print('  ! could not write settings.json — add '
+                          '"Bash(agentbus:*)" to permissions.allow yourself')
+    except Exception as exc:
+        print("  ! could not update settings.json (%s) — add "
+              '"Bash(agentbus:*)" to permissions.allow yourself' % exc)
 
     print()
     cli_doctor([])
     print("\nRestart Claude Code (or /reload-plugins, then `agentbus register`).")
     print("In a repo with shared services: agentbus init-repo")
+
+
+def cli_forget(args):
+    """Drop session records by hand — the broom for anything the automatic
+    reaping cannot reach."""
+    pos = positional(args)
+    gone = []
+    for s in load_sessions():
+        if flag(args, "--stale"):
+            if now() - s.get("beat", 0) > IDLE_SECS * 3:
+                gone.append(s)
+        elif pos and (s.get("agent") == pos[0] or s["sid"] == pos[0]):
+            gone.append(s)
+    if not pos and not flag(args, "--stale"):
+        print("usage: agentbus forget <agent|session-id> | --stale", file=sys.stderr)
+        sys.exit(1)
+    for s in gone:
+        forget_session(s["sid"])
+    refresh_derived()
+    print("forgot %d: %s" % (len(gone), ", ".join(s.get("agent", "?") for s in gone)))
 
 
 def cli_doctor(_args):
@@ -1446,8 +2219,23 @@ def cli_doctor(_args):
     print("repo         : %s (%s)" % (label, repo_key))
     print("  in repo    : %s" % (shared if os.path.exists(shared) else "-"))
     print("  local      : %s" % (local if os.path.exists(local) else "-"))
-    print("  resources  : %s" % (", ".join(r["name"] for r in cfg.get("resources", []))
-                                 or "none — `agentbus init-repo` to declare some"))
+    resources = cfg.get("resources", [])
+    if not resources:
+        print("  resources  : none — `agentbus init-repo` to declare some")
+    for res in resources:
+        stamp = os.path.join(MATCHED, re.sub(r"[^A-Za-z0-9_.-]", "_",
+                                             "%s__%s" % (repo_key, res["name"])))
+        try:
+            bits = ["last matched %s" % ago(int(os.path.getmtime(stamp)))]
+        except OSError:
+            bits = ["NEVER matched — a moved port or renamed script fails silently"]
+        if res.get("port"):
+            root, how = serving(repo_key, res)
+            bits.append("serving %s (%s)" % (short_path(root or "-"), how))
+        missing = [p for p in res.get("patterns", []) if not literal_runs(p)]
+        if missing:
+            bits.append("%d pattern(s) with no literal to pre-filter on" % len(missing))
+        print("  %-12s %s" % (res["name"], "; ".join(bits)))
     plugin_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     hooks = os.path.join(plugin_root, "hooks", "hooks.json")
     print("hooks        : %s" % (hooks if os.path.exists(hooks)
@@ -1459,28 +2247,32 @@ COMMANDS = {
     "release": cli_release, "wait": cli_wait, "post": cli_post,
     "note": cli_post, "inbox": cli_inbox, "run": cli_run, "name": cli_name,
     "doing": cli_doing, "init-repo": cli_init_repo, "doctor": cli_doctor,
-    "register": cli_register, "install": cli_install,
+    "register": cli_register, "install": cli_install, "serve": cli_serve,
+    "serves": cli_serves, "forget": cli_forget,
 }
 
 HOOKS = {
     "session-start": hook_session_start, "prompt-submit": hook_prompt_submit,
     "pre-tool": hook_pre_tool, "post-batch": hook_post_batch,
     "session-end": hook_session_end, "record-write": hook_record_write,
+    "post-bash": hook_post_bash,
 }
 
 USAGE = """agentbus — coordination between parallel Claude Code sessions
 
-  status                       who is live, what is held, recent activity
+  status                       who is live, what is held, what serves whom
   post [--to <agent>] "..."    leave a message for the others
   inbox                        everything addressed to this repo / to you
-  run <res>[,<res>] -- <cmd>   hold a resource for exactly one command
+  run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
+  serve <res>                  restart a service so it serves YOUR worktree
+  serves                       which checkout each service is answering for
   claim <res> [--why ".."] [--steal]
-  wait <res> [--timeout 300]   queue for a held resource
+  wait <res> [--timeout 90]    queue for a held resource
   release <res> | --all
   doing "..."                  one line others see in their roster
   name [<new>]                 read or set this session's name
   init-repo                    declare this repo's shared resources
-  install | doctor | whois | register
+  install | doctor | whois | register | forget <agent|--stale>
 """
 
 

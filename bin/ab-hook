@@ -5,7 +5,9 @@
 # it must be nearly free. It uses shell builtins only (no subprocesses) to decide
 # whether anything interesting can possibly have happened, and execs the Python
 # engine only when it has. When you are the only live session, every event below
-# short-circuits on the `live-count` gate and the bus costs nothing.
+# short-circuits on the `live-count` gate — before reading stdin, because that
+# read is a byte-at-a-time builtin loop and a large Write payload makes it the
+# most expensive thing here.
 #
 # It must never fail a session: no `set -e`, every path exits 0 unless the engine
 # itself deliberately returns a decision.
@@ -18,15 +20,11 @@ ENGINE="$HERE/agentbus"
 [ -n "$AGENTBUS_OFF" ] && exit 0
 [ -x "$ENGINE" ] || exit 0
 
-# Slurp the hook payload without spawning `cat`. Returns non-zero at EOF; fine.
-payload=""
-IFS= read -r -d '' payload
-
 case "$ev" in
   session-start|session-end|prompt-submit)
-    # Once per session or per user turn — always worth the engine.
-    "$ENGINE" hook "$ev" <<< "$payload"
-    exit $?
+    # Once per session or per user turn — always worth the engine. stdin is
+    # inherited rather than slurped, so the payload never passes through bash.
+    exec "$ENGINE" hook "$ev"
     ;;
 esac
 
@@ -35,6 +33,20 @@ esac
 
 live=0
 [ -r "$BUS/live-count" ] && read -r live < "$BUS/live-count"
+[ "${live:-0}" -gt 1 ] 2>/dev/null || exit 0
+
+case "$ev" in
+  post-bash)
+    # Only worth a look if some command actually took a lock automatically.
+    set -- "$BUS"/autoclaim/*
+    [ -e "$1" ] || exit 0
+    exec "$ENGINE" hook post-bash
+    ;;
+esac
+
+# Slurp the hook payload. Returns non-zero at EOF; fine.
+payload=""
+IFS= read -r -d '' payload
 
 sid=""
 sid_re='"session_id"[[:space:]]*:[[:space:]]*"([^"]+)"'
@@ -45,7 +57,6 @@ case "$ev" in
     # Heartbeat is a bare truncate: the file's mtime IS the timestamp, so no
     # `date` subprocess and no write of any content.
     [ -n "$sid" ] && : > "$BUS/sessions/$sid.beat" 2>/dev/null
-    [ "${live:-0}" -gt 1 ] 2>/dev/null || exit 0
     [ -n "$sid" ] || exit 0
     seq=0; cur=0
     [ -r "$BUS/events.seq" ] && read -r seq < "$BUS/events.seq"
@@ -59,11 +70,13 @@ case "$ev" in
     # Remember what this session touched, and push the path into every other
     # live session's filter so their pre-tool fast path can see the collision
     # without waiting for their next user turn.
-    [ "${live:-0}" -gt 1 ] 2>/dev/null || exit 0
     [ -n "$sid" ] || exit 0
-    fp_re='"file_path"[[:space:]]*:[[:space:]]*"([^"]+)"'
-    [[ "$payload" =~ $fp_re ]] || exit 0
-    fp="${BASH_REMATCH[1]}"
+    fp=""
+    for key in file_path notebook_path; do
+      fp_re="\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]+)\""
+      if [[ "$payload" =~ $fp_re ]]; then fp="${BASH_REMATCH[1]}"; break; fi
+    done
+    [ -n "$fp" ] || exit 0
     now=$(date +%s)
     printf '%s %s\n' "$now" "$fp" >> "$BUS/writes/$sid.log" 2>/dev/null
     for f in "$BUS"/hot-for/*; do
@@ -75,16 +88,15 @@ case "$ev" in
     ;;
 
   pre-tool)
-    [ "${live:-0}" -gt 1 ] 2>/dev/null || exit 0
     tool=""
     tool_re='"tool_name"[[:space:]]*:[[:space:]]*"([^"]+)"'
     [[ "$payload" =~ $tool_re ]] && tool="${BASH_REMATCH[1]}"
     case "$tool" in
       Bash)
-        # guard-tokens is one ERE alternation of literal substrings that could
-        # possibly touch a guarded resource. No match anywhere in the payload
-        # means no guarded resource can be involved — cheap and never a false
-        # negative, since these are plain ASCII substrings.
+        # guard-tokens is one ERE alternation of literal substrings derived from
+        # the configured patterns. No match anywhere in the payload means no
+        # guarded resource can be involved — cheap, and never a false negative
+        # because every pattern contributes a substring it must contain.
         tok=""
         [ -r "$BUS/guard-tokens" ] && read -r tok < "$BUS/guard-tokens"
         [ -n "$tok" ] || exit 0

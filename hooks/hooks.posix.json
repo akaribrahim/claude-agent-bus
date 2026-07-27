@@ -44,6 +44,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/ab-hook post-bash",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolBatch": [

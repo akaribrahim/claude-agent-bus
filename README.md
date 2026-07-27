@@ -1,7 +1,8 @@
 # agent-bus
 
 A Claude Code plugin that lets parallel sessions on one machine see each other,
-take turns on shared services, and talk — automatically, in every project.
+take turns on shared services, keep those services pointed at the right checkout,
+and talk — automatically, in every project.
 
 ## The problem
 
@@ -22,20 +23,17 @@ None of this announces itself. The port hides which checkout is answering.
 
 A README explaining the rules does not fix it, because an agent has to remember
 to read the README. This does, because the decision is made in a `PreToolUse`
-hook: the command does not run, and the agent is told who holds the resource and
-how to get it.
+hook: the command does not run, and the agent is told what is wrong and how to
+fix it.
 
 ## What it does
 
 | | |
 |---|---|
 | **Presence** | Every session registers itself. New ones open knowing who else is live, in which worktree, on which branch, and what is currently held. |
-| **Locks** | A command touching a declared shared resource takes it automatically. If another live session holds it, the command is **denied** with a real reason — holder, worktree, how long, and what goes wrong if you proceed. |
-| **Messages** | An append-only stream, delivered into the other agents' context at their next turn. No polling, no file anyone has to remember to open. |
-
-It costs nothing when you are alone: a `live-count` gate short-circuits every
-hook, and on POSIX the fast path is ~5 ms of shell builtins. The Python engine
-wakes only for a real message or a possible collision.
+| **Locks** | A command touching a declared shared resource takes it **for the length of that command** and gives it straight back. If another live session has it, the command is denied with the holder, the worktree and what they are doing. |
+| **Service ownership** | Separately from the lock, agent-bus tracks *which checkout each service is actually serving* — and blocks a command that would talk to somebody else's tree, even when the lock is free. `agentbus serve <res>` stops that service and starts it from your worktree. |
+| **Messages** | An append-only stream. What agents write to each other is delivered into their context at their next turn; lock churn is not, because nobody can act on it. |
 
 ## Install
 
@@ -53,24 +51,23 @@ git clone https://github.com/akaribrahim/claude-agent-bus $env:USERPROFILE\.clau
 powershell -ExecutionPolicy Bypass -File $env:USERPROFILE\.claude\skills\agent-bus\install.ps1
 ```
 
-Then restart Claude Code. Update later with `git pull` (re-run the installer only
-if the hook set changed).
+Then restart Claude Code. Update with `git pull`; re-run the installer only if
+the hook set changed.
 
 The installer picks this machine's hook entry point, puts `agentbus` on `PATH`,
 and allowlists `Bash(agentbus:*)` so it never raises a permission prompt. It
 requires Python 3.8+ and nothing else. Claude Code loads the plugin from
-`~/.claude/skills/agent-bus` in **every** project — it is discovered in place, so
-edits take effect without reinstalling.
+`~/.claude/skills/agent-bus` in **every** project — discovered in place, so edits
+take effect without reinstalling.
 
 ## Declaring what is shared
 
-Guarding is per-repository and opt-in. Without a config you still get presence
-and messaging; you just get no locks — which is the right default for a project
-with nothing to contend for.
+Per-repository and opt-in. Without a config you get presence and messaging and no
+locks, which is the right default for a project with nothing to contend for.
 
 ```bash
 cd your-repo
-agentbus init-repo     # writes .claude/agent-bus.json, then edit and commit it
+agentbus init-repo     # writes .claude/agent-bus.json — edit it, then commit it
 ```
 
 ```json
@@ -80,8 +77,10 @@ agentbus init-repo     # writes .claude/agent-bus.json, then edit and commit it
       "name": "server",
       "desc": "the dev API on :8000",
       "why": "The reloader watches the tree it was started in, so a request to :8000 exercises whichever checkout owns it — not necessarily yours.",
-      "hint": "Restart it from your own checkout before you rely on the result.",
-      "tokens": ["uvicorn", "8000"],
+      "port": 8000,
+      "cwd": "api",
+      "start": "uvicorn app:api --reload --port 8000",
+      "ready": "curl -sf localhost:8000/health",
       "patterns": ["\\buvicorn\\b", ":8000\\b"]
     },
     {
@@ -89,60 +88,79 @@ agentbus init-repo     # writes .claude/agent-bus.json, then edit and commit it
       "desc": "the browser and the runner",
       "why": "One browser on this machine, and the run only means something against the server serving your checkout.",
       "implies": ["server"],
-      "tokens": ["playwright"],
       "patterns": ["\\bplaywright\\b"]
+    },
+    {
+      "name": "worktree",
+      "desc": "this checkout's working tree and index",
+      "scope": "worktree",
+      "why": "One session's `git stash` changes the other's files mid-task; `git add -A` sweeps their half-finished work into a commit.",
+      "patterns": ["\\bgit\\s+(checkout|switch|stash|reset|rebase|add|commit)\\b"]
     }
   ]
 }
 ```
 
-- `tokens` — plain substrings; a shell fast path uses them to decide whether the
-  engine is worth waking at all. Cheap, never a false negative.
-- `patterns` — regexes matched per command segment, after read-only heads
-  (`grep`, `cat`, `git`, …) are skipped, so `grep -rn uvicorn src/` is a mention,
-  not a use.
-- `implies` — resources a command needs indirectly.
-- `why` / `hint` — shown verbatim when a command is blocked. This is where the
-  hard-won knowledge goes; it is the part that stops an agent from working around
-  the block.
+| field | meaning |
+|---|---|
+| `patterns` | Regexes matched against each command's **argv** — after read-only heads (`grep`, `cat`, `git log`) are skipped, quoted prose is dropped and heredoc bodies are removed. A commit message that names a tool is not a use of that tool. |
+| `port`, `cwd`, `start`, `ready` | Let agent-bus own the service: it can then say which checkout is being served and move it to yours. Without them a resource is a plain mutex. |
+| `implies` | Resources a command needs indirectly (an e2e run needs the server). |
+| `scope: "worktree"` | Contended only by sessions in the *same* checkout. |
+| `why` / `hint` | Shown verbatim when blocking. This is where the hard-won knowledge goes, and it is the part that stops an agent from working around the block. |
 
-Commit the file and every machine and collaborator gets the same guards.
-`agentbus init-repo --local` writes a machine-only override instead, and local
-entries win over the repo's by name.
+The cheap pre-filter the shell hook uses is **derived from the patterns**, so the
+two cannot drift apart. Commit the file and every machine and collaborator gets
+the same guards; `--local` writes a machine-only override that wins by name.
 
 ## Commands
 
 ```
-agentbus status                       who is live, what is held, recent activity
+agentbus status                       who is live, what is held, what serves whom
 agentbus post [--to <agent>] "..."    leave a message for the others
 agentbus inbox                        everything addressed to this repo / to you
-agentbus run <res>[,<res>] -- <cmd>   hold a resource for exactly one command
+agentbus run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
+agentbus serve <res>                  restart a service so it serves YOUR worktree
+agentbus serves                       which checkout each service is answering for
 agentbus claim <res> [--why ".."] [--steal]
-agentbus wait <res> [--timeout 300]   queue for a held resource
+agentbus wait <res> [--timeout 90]    queue for a held resource
 agentbus release <res> | --all
 agentbus doing "..."                  one line others see in their roster
-agentbus name [<new>]                 read or set this session's name
-agentbus init-repo | doctor | whois | install | register
+agentbus init-repo | doctor | whois | forget <agent|--stale> | install
 ```
+
+`agentbus doctor` reports what is installed, which config is in force, which
+services are running and for whom, and which resources have **never matched a
+command** — the silent failure mode when a port moves.
 
 ## How it works
 
 | Hook | Job |
 |---|---|
-| `SessionStart` | Register; inject the roster, held resources, and anything unread. |
+| `SessionStart` | Register; inject the roster, held resources, running services, and anything unread. |
 | `UserPromptSubmit`, `PostToolBatch` | Heartbeat; deliver new messages mid-work. |
-| `PreToolUse` | Take the resources a Bash command needs, or deny it. Block an `Edit`/`Write` to a file another session is editing **in the same checkout**. |
-| `PostToolUse` | Record what this session wrote, and push it into the other sessions' collision filters. |
+| `PreToolUse` | Take the resources a Bash command needs, or deny it — because someone holds them, or because the service is serving another checkout. Block an `Edit`/`Write` to a file another session is editing in the same checkout. |
+| `PostToolUse` | Give back what the command took; record what was written. |
 | `SessionEnd` | Release everything and deregister. |
 
-State lives in `~/.claude/agent-bus/` — sessions, cursors, locks, an append-only
-`events.jsonl`, and the derived files the shell fast path reads. Never in the
-plugin directory, so updating never loses it.
+State lives in `~/.claude/agent-bus/` — sessions, cursors, locks, service
+ownership, an append-only `events.jsonl`, and the derived files the shell fast
+path reads. Never in the plugin directory, so updating never loses it.
 
-Locks are soft by default (taken automatically, expire after 15 minutes of
-disuse, stealable once the holder goes idle) or hard (claimed explicitly, 45
-minutes, only stealable with `--steal`). A dead session's locks are released the
-next time anyone looks.
+Locks are soft (taken automatically, released when the command ends, stealable
+once expired) or hard (`claim`, 45 minutes, only stealable with `--steal`). A
+dead session's locks are released the next time anyone looks.
+
+## What it costs
+
+Measured on an M-series Mac, per hook invocation:
+
+| | |
+|---|---|
+| You are the only live session | **~4 ms** — a `live-count` gate short-circuits in shell builtins before anything is read |
+| Two sessions, command touches nothing shared | **~6 ms** — the literal pre-filter says no |
+| Something to actually decide | ~30 ms — the Python engine runs |
+| Windows (hooks call Python directly) | ~30 ms per tool call regardless; there is no shell fast path |
 
 ## Limits, stated plainly
 
@@ -153,14 +171,13 @@ next time anyone looks.
   context and no decision, so messages are delivered at session start, at each
   user turn, and after each tool batch. In practice an agent learns the moment it
   tries to do something, which is when it matters.
-- **It tracks ownership; it does not move services.** Nothing here restarts your
-  dev server against your worktree. Put that command in the resource's `hint`.
+- **A service agent-bus did not start** can only be attributed where the platform
+  exposes a process's working directory — macOS and Linux, not Windows. There it
+  is reported as unknown, with a warning, rather than guessed.
 - **Guards are as good as the config.** A resource nobody declared is a resource
-  nobody protects.
-- **Windows is implemented but lightly tested.** On POSIX the entry point is a
-  bash fast path; on Windows the installer wires the hooks straight to Python, so
-  nothing depends on a shell being present. `agentbus doctor` reports what got
-  installed.
+  nobody protects. `doctor` will tell you when one has never matched anything.
+- **Windows is implemented but lightly tested.** The installer wires the hooks
+  straight to Python there, so nothing depends on a shell being present.
 
 ## Requirements
 
