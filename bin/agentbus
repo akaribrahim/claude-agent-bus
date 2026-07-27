@@ -1096,12 +1096,33 @@ def still_serving(me):
     return out
 
 
+def repo_writes(me, cutoff=0):
+    """This session's writes that are inside its own repository — newest first,
+    one entry per file.
+
+    Writes outside the tree are dropped. A scratch file under /tmp is not work
+    anybody needs handed over, and counting one made a session that had done
+    nothing else announce itself on the way out: the first handoff this plugin
+    ever wrote in anger said "wrote 1 file, most recently /tmp/claude-clip.txt".
+    A summary nobody needs is what stops the useful ones being read."""
+    seen, out = set(), []
+    for ts, path in reversed(recent_writes(me.get("sid"), cutoff)):
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        rel = repo_relative(real, me.get("root"))
+        if rel:
+            out.append((ts, rel))
+    return out
+
+
 def did_something(me):
     """Whether this session is worth writing a handoff about at all.
 
     A summary from a session that only read things is noise, and noise is
     precisely what makes the useful ones get skimmed past."""
-    if recent_writes(me.get("sid"), 0):
+    if repo_writes(me):
         return True
     if int(me.get("guarded", 0) or 0):
         return True
@@ -1111,13 +1132,7 @@ def did_something(me):
 def handoff_text(me, note=""):
     """A summary of what this session did, for the sessions that outlive it."""
     sid = me.get("sid")
-    seen, files = set(), []
-    for _, path in reversed(recent_writes(sid, 0)):   # newest first
-        real = os.path.realpath(path)
-        if real in seen:
-            continue
-        seen.add(real)
-        files.append(repo_relative(real, me.get("root")) or short_path(path))
+    files = [rel for _, rel in repo_writes(me)]
     lines = ["agent-bus: %s finished on %s (%s)." % (
         me.get("agent"), me.get("branch") or "-", short_path(me.get("root", "")))]
     if me.get("doing"):

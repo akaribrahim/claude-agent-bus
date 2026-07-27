@@ -52,6 +52,15 @@ end_session sess-idle
 out=$(batch_of sess-b "$WT2")
 assert_not_contains "$out" "finished on" "a session that did nothing writes no handoff"
 
+# …and neither does one whose only writes were outside the repository.
+new_session sess-scratch "$REPO"
+ab_hook record-write "$(payload write sid=sess-scratch "cwd=$REPO" \
+  "path=$TEST_TMP/elsewhere.txt")" > /dev/null
+end_session sess-scratch
+out=$(batch_of sess-b "$WT2")
+assert_not_contains "$out" "finished on" \
+  "nor one whose only write was a scratch file somewhere else"
+
 # ---- a session that worked leaves a summary ---------------------------------
 
 ab sess-a doing "rewriting the token refresh" > /dev/null
@@ -62,6 +71,13 @@ done
 # Written twice: the count is of files, not of writes.
 ab_hook record-write "$(payload write sid=sess-a "cwd=$REPO" \
   "path=$REPO/api/token.py")" > /dev/null
+
+# A scratch file outside the repository is not work to hand over. The first
+# handoff this plugin ever wrote for real was from a session whose only write
+# was /tmp/claude-clip.txt, which is exactly the noise that stops the useful
+# ones being read.
+ab_hook record-write "$(payload write sid=sess-a "cwd=$REPO" \
+  "path=$TEST_TMP/scratch-notes.txt")" > /dev/null
 
 ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" "cmd=psql -l" id=h-1)" > /dev/null
 ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=h-1)" > /dev/null
@@ -78,6 +94,8 @@ assert_contains "$out" "finished on main" "the summary names the branch"
 assert_contains "$out" "handrepo" "and the worktree"
 assert_contains "$out" "rewriting the token refresh" "and what it was doing"
 assert_contains "$out" "wrote     : 3 files" "and how many files, counted once each"
+assert_not_contains "$out" "scratch-notes" \
+  "counting only what was written inside the repository"
 assert_contains "$out" "api/token.py" "naming them repository-relative"
 assert_contains "$out" "claimed   : 2 commands" "and how many commands took a resource"
 assert_contains "$out" "STILL RUNNING" "and that the service it started is still up"
