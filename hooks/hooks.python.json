@@ -1,0 +1,79 @@
+{
+  "_comment": "Fallback entry point for hosts without bash (Windows without Git Bash). Exec form: no shell, so nothing depends on path separators or quoting. The installer replaces __PYTHON__ with the interpreter it found. Costs one Python start per hook instead of the ~5 ms shell fast path; correctness first.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "session-start"],
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "prompt-submit"],
+            "timeout": 12
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "pre-tool"],
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "record-write"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "post-batch"],
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "session-end"],
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

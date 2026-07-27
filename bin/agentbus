@@ -1,0 +1,1519 @@
+#!/usr/bin/env python3
+"""
+agent-bus — coordination for parallel Claude Code sessions on one machine.
+
+WHY THIS EXISTS. Several Claude Code sessions can work the same repository at
+once, each in its own git worktree. Their file edits do not collide — separate
+checkouts. What they cannot have separately is anything that lives behind a
+single port or a single database on this machine: a dev server, a bundler, a
+simulator, one Postgres. The failure is silent in the worst possible way: the
+port hides which checkout is answering, so an agent runs a test, gets a green
+result, and believes it — while it was exercising another worktree's code.
+
+Documentation cannot fix that, because the agent has to remember to read it.
+This does, because the decision is made in a PreToolUse hook: the command simply
+does not run, and the agent is told who holds the resource and how to get it.
+
+Three jobs:
+
+  presence   every session registers itself, so each new one opens knowing who
+             else is live, where, and on what branch
+  locks      commands that touch a shared resource take it automatically; if
+             someone else holds it the command is denied with a real reason
+  messages   an append-only stream, delivered into the other agents' context at
+             their next turn — no polling, no file they have to remember to read
+
+State lives in ~/.claude/agent-bus (see LAYOUT below), never in this directory,
+so updating the plugin never loses it.
+"""
+
+import errno
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import time
+
+# ---------------------------------------------------------------- layout ----
+#
+# LAYOUT
+#   sessions/<sid>.json   one live session: agent name, worktree, branch, pid
+#   sessions/<sid>.beat   empty; its mtime is the session's last sign of life
+#   cursors/<sid>         highest event id this session has been shown
+#   hot-for/<sid>         paths other live sessions wrote lately (fast-path filter)
+#   writes/<sid>.log      "<epoch> <abs path>" per write, for collision checks
+#   locks/<key>.json      one held resource
+#   repos/<repo>.json     which resources exist in a repo and what claims them
+#   events.jsonl          append-only stream, the thing agents actually read
+#   events.seq            id of the last event; the fast path compares to cursors
+#   live-count            number of live sessions; 1 means the bus is free
+#   guard-tokens          ERE of literals worth waking the engine for
+
+IS_WIN = sys.platform.startswith("win")
+HOME = os.path.expanduser("~")
+BUS = os.environ.get("AGENTBUS_HOME", os.path.join(HOME, ".claude", "agent-bus"))
+SESSIONS = os.path.join(BUS, "sessions")
+CURSORS = os.path.join(BUS, "cursors")
+HOTFOR = os.path.join(BUS, "hot-for")
+WRITES = os.path.join(BUS, "writes")
+LOCKS = os.path.join(BUS, "locks")
+REPOS = os.path.join(BUS, "repos")
+EVENTS = os.path.join(BUS, "events.jsonl")
+SEQFILE = os.path.join(BUS, "events.seq")
+LIVEFILE = os.path.join(BUS, "live-count")
+TOKENFILE = os.path.join(BUS, "guard-tokens")
+
+STALE_BEAT = 45 * 60      # no heartbeat this long and no pid: the session is gone
+IDLE_SECS = 5 * 60        # holder quiet this long: a soft lock may be taken
+SOFT_TTL = 15 * 60        # auto-taken lock, measured from last use
+HARD_TTL = 45 * 60        # explicitly claimed lock
+COLLIDE_WINDOW = 15 * 60  # two sessions editing one file inside this window collide
+MAX_DELIVER = 12          # events shown at once; the rest are summarised
+ROTATE_AT = 5000          # events.jsonl lines before trimming
+
+# Command heads that cannot start a service or reach a port, so a guarded token
+# appearing after one of them is a mention, not a use: `grep -r uvicorn api/`.
+READONLY_HEADS = {
+    "grep", "rg", "cat", "bat", "ls", "ll", "head", "tail", "find", "fd", "tree",
+    "echo", "printf", "jq", "yq", "wc", "sed", "awk", "cut", "sort", "uniq",
+    "less", "more", "file", "stat", "which", "type", "man", "diff", "git",
+    "pwd", "date", "true", "false", "test", "basename", "dirname", "realpath",
+    "code", "open", "agentbus",
+}
+
+# Wrappers to strip before deciding what a segment really runs.
+WRAPPERS = {"sudo", "time", "nohup", "exec", "command", "env", "caffeinate"}
+
+
+# ------------------------------------------------------------- utilities ----
+
+def now():
+    return int(time.time())
+
+
+def ensure_dirs():
+    for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+
+
+def read_json(path, default=None):
+    try:
+        with open(path, "r") as fh:
+            return json.load(fh)
+    except Exception:
+        return default
+
+
+def write_json(path, obj):
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(obj, fh)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def read_int(path, default=0):
+    try:
+        with open(path, "r") as fh:
+            return int(fh.read().strip() or default)
+    except Exception:
+        return default
+
+
+def write_text(path, text):
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+class Mutex:
+    """Atomic across processes: mkdir either creates the directory or fails."""
+
+    def __init__(self, name, timeout=5.0):
+        self.path = os.path.join(BUS, ".%s.mutex" % name)
+        self.timeout = timeout
+        self.held = False
+
+    def __enter__(self):
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                os.mkdir(self.path)
+                self.held = True
+                return self
+            except OSError as exc:
+                if exc.errno != errno.EEXIST:
+                    return self
+                # A mutex older than a minute belongs to a process that died.
+                try:
+                    if time.time() - os.path.getmtime(self.path) > 60:
+                        os.rmdir(self.path)
+                        continue
+                except OSError:
+                    pass
+                if time.time() > deadline:
+                    return self
+                time.sleep(0.02)
+
+    def __exit__(self, *_):
+        if self.held:
+            try:
+                os.rmdir(self.path)
+            except OSError:
+                pass
+        return False
+
+
+def ago(ts):
+    if not ts:
+        return "?"
+    d = max(0, now() - int(ts))
+    if d < 60:
+        return "just now"
+    if d < 3600:
+        return "%dm ago" % (d // 60)
+    if d < 86400:
+        return "%dh%02dm ago" % (d // 3600, (d % 3600) // 60)
+    return "%dd ago" % (d // 86400)
+
+
+def held_for(ts):
+    d = max(0, now() - int(ts or 0))
+    if d < 60:
+        return "%ds" % d
+    if d < 3600:
+        return "%dm" % (d // 60)
+    return "%dh%02dm" % (d // 3600, (d % 3600) // 60)
+
+
+# ------------------------------------------------------------------ repo ----
+
+def git_facts(cwd):
+    """(worktree root, repo key, label, branch) — the repo key is shared by all
+    worktrees of one repository, because it is derived from the common git dir."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir", "--show-toplevel",
+             "--abbrev-ref", "HEAD"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode != 0:
+            raise RuntimeError
+        common, root, branch = (out.stdout.strip().split("\n") + ["", "", ""])[:3]
+    except Exception:
+        root = cwd
+        key = "path:" + hashlib.sha1(cwd.encode()).hexdigest()[:8]
+        return cwd, key, os.path.basename(cwd.rstrip("/")) or "?", ""
+    if not os.path.isabs(common):
+        common = os.path.normpath(os.path.join(root, common))
+    common = os.path.realpath(common)
+    label = os.path.basename(os.path.dirname(common)) or "repo"
+    key = "%s:%s" % (label, hashlib.sha1(common.encode()).hexdigest()[:6])
+    return root, key, label, branch
+
+
+def agent_name_from(branch, label, taken):
+    base = (branch or "").split("/")[-1].strip() or label or "agent"
+    if base in ("HEAD", "main", "master", "develop"):
+        base = "%s-%s" % (label, base)
+    parts = [p for p in re.split(r"[^A-Za-z0-9]+", base) if p][:3]
+    name = "-".join(parts).lower() or "agent"
+    if name not in taken:
+        return name
+    for n in range(2, 40):
+        cand = "%s#%d" % (name, n)
+        if cand not in taken:
+            return cand
+    return name
+
+
+def claude_pid():
+    """The pid of the Claude Code process this hook belongs to. Used for liveness:
+    a heartbeat can be stale during a long turn, but the process is proof."""
+    env = os.environ.get("CLAUDE_PID")
+    if env and env.isdigit():
+        return int(env)
+    pid = os.getppid()
+    if IS_WIN:
+        return pid  # no cheap portable ancestor walk; CLAUDE_PID covers the rest
+    for _ in range(5):
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)],
+                                 capture_output=True, text=True, timeout=3)
+            line = out.stdout.strip()
+            if not line:
+                return pid
+            ppid, comm = line.split(None, 1)
+            if "claude" in comm.lower():
+                return pid
+            pid = int(ppid)
+            if pid <= 1:
+                return os.getppid()
+        except Exception:
+            return os.getppid()
+    return os.getppid()
+
+
+def pid_alive(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if IS_WIN:
+        # os.kill(pid, 0) is NOT a liveness probe on Windows. CPython maps every
+        # signal other than CTRL_C_EVENT/CTRL_BREAK_EVENT onto TerminateProcess,
+        # so the POSIX idiom would kill the very sessions this is tracking.
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.OpenProcess.restype = ctypes.c_void_p
+            k32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+            k32.CloseHandle.argtypes = [ctypes.c_void_p]
+            handle = k32.OpenProcess(0x1000, 0, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            code = ctypes.c_ulong()
+            k32.GetExitCodeProcess.argtypes = [ctypes.c_void_p,
+                                               ctypes.POINTER(ctypes.c_ulong)]
+            ok = k32.GetExitCodeProcess(handle, ctypes.byref(code))
+            k32.CloseHandle(handle)
+            return bool(ok) and code.value == 259  # STILL_ACTIVE
+        except Exception:
+            return True  # unknown beats reaping a session that is still working
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError as exc:
+        return exc.errno == errno.EPERM
+    except Exception:
+        return False
+
+
+# -------------------------------------------------------------- sessions ----
+
+def beat_path(sid):
+    return os.path.join(SESSIONS, "%s.beat" % sid)
+
+
+def touch_beat(sid):
+    try:
+        open(beat_path(sid), "w").close()
+    except OSError:
+        pass
+
+
+def last_beat(sid):
+    try:
+        return int(os.path.getmtime(beat_path(sid)))
+    except OSError:
+        return 0
+
+
+def load_sessions(reap=False):
+    """All sessions that still look alive. With reap=True, dead ones are removed
+    and whatever they were holding is released."""
+    out = []
+    dead = []
+    try:
+        names = os.listdir(SESSIONS)
+    except OSError:
+        return out
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        sid = n[:-5]
+        rec = read_json(os.path.join(SESSIONS, n))
+        if not rec:
+            dead.append(sid)
+            continue
+        rec["sid"] = sid
+        rec["beat"] = last_beat(sid) or rec.get("started", 0)
+        alive = pid_alive(rec.get("pid", 0))
+        if not alive and now() - rec["beat"] > STALE_BEAT:
+            dead.append(sid)
+            continue
+        rec["alive_pid"] = alive
+        out.append(rec)
+    if reap and dead:
+        for sid in dead:
+            forget_session(sid)
+    out.sort(key=lambda r: r.get("started", 0))
+    return out
+
+
+def forget_session(sid):
+    release_all(sid, quiet=True)
+    for p in (os.path.join(SESSIONS, "%s.json" % sid), beat_path(sid),
+              os.path.join(CURSORS, sid), os.path.join(HOTFOR, sid),
+              os.path.join(WRITES, "%s.log" % sid)):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
+def refresh_derived(sessions=None):
+    """live-count and guard-tokens are read by the shell fast path, which cannot
+    parse JSON. Keep them in sync whenever the engine runs anyway."""
+    if sessions is None:
+        sessions = load_sessions()
+    write_text(LIVEFILE, "%d\n" % len(sessions))
+    tokens = set()
+    seen = set()
+    for s in sessions:
+        key = s.get("repo_key")
+        if key in seen:
+            continue
+        seen.add(key)
+        cfg = repo_config(key, s.get("root"))
+        for res in cfg.get("resources", []):
+            for tok in res.get("tokens", []):
+                tokens.add(re.escape(tok))
+    write_text(TOKENFILE, ("|".join(sorted(tokens)) if tokens else "") + "\n")
+    rebuild_hot(sessions)
+
+
+def rebuild_hot(sessions):
+    """hot-for/<sid> lists absolute paths other live sessions wrote recently. The
+    pre-tool fast path greps the tool payload against it and stops there when
+    nothing matches, which is the usual case."""
+    cutoff = now() - COLLIDE_WINDOW
+    per = {}
+    for s in sessions:
+        per[s["sid"]] = recent_writes(s["sid"], cutoff)
+    for s in sessions:
+        paths = set()
+        for other, writes in per.items():
+            if other == s["sid"]:
+                continue
+            paths.update(p for _, p in writes)
+        write_text(os.path.join(HOTFOR, s["sid"]),
+                   "".join(p + "\n" for p in sorted(paths)))
+
+
+def recent_writes(sid, cutoff):
+    path = os.path.join(WRITES, "%s.log" % sid)
+    out = []
+    try:
+        with open(path, "r") as fh:
+            lines = fh.readlines()[-800:]
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            ts, p = line.rstrip("\n").split(" ", 1)
+            ts = int(ts)
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            out.append((ts, p))
+    if len(lines) > 400:
+        write_text(path, "".join("%d %s\n" % (t, p) for t, p in out))
+    return out
+
+
+def current_session(payload=None):
+    """Which session am I? Hooks are told on stdin; the CLI reads the environment
+    Claude Code exports into every Bash call."""
+    sid = None
+    if payload:
+        sid = payload.get("session_id")
+    sid = sid or os.environ.get("AGENTBUS_SESSION") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        return None, None
+    rec = read_json(os.path.join(SESSIONS, "%s.json" % sid))
+    if rec:
+        rec["sid"] = sid
+    return sid, rec
+
+
+# ---------------------------------------------------------------- events ----
+
+def emit(sid, agent, repo_key, kind, text, to=None, extra=None):
+    rec = {"ts": now(), "sid": sid or "", "agent": agent or "?",
+           "repo": repo_key or "", "kind": kind, "text": (text or "")[:1500]}
+    if to:
+        rec["to"] = to
+    if extra:
+        rec.update(extra)
+    with Mutex("events"):
+        seq = read_int(SEQFILE, 0) + 1
+        rec["i"] = seq
+        line = json.dumps(rec, ensure_ascii=False) + "\n"
+        try:
+            # A single write of one short line is atomic under O_APPEND, which is
+            # what lets every session share this file without a writer lock.
+            flags = (os.O_CREAT | os.O_WRONLY | os.O_APPEND
+                     | getattr(os, "O_BINARY", 0))
+            fd = os.open(EVENTS, flags, 0o600)
+            os.write(fd, line.encode("utf-8"))
+            os.close(fd)
+        except OSError:
+            return 0
+        write_text(SEQFILE, "%d\n" % seq)
+    return seq
+
+
+def read_events(after=0):
+    out = []
+    try:
+        with open(EVENTS, "r") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("i", 0) > after:
+                    out.append(rec)
+    except OSError:
+        pass
+    return out
+
+
+def rotate_events():
+    try:
+        with open(EVENTS, "r") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return
+    if len(lines) < ROTATE_AT:
+        return
+    with Mutex("events"):
+        write_text(EVENTS, "".join(lines[-1000:]))
+
+
+def interesting_to(rec, me):
+    """An event reaches a session when it is addressed to it, or when it happened
+    in the same repository. Work in another project stays out of the way."""
+    if rec.get("sid") == me.get("sid"):
+        return False
+    to = rec.get("to")
+    if to:
+        return to == me.get("agent")
+    if rec.get("kind") == "note":
+        return rec.get("repo") == me.get("repo_key")
+    return rec.get("repo") == me.get("repo_key")
+
+
+def deliver(me, advance=True):
+    """Everything this session has not been shown yet, formatted for context."""
+    sid = me.get("sid")
+    cursor = read_int(os.path.join(CURSORS, sid), 0)
+    seq = read_int(SEQFILE, 0)
+    if seq <= cursor:
+        return ""
+    mine = [r for r in read_events(after=cursor) if interesting_to(r, me)]
+    if advance:
+        write_text(os.path.join(CURSORS, sid), "%d\n" % seq)
+    if not mine:
+        return ""
+    shown = mine[-MAX_DELIVER:]
+    lines = []
+    for r in shown:
+        who = r.get("agent", "?")
+        direct = " → you" if r.get("to") else ""
+        lines.append("  - %s%s, %s: %s" % (who, direct, ago(r.get("ts")), r.get("text", "")))
+    head = "agent-bus — %d new message%s from other sessions:" % (
+        len(mine), "" if len(mine) == 1 else "s")
+    if len(mine) > len(shown):
+        head += " (showing the last %d)" % len(shown)
+    return head + "\n" + "\n".join(lines)
+
+
+# ----------------------------------------------------------------- locks ----
+
+def lock_path(repo_key, res):
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", "%s__%s" % (repo_key, res))
+    return os.path.join(LOCKS, "%s.json" % safe)
+
+
+def load_lock(repo_key, res):
+    return read_json(lock_path(repo_key, res))
+
+
+def lock_state(lock, sessions):
+    """(holder record or None, stealable, why-stealable)"""
+    if not lock:
+        return None, True, "free"
+    holder = next((s for s in sessions if s["sid"] == lock.get("sid")), None)
+    if holder is None:
+        return None, True, "holder is gone"
+    ttl = HARD_TTL if lock.get("mode") == "hard" else SOFT_TTL
+    if now() - lock.get("last_used", 0) > ttl:
+        return holder, True, "lock expired"
+    if lock.get("mode") == "soft" and now() - holder.get("beat", 0) > IDLE_SECS:
+        return holder, True, "holder idle and holding only a soft lock"
+    return holder, False, ""
+
+
+def do_claim(me, res, why="", mode="soft", steal=False, sessions=None):
+    """(ok, lock, holder, reason). Never blocks; `wait` is the blocking form."""
+    sessions = sessions if sessions is not None else load_sessions()
+    repo_key = me.get("repo_key", "")
+    with Mutex("lock-" + re.sub(r"[^A-Za-z0-9]", "_", res)[:40]):
+        lock = load_lock(repo_key, res)
+        holder, stealable, reason = lock_state(lock, sessions)
+        if lock and lock.get("sid") == me.get("sid"):
+            lock["last_used"] = now()
+            if mode == "hard":
+                lock["mode"] = "hard"
+                if why:
+                    lock["why"] = why
+            write_json(lock_path(repo_key, res), lock)
+            return True, lock, None, "already yours"
+        if holder and not stealable and not steal:
+            return False, lock, holder, reason
+        queue = (lock or {}).get("queue", []) if lock else []
+        queue = [q for q in queue if q.get("sid") != me.get("sid")]
+        new = {"resource": res, "repo": repo_key, "sid": me.get("sid"),
+               "agent": me.get("agent"), "worktree": me.get("root"),
+               "branch": me.get("branch"), "mode": mode, "why": why,
+               "acquired_at": now(), "last_used": now(), "queue": queue}
+        write_json(lock_path(repo_key, res), new)
+    if holder:
+        emit(me.get("sid"), me.get("agent"), repo_key, "lock",
+             "took '%s' from %s (%s)%s" % (res, holder.get("agent"),
+                                           "forced" if steal else reason,
+                                           (' — ' + why) if why else ""))
+    elif mode == "hard" or why:
+        emit(me.get("sid"), me.get("agent"), repo_key, "lock",
+             "took '%s'%s" % (res, (' — ' + why) if why else ""))
+    return True, new, holder, ""
+
+
+def do_release(me, res, quiet=False):
+    repo_key = me.get("repo_key", "")
+    lock = load_lock(repo_key, res)
+    if not lock or lock.get("sid") != me.get("sid"):
+        return False
+    waiting = lock.get("queue", [])
+    try:
+        os.unlink(lock_path(repo_key, res))
+    except OSError:
+        return False
+    if not quiet:
+        tail = ""
+        if waiting:
+            tail = " — waiting: %s" % ", ".join(q.get("agent", "?") for q in waiting)
+        emit(me.get("sid"), me.get("agent"), repo_key, "lock",
+             "released '%s'%s" % (res, tail))
+    return True
+
+
+def release_all(sid, quiet=False):
+    try:
+        names = os.listdir(LOCKS)
+    except OSError:
+        return 0
+    n = 0
+    for name in names:
+        lock = read_json(os.path.join(LOCKS, name))
+        if lock and lock.get("sid") == sid:
+            try:
+                os.unlink(os.path.join(LOCKS, name))
+                n += 1
+            except OSError:
+                pass
+            if not quiet:
+                emit(sid, lock.get("agent"), lock.get("repo"), "lock",
+                     "released '%s'" % lock.get("resource"))
+    return n
+
+
+def held_by(sid):
+    out = []
+    try:
+        for name in os.listdir(LOCKS):
+            lock = read_json(os.path.join(LOCKS, name))
+            if lock and lock.get("sid") == sid:
+                out.append(lock)
+    except OSError:
+        pass
+    return out
+
+
+# ------------------------------------------------------ resource matching ----
+
+def repo_config(repo_key, root=None):
+    """What this repository's shared resources are.
+
+    The declaration belongs in the repository — `<root>/.claude/agent-bus.json` —
+    so it travels with the project to every machine and every collaborator rather
+    than living on the one laptop where somebody happened to write it. A
+    machine-local file may add or override entries by name for anything that is
+    genuinely local (a different port, a path only you have)."""
+    shared = read_json(os.path.join(root, ".claude", "agent-bus.json"), {}) if root else {}
+    local = read_json(os.path.join(REPOS, "%s.json" % repo_key), {}) or {}
+    if not shared:
+        return local
+    if not local:
+        return shared
+    merged = dict(shared)
+    by_name = {r["name"]: r for r in shared.get("resources", [])}
+    for res in local.get("resources", []):
+        by_name[res["name"]] = res
+    merged["resources"] = list(by_name.values())
+    return merged
+
+
+def split_segments(cmd):
+    return [s for s in re.split(r"&&|\|\||[;|\n]", cmd or "") if s.strip()]
+
+
+def head_token(segment):
+    s = segment.strip()
+    while True:
+        m = re.match(r"^[A-Za-z_][A-Za-z0-9_]*=\S*\s+", s)
+        if not m:
+            break
+        s = s[m.end():]
+    parts = s.split()
+    if not parts:
+        return ""
+    head = os.path.basename(parts[0].strip("\"'()"))
+    while head in WRAPPERS and len(parts) > 1:
+        parts = parts[1:]
+        head = os.path.basename(parts[0].strip("\"'()"))
+    return head
+
+
+def resources_for(cmd, cfg):
+    """Which declared resources this command would touch. A guarded word behind a
+    read-only head (grep, cat, git) is a mention, not a use."""
+    hits = []
+    resources = cfg.get("resources", [])
+    if not resources:
+        return hits
+    by_name = {r["name"]: r for r in resources}
+    for seg in split_segments(cmd):
+        if head_token(seg) in READONLY_HEADS:
+            continue
+        for res in resources:
+            if res["name"] in [h["name"] for h in hits]:
+                continue
+            for pat in res.get("patterns", []):
+                try:
+                    if re.search(pat, seg, re.I):
+                        hits.append(res)
+                        break
+                except re.error:
+                    continue
+    # A Maestro run needs the simulator, but it is also only meaningful against
+    # the bundler and API serving your worktree, so one match can pull in others.
+    for res in list(hits):
+        for name in res.get("implies", []):
+            dep = by_name.get(name)
+            if dep and dep["name"] not in [h["name"] for h in hits]:
+                dep = dict(dep)
+                dep["_implied_by"] = res["name"]
+                hits.append(dep)
+    return hits
+
+
+# ------------------------------------------------------------ formatting ----
+
+def roster_text(me, sessions):
+    same, other = [], []
+    for s in sessions:
+        if s["sid"] == me.get("sid"):
+            continue
+        (same if s.get("repo_key") == me.get("repo_key") else other).append(s)
+    lines = []
+    if same:
+        lines.append("Other sessions on this repo (%d):" % len(same))
+        for s in same:
+            idle = "" if now() - s.get("beat", 0) < IDLE_SECS else "  [idle]"
+            lines.append("  - %s  %s  %s  (last seen %s)%s" % (
+                s.get("agent"), short_path(s.get("root", "")), s.get("branch") or "-",
+                ago(s.get("beat")), idle))
+            if s.get("doing"):
+                lines.append("      doing: %s" % s["doing"])
+    if other:
+        labels = sorted({s.get("repo_label", "?") for s in other})
+        lines.append("Elsewhere on this Mac: %d session%s (%s)." % (
+            len(other), "" if len(other) == 1 else "s", ", ".join(labels)))
+    return "\n".join(lines)
+
+
+def locks_text(me, sessions):
+    cfg = repo_config(me.get("repo_key", ""), me.get("root"))
+    names = [r["name"] for r in cfg.get("resources", [])]
+    if not names:
+        return ""
+    held, free = [], []
+    for res in names:
+        lock = load_lock(me.get("repo_key"), res)
+        holder, stealable, _ = lock_state(lock, sessions)
+        if lock and holder and not stealable:
+            mine = " (yours)" if lock.get("sid") == me.get("sid") else ""
+            held.append("  - %s → %s%s, %s%s" % (
+                res, lock.get("agent"), mine, held_for(lock.get("acquired_at")),
+                (', "%s"' % lock["why"]) if lock.get("why") else ""))
+        else:
+            free.append(res)
+    out = []
+    if held:
+        out.append("Shared resources in use:")
+        out.extend(held)
+    if free:
+        out.append("Free: %s" % ", ".join(free))
+    return "\n".join(out)
+
+
+def short_path(p):
+    return p.replace(HOME, "~") if p else "?"
+
+
+RULES = (
+    "How this works: commands that touch a shared resource take it automatically. "
+    "If another live session holds it, the command is blocked and you are told by "
+    "whom — coordinate instead of taking it. Useful: `agentbus status`, "
+    "`agentbus post \"...\"` to tell the others something, "
+    "`agentbus run <res> -- <cmd>` to hold a resource for exactly one command."
+)
+
+
+# ----------------------------------------------------------------- hooks ----
+
+def hook_session_start(payload):
+    ensure_dirs()
+    sid = payload.get("session_id")
+    if not sid:
+        return
+    cwd = payload.get("cwd") or os.getcwd()
+    root, repo_key, label, branch = git_facts(cwd)
+    sessions = load_sessions(reap=True)
+    existing = read_json(os.path.join(SESSIONS, "%s.json" % sid))
+    taken = {s.get("agent") for s in sessions if s["sid"] != sid}
+    rec = existing or {}
+    rec.update({
+        "sid": sid, "pid": claude_pid(), "cwd": cwd, "root": root,
+        "repo_key": repo_key, "repo_label": label, "branch": branch,
+        "started": rec.get("started") or now(),
+    })
+    if not rec.get("agent") or rec.get("agent") in taken:
+        rec["agent"] = agent_name_from(branch, label, taken)
+    write_json(os.path.join(SESSIONS, "%s.json" % sid), rec)
+    touch_beat(sid)
+
+    first_time = existing is None
+    if first_time:
+        write_text(os.path.join(CURSORS, sid), "%d\n" % read_int(SEQFILE, 0))
+        if sessions:
+            emit(sid, rec["agent"], repo_key, "join",
+                 "joined on %s (%s)" % (branch or "-", short_path(root)))
+
+    sessions = load_sessions()
+    refresh_derived(sessions)
+    rotate_events()
+
+    others = [s for s in sessions if s["sid"] != sid]
+    if not others:
+        return  # alone: say nothing, cost nothing
+
+    blocks = ["## agent-bus", "You are `%s`. %d other Claude Code session%s live on "
+              "this Mac right now." % (rec["agent"], len(others),
+                                       " is" if len(others) == 1 else "s are")]
+    r = roster_text(rec, sessions)
+    if r:
+        blocks.append(r)
+    lk = locks_text(rec, sessions)
+    if lk:
+        blocks.append(lk)
+    pending = deliver(rec)
+    if pending:
+        blocks.append(pending)
+    blocks.append(RULES)
+
+    out = {"hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": "\n\n".join(blocks)}}
+    if not payload.get("session_title"):
+        out["hookSpecificOutput"]["sessionTitle"] = "%s · %s" % (
+            rec["agent"], branch or label)
+    print(json.dumps(out))
+
+
+def hook_prompt_submit(payload):
+    sid, me = current_session(payload)
+    if not me:
+        return
+    touch_beat(sid)
+    sessions = load_sessions(reap=True)
+    refresh_derived(sessions)
+    rotate_events()
+    for lock in held_by(sid):
+        lock["last_used"] = lock.get("last_used", now())
+    text = deliver(me)
+    if not text:
+        return
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit", "additionalContext": text}}))
+
+
+def hook_post_batch(payload):
+    sid, me = current_session(payload)
+    if not me:
+        return
+    touch_beat(sid)
+    text = deliver(me)
+    if not text:
+        return
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PostToolBatch", "additionalContext": text}}))
+
+
+def deny(reason):
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason}}))
+
+
+def note_ctx(text):
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "additionalContext": text}}))
+
+
+def hook_pre_tool(payload):
+    sid, me = current_session(payload)
+    if not me:
+        return
+    tool = payload.get("tool_name")
+    ti = payload.get("tool_input") or {}
+    sessions = load_sessions()
+    if tool == "Bash":
+        return guard_bash(me, ti.get("command", ""), sessions)
+    if tool in ("Edit", "Write", "NotebookEdit"):
+        return guard_file(me, ti.get("file_path") or ti.get("notebook_path") or "",
+                          sessions)
+
+
+def guard_bash(me, cmd, sessions):
+    cfg = repo_config(me.get("repo_key", ""), me.get("root"))
+    hits = resources_for(cmd, cfg)
+    if not hits:
+        return
+    # Check every resource before taking any. A command that is going to be
+    # denied must not leave half the rig claimed behind it.
+    blocked = []
+    for res in hits:
+        lock = load_lock(me.get("repo_key"), res["name"])
+        if lock and lock.get("sid") == me.get("sid"):
+            continue
+        holder, stealable, _ = lock_state(lock, sessions)
+        if holder and not stealable:
+            blocked.append((res, lock, holder))
+    if not blocked:
+        for res in hits:
+            do_claim(me, res["name"], mode="soft", sessions=sessions)
+        return
+    res, lock, holder = blocked[0]
+    lines = [
+        'agent-bus: BLOCKED. "%s" (%s) is held by another live Claude Code '
+        'session.' % (res["name"], res.get("desc", "shared resource")),
+        "",
+        "  holder    : %s   branch %s" % (holder.get("agent"), holder.get("branch") or "-"),
+        "  worktree  : %s" % short_path(holder.get("root", "")),
+        "  held for  : %s   (%s lock%s)" % (
+            held_for(lock.get("acquired_at")), lock.get("mode", "soft"),
+            (', "%s"' % lock["why"]) if lock.get("why") else ""),
+        "  last seen : %s" % ago(holder.get("beat")),
+    ]
+    if res.get("_implied_by"):
+        lines += ["", "  Your command drives '%s', which is only meaningful against the "
+                      "'%s' serving your worktree — so it needs that too."
+                  % (res["_implied_by"], res["name"])]
+    if res.get("why"):
+        lines += ["", "  " + res["why"]]
+    if len(blocked) > 1:
+        lines.append("  Also held: %s" % ", ".join(b[0]["name"] for b in blocked[1:]))
+    lines += [
+        "",
+        "Do not work around this by editing the command. Options:",
+        "  agentbus status",
+        '  agentbus post --to %s "..."        ask them to hand it over'
+        % holder.get("agent"),
+        '  agentbus wait %s --why "..."       queue; claims it the moment it frees'
+        % res["name"],
+        '  agentbus claim %s --steal --why "..."   only when you know they are done'
+        % res["name"],
+    ]
+    if res.get("hint"):
+        lines += ["", "  " + res["hint"]]
+    deny("\n".join(lines))
+
+
+def guard_file(me, path, sessions):
+    if not path:
+        return
+    path = os.path.realpath(path)
+    cutoff = now() - COLLIDE_WINDOW
+    same_tree, same_repo = [], []
+    for s in sessions:
+        if s["sid"] == me.get("sid"):
+            continue
+        writes = recent_writes(s["sid"], cutoff)
+        hit = next((w for w in reversed(writes) if os.path.realpath(w[1]) == path), None)
+        if hit and s.get("root") == me.get("root"):
+            same_tree.append((s, hit))
+        elif s.get("repo_key") == me.get("repo_key"):
+            rel = os.path.relpath(path, me.get("root") or "/")
+            other = os.path.join(s.get("root") or "/", rel)
+            hit2 = next((w for w in reversed(writes)
+                         if os.path.realpath(w[1]) == os.path.realpath(other)), None)
+            if hit2:
+                same_repo.append((s, hit2))
+    if same_tree:
+        s, hit = same_tree[0]
+        deny("\n".join([
+            "agent-bus: BLOCKED. Another live session is editing this exact file in "
+            "this exact checkout — your write would be made on top of theirs, or "
+            "theirs on top of yours.",
+            "",
+            "  file    : %s" % short_path(path),
+            "  other   : %s  (branch %s, wrote it %s)" % (
+                s.get("agent"), s.get("branch") or "-", ago(hit[0])),
+            "  worktree: %s   (the same one you are in)" % short_path(s.get("root", "")),
+            "",
+            "Split the work or take turns:",
+            '  agentbus post --to %s "I need <file> for <reason>"' % s.get("agent"),
+            "  agentbus status",
+            "",
+            "If you have already agreed who owns it, retry after "
+            "`agentbus claim file --why \"...\"` or set AGENTBUS_OFF=1 for one command.",
+        ]))
+        return
+    if same_repo:
+        s, hit = same_repo[0]
+        note_ctx("agent-bus: %s edited the same file on %s %s (different worktree, "
+                 "so no conflict now — but expect it at merge time)."
+                 % (s.get("agent"), s.get("branch") or "-", ago(hit[0])))
+
+
+def hook_session_end(payload):
+    sid = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        return
+    rec = read_json(os.path.join(SESSIONS, "%s.json" % sid))
+    if rec and len(load_sessions()) > 1:
+        emit(sid, rec.get("agent"), rec.get("repo_key"), "leave", "session ended")
+    forget_session(sid)
+    refresh_derived()
+
+
+def hook_record_write(payload):
+    """Fallback only: the shell fast path normally records writes itself."""
+    sid, me = current_session(payload)
+    if not me:
+        return
+    ti = payload.get("tool_input") or {}
+    path = ti.get("file_path") or ti.get("notebook_path")
+    if not path:
+        return
+    try:
+        with open(os.path.join(WRITES, "%s.log" % sid), "a") as fh:
+            fh.write("%d %s\n" % (now(), path))
+    except OSError:
+        pass
+
+
+# ------------------------------------------------------------------- cli ----
+
+def need_me():
+    sid, me = current_session()
+    if not me:
+        print("agent-bus: this shell is not attached to a registered session.\n"
+              "Start a new Claude Code session, or run `agentbus register`.",
+              file=sys.stderr)
+        sys.exit(1)
+    return me
+
+
+def cli_status(_args):
+    sessions = load_sessions(reap=True)
+    refresh_derived(sessions)
+    sid, me = current_session()
+    if not me:
+        # Run from a shell that is not a registered session: report on whatever
+        # repository the caller is standing in.
+        root, repo_key, label, _ = git_facts(os.getcwd())
+        me = {"sid": "", "repo_key": repo_key, "root": root, "repo_label": label}
+    print("agent-bus — %d live session%s" % (len(sessions), "" if len(sessions) == 1 else "s"))
+    for s in sessions:
+        mark = "*" if s["sid"] == me.get("sid") else " "
+        print(" %s %-18s %-42s %-28s %s" % (
+            mark, s.get("agent"), short_path(s.get("root", "")),
+            s.get("branch") or "-", ago(s.get("beat"))))
+    print()
+    lk = locks_text(me, sessions)
+    print(lk if lk else "No shared resources declared for this repo "
+                        "(`agentbus init-repo` to add some).")
+    recent = read_events(after=max(0, read_int(SEQFILE, 0) - 15))
+    if recent:
+        print("\nRecent:")
+        for r in recent[-8:]:
+            print("  %-16s %-9s %s" % (r.get("agent"), ago(r.get("ts")), r.get("text")))
+
+
+def cli_whois(_args):
+    for s in load_sessions():
+        print("%-18s %-42s %s" % (s.get("agent"), short_path(s.get("root", "")),
+                                  s.get("branch") or "-"))
+
+
+def opt(args, name, default=None):
+    if name in args:
+        i = args.index(name)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return default
+
+
+def flag(args, name):
+    return name in args
+
+
+def positional(args):
+    out, skip = [], False
+    for i, a in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if a.startswith("--"):
+            if a in ("--why", "--to", "--timeout", "--as"):
+                skip = True
+            continue
+        out.append(a)
+    return out
+
+
+def cli_claim(args):
+    me = need_me()
+    pos = positional(args)
+    if not pos:
+        print("usage: agentbus claim <resource> [--why \"...\"] [--steal]", file=sys.stderr)
+        sys.exit(1)
+    ok, lock, holder, reason = do_claim(me, pos[0], why=opt(args, "--why", ""),
+                                        mode="hard", steal=flag(args, "--steal"))
+    if ok:
+        print("claimed '%s'" % pos[0])
+        return
+    print("'%s' is held by %s (%s, %s). %s" % (
+        pos[0], holder.get("agent"), lock.get("mode"),
+        held_for(lock.get("acquired_at")), reason), file=sys.stderr)
+    sys.exit(1)
+
+
+def cli_release(args):
+    me = need_me()
+    if flag(args, "--all"):
+        print("released %d" % release_all(me["sid"]))
+        return
+    pos = positional(args)
+    if not pos:
+        print("usage: agentbus release <resource> | --all", file=sys.stderr)
+        sys.exit(1)
+    print("released '%s'" % pos[0] if do_release(me, pos[0]) else "not yours")
+
+
+def cli_wait(args):
+    me = need_me()
+    pos = positional(args)
+    if not pos:
+        print("usage: agentbus wait <resource> [--timeout 300] [--why \"...\"]",
+              file=sys.stderr)
+        sys.exit(1)
+    res, why = pos[0], opt(args, "--why", "")
+    timeout = int(opt(args, "--timeout", "300"))
+    deadline = time.time() + timeout
+    announced = False
+    while True:
+        ok, lock, holder, _ = do_claim(me, res, why=why, mode="hard")
+        if ok:
+            print("claimed '%s'" % res)
+            return
+        if not announced:
+            enqueue(me, res)
+            emit(me["sid"], me["agent"], me["repo_key"], "note",
+                 "waiting for '%s'%s" % (res, (' — ' + why) if why else ""),
+                 to=holder.get("agent"))
+            announced = True
+            print("'%s' is held by %s; queued." % (res, holder.get("agent")),
+                  file=sys.stderr)
+        if time.time() > deadline:
+            print("timed out waiting for '%s'" % res, file=sys.stderr)
+            sys.exit(1)
+        time.sleep(3)
+
+
+def enqueue(me, res):
+    with Mutex("lock-" + re.sub(r"[^A-Za-z0-9]", "_", res)[:40]):
+        lock = load_lock(me["repo_key"], res)
+        if not lock:
+            return
+        q = [x for x in lock.get("queue", []) if x.get("sid") != me["sid"]]
+        q.append({"sid": me["sid"], "agent": me["agent"], "at": now()})
+        lock["queue"] = q
+        write_json(lock_path(me["repo_key"], res), lock)
+
+
+def cli_post(args):
+    me = need_me()
+    pos = positional(args)
+    text = " ".join(pos).strip()
+    if not text:
+        print('usage: agentbus post [--to <agent>] "message"', file=sys.stderr)
+        sys.exit(1)
+    to = opt(args, "--to")
+    emit(me["sid"], me["agent"], me["repo_key"], "note", text, to=to)
+    print("posted%s" % (" to %s" % to if to else " to everyone on this repo"))
+
+
+def cli_inbox(_args):
+    me = need_me()
+    seen = 0
+    for r in read_events(after=0):
+        if not interesting_to(r, me):
+            continue
+        seen += 1
+        print("%-16s %-9s %s%s" % (r.get("agent"), ago(r.get("ts")),
+                                   "→you " if r.get("to") else "", r.get("text")))
+    if not seen:
+        print("(nothing yet)")
+
+
+def cli_run(args):
+    me = need_me()
+    if "--" not in args:
+        print("usage: agentbus run <res>[,<res>] [--why \"...\"] -- <command>",
+              file=sys.stderr)
+        sys.exit(1)
+    cut = args.index("--")
+    head, cmd = args[:cut], args[cut + 1:]
+    pos = positional(head)
+    if not pos or not cmd:
+        print("usage: agentbus run <res>[,<res>] [--why \"...\"] -- <command>",
+              file=sys.stderr)
+        sys.exit(1)
+    names = [x for x in pos[0].split(",") if x]
+    why = opt(head, "--why", " ".join(cmd)[:120])
+    taken = []
+    try:
+        for res in names:
+            ok, lock, holder, reason = do_claim(me, res, why=why, mode="hard")
+            if not ok:
+                print("agent-bus: '%s' is held by %s (%s). Not running."
+                      % (res, holder.get("agent"), held_for(lock.get("acquired_at"))),
+                      file=sys.stderr)
+                sys.exit(75)
+            taken.append(res)
+        # cmd is already word-split by the calling shell, so run it directly:
+        # joining it back into a shell string would destroy the quoting in
+        # forms like `-- bash -c 'cd x && maestro test'`.
+        rc = subprocess.call(cmd)
+        sys.exit(rc)
+    finally:
+        for res in taken:
+            do_release(me, res)
+
+
+def cli_name(args):
+    me = need_me()
+    pos = positional(args)
+    if not pos:
+        print(me.get("agent"))
+        return
+    old = me.get("agent")
+    me["agent"] = re.sub(r"[^A-Za-z0-9_.#-]", "-", pos[0])[:24]
+    write_json(os.path.join(SESSIONS, "%s.json" % me["sid"]), me)
+    emit(me["sid"], me["agent"], me["repo_key"], "note",
+         "renamed from %s to %s" % (old, me["agent"]))
+    print(me["agent"])
+
+
+def cli_doing(args):
+    me = need_me()
+    me["doing"] = " ".join(positional(args))[:160]
+    write_json(os.path.join(SESSIONS, "%s.json" % me["sid"]), me)
+    print("noted")
+
+
+TEMPLATE = {
+    "_readme": "Delete the resources you do not have and fix the ports. "
+               "tokens: plain substrings, the cheap pre-filter. patterns: regexes "
+               "matched per command segment. implies: other resources a command "
+               "needs indirectly. why: what silently goes wrong when two sessions "
+               "share it. hint: how to hand it over.",
+    "resources": [
+        {"name": "server", "desc": "the dev server",
+         "why": "A reloader watches the tree it was started in, so a request to "
+                "that port exercises whichever checkout owns it — not yours.",
+         "hint": "Restart it from your own checkout before you rely on the result.",
+         "tokens": ["uvicorn", "runserver", "nodemon", "3000"],
+         "patterns": [r"\buvicorn\b", r"\brunserver\b", r"\bnodemon\b", r":3000\b"]},
+        {"name": "db", "desc": "the shared development database",
+         "why": "One database for every worktree. Additive migrations are fine; a "
+                "reseed or a destructive migration invalidates the fixtures and "
+                "ids the other sessions are holding.",
+         "hint": "Say exactly what loses rows before you run it: agentbus post \"...\"",
+         "tokens": ["alembic", "psql", "migrate", "prisma", "seed"],
+         "patterns": [r"\balembic\b", r"\bpsql\b", r"\bprisma\s+migrate\b",
+                      r"\bmake\s+seed"]},
+        {"name": "e2e", "desc": "the end-to-end runner and whatever it drives",
+         "why": "One browser or device on this machine, and the run only means "
+                "something against the server serving your checkout.",
+         "implies": ["server"],
+         "tokens": ["playwright", "cypress", "maestro"],
+         "patterns": [r"\bplaywright\b", r"\bcypress\b", r"\bmaestro\b"]},
+    ],
+}
+
+
+def cli_init_repo(args):
+    ensure_dirs()
+    root, repo_key, label, _ = git_facts(os.getcwd())
+    local = flag(args, "--local")
+    if local:
+        path = os.path.join(REPOS, "%s.json" % repo_key)
+    else:
+        path = os.path.join(root, ".claude", "agent-bus.json")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except OSError:
+            pass
+    if os.path.exists(path):
+        print("already configured: %s" % path)
+        return
+    cfg = dict(TEMPLATE)
+    cfg["label"] = label
+    if local:
+        cfg["repo_key"] = repo_key
+    try:
+        with open(path, "w") as fh:
+            json.dump(cfg, fh, indent=2)
+            fh.write("\n")
+    except OSError as exc:
+        print("could not write %s: %s" % (path, exc), file=sys.stderr)
+        sys.exit(1)
+    refresh_derived()
+    print("wrote %s\nEdit it: delete what you do not have, fix the ports." % path)
+    if not local:
+        print("Commit it — then every machine and every collaborator gets the "
+              "same guards. Use --local for a machine-only override.")
+
+
+def cli_register(_args):
+    """Attach the current shell's session to the bus without waiting for a restart."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        print("no CLAUDE_CODE_SESSION_ID in the environment", file=sys.stderr)
+        sys.exit(1)
+    hook_session_start({"session_id": sid, "cwd": os.getcwd(), "session_title": "x"})
+    print("registered %s" % sid)
+
+
+def plugin_root():
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def cli_install(args):
+    """Wire this machine up. Both installer scripts are thin wrappers around this,
+    so Windows and POSIX get the same decisions made by the same code."""
+    root = plugin_root()
+    want = os.path.join(HOME, ".claude", "skills", "agent-bus")
+    print("agent-bus installer\n")
+    if os.path.realpath(root) != os.path.realpath(want):
+        print("  ! this clone is at %s" % root)
+        print("  ! Claude Code loads it only from %s — move or re-clone it there" % want)
+    else:
+        print("  + location: %s" % root)
+    print("  + python: %s (%s)" % (sys.executable, sys.version.split()[0]))
+
+    # Entry point. The shell fast path exits in ~5 ms using builtins only and
+    # wakes this engine just for real work; it needs bash and a `python3` on
+    # PATH because it execs the engine through its shebang. Everywhere else,
+    # call Python directly: one interpreter start per hook, but no dependency on
+    # a shell, a path separator, or quoting rules.
+    use_bash = (not IS_WIN and shutil.which("bash") and shutil.which("python3")
+                and not flag(args, "--python-hooks"))
+    src = "hooks.posix.json" if use_bash else "hooks.python.json"
+    try:
+        with open(os.path.join(root, "hooks", src)) as fh:
+            text = fh.read()
+        if not use_bash:
+            text = text.replace("__PYTHON__", json.dumps(sys.executable)[1:-1])
+        with open(os.path.join(root, "hooks", "hooks.json"), "w") as fh:
+            fh.write(text)
+    except OSError as exc:
+        print("  ! could not write hooks/hooks.json: %s" % exc)
+        return
+    print("  + hooks: %s" % ("shell fast path (~5 ms per hook)" if use_bash
+                             else "python fallback (no shell needed)"))
+
+    for name in ("bin/agentbus", "bin/ab-hook", "install.sh"):
+        p = os.path.join(root, name)
+        try:
+            os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        except OSError:
+            pass
+
+    bindir = os.path.join(HOME, ".local", "bin")
+    try:
+        os.makedirs(bindir, exist_ok=True)
+        engine = os.path.join(root, "bin", "agentbus")
+        if IS_WIN:
+            with open(os.path.join(bindir, "agentbus.cmd"), "w") as fh:
+                fh.write('@echo off\r\n"%s" "%s" %%*\r\n' % (sys.executable, engine))
+            with open(os.path.join(bindir, "agentbus"), "w") as fh:  # Git Bash
+                fh.write('#!/bin/sh\nexec "%s" "%s" "$@"\n'
+                         % (sys.executable.replace("\\", "/"), engine.replace("\\", "/")))
+        else:
+            link = os.path.join(bindir, "agentbus")
+            if os.path.islink(link) or os.path.exists(link):
+                os.unlink(link)
+            os.symlink(engine, link)
+        on_path = any(os.path.normcase(os.path.normpath(p)) ==
+                      os.path.normcase(os.path.normpath(bindir))
+                      for p in os.environ.get("PATH", "").split(os.pathsep))
+        print("  %s command: %s%s" % ("+" if on_path else "!", bindir,
+                                      "" if on_path else "  (NOT on PATH — add it)"))
+    except OSError as exc:
+        print("  ! could not create the agentbus command: %s" % exc)
+
+    settings = os.path.join(HOME, ".claude", "settings.json")
+    try:
+        cfg = read_json(settings)
+        if cfg is None and os.path.exists(settings):
+            print('  ! ~/.claude/settings.json is not valid JSON — add '
+                  '"Bash(agentbus:*)" to permissions.allow yourself')
+        else:
+            cfg = cfg or {}
+            allow = cfg.setdefault("permissions", {}).setdefault("allow", [])
+            if "Bash(agentbus:*)" in allow:
+                print("  + permission: already allowlisted")
+            else:
+                allow.append("Bash(agentbus:*)")
+                os.makedirs(os.path.dirname(settings), exist_ok=True)
+                with open(settings, "w") as fh:
+                    json.dump(cfg, fh, indent=2)
+                    fh.write("\n")
+                print("  + permission: Bash(agentbus:*) allowlisted")
+    except OSError as exc:
+        print("  ! could not update settings.json: %s" % exc)
+
+    print()
+    cli_doctor([])
+    print("\nRestart Claude Code (or /reload-plugins, then `agentbus register`).")
+    print("In a repo with shared services: agentbus init-repo")
+
+
+def cli_doctor(_args):
+    ensure_dirs()
+    sessions = load_sessions(reap=True)
+    refresh_derived(sessions)
+    print("bus dir      : %s" % BUS)
+    print("live sessions: %d" % len(sessions))
+    print("events       : %d" % read_int(SEQFILE, 0))
+    print("guard tokens : %s" % (open(TOKENFILE).read().strip()[:200]
+                                 if os.path.exists(TOKENFILE) else "-"))
+    sid, me = current_session()
+    print("this session : %s" % (me.get("agent") if me else "NOT REGISTERED"))
+    root, repo_key, label, _ = git_facts(os.getcwd())
+    shared = os.path.join(root, ".claude", "agent-bus.json")
+    local = os.path.join(REPOS, "%s.json" % repo_key)
+    cfg = repo_config(repo_key, root)
+    print("repo         : %s (%s)" % (label, repo_key))
+    print("  in repo    : %s" % (shared if os.path.exists(shared) else "-"))
+    print("  local      : %s" % (local if os.path.exists(local) else "-"))
+    print("  resources  : %s" % (", ".join(r["name"] for r in cfg.get("resources", []))
+                                 or "none — `agentbus init-repo` to declare some"))
+    plugin_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    hooks = os.path.join(plugin_root, "hooks", "hooks.json")
+    print("hooks        : %s" % (hooks if os.path.exists(hooks)
+                                 else "MISSING — run the installer"))
+
+
+COMMANDS = {
+    "status": cli_status, "whois": cli_whois, "claim": cli_claim,
+    "release": cli_release, "wait": cli_wait, "post": cli_post,
+    "note": cli_post, "inbox": cli_inbox, "run": cli_run, "name": cli_name,
+    "doing": cli_doing, "init-repo": cli_init_repo, "doctor": cli_doctor,
+    "register": cli_register, "install": cli_install,
+}
+
+HOOKS = {
+    "session-start": hook_session_start, "prompt-submit": hook_prompt_submit,
+    "pre-tool": hook_pre_tool, "post-batch": hook_post_batch,
+    "session-end": hook_session_end, "record-write": hook_record_write,
+}
+
+USAGE = """agentbus — coordination between parallel Claude Code sessions
+
+  status                       who is live, what is held, recent activity
+  post [--to <agent>] "..."    leave a message for the others
+  inbox                        everything addressed to this repo / to you
+  run <res>[,<res>] -- <cmd>   hold a resource for exactly one command
+  claim <res> [--why ".."] [--steal]
+  wait <res> [--timeout 300]   queue for a held resource
+  release <res> | --all
+  doing "..."                  one line others see in their roster
+  name [<new>]                 read or set this session's name
+  init-repo                    declare this repo's shared resources
+  install | doctor | whois | register
+"""
+
+
+def main():
+    ensure_dirs()
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        return
+    if argv[0] == "hook":
+        if len(argv) < 2 or argv[1] not in HOOKS:
+            return
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except ValueError:
+            return
+        HOOKS[argv[1]](payload)
+        return
+    fn = COMMANDS.get(argv[0])
+    if not fn:
+        print(USAGE)
+        sys.exit(1)
+    fn(argv[1:])
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        # A coordination layer must never be the reason a session breaks.
+        if os.environ.get("AGENTBUS_DEBUG"):
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+        sys.exit(0)
