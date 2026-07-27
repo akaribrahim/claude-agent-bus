@@ -1788,6 +1788,27 @@ def register(payload):
     return rec, existing is None
 
 
+def install_hint_once():
+    """Said once per machine: the `agentbus` command cannot be found.
+
+    Installing from a marketplace wires the hooks but cannot put a command on
+    anybody's PATH, and every block this plugin produces ends in advice to run
+    one. Without this the first block is followed by `command not found` and the
+    agent has no way to act on anything it was just told."""
+    marker = os.path.join(BUS, ".cli-notice")
+    if os.path.exists(marker):
+        return ""
+    import shutil
+    if shutil.which("agentbus"):
+        write_text(marker, "on-path\n")
+        return ""
+    write_text(marker, "%d\n" % now())
+    return ("agent-bus: the hooks are running, but the `agentbus` command is "
+            "not on PATH — so the commands in any message from agent-bus will "
+            "not run. Ask the human to run this once:\n  %s install"
+            % os.path.realpath(__file__))
+
+
 def hook_session_start(payload):
     rec, first_time = register(payload)
     if not rec:
@@ -1802,8 +1823,14 @@ def hook_session_start(payload):
     rotate_events()
 
     others = [s for s in sessions if s["sid"] != sid]
+    hint = install_hint_once()
     if not others:
-        return  # alone: say nothing, cost nothing
+        # Alone: say nothing, cost nothing — unless the plugin cannot actually
+        # be driven, which is worth exactly one sentence, once.
+        if hint:
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "SessionStart", "additionalContext": hint}}))
+        return
 
     blocks = ["## agent-bus", "You are `%s`. %d other Claude Code session%s live on "
               "this Mac right now." % (rec["agent"], len(others),
@@ -1817,6 +1844,8 @@ def hook_session_start(payload):
     pending = deliver(rec)
     if pending:
         blocks.append(pending)
+    if hint:
+        blocks.append(hint)
     blocks.append(RULES)
 
     out = {"hookSpecificOutput": {
@@ -3193,11 +3222,19 @@ def cli_install(args):
     root = plugin_root()
     want = os.path.join(HOME, ".claude", "skills", "agent-bus")
     print("agent-bus installer\n")
-    if os.path.realpath(root) != os.path.realpath(want):
-        print("  ! this clone is at %s" % root)
-        print("  ! Claude Code loads it only from %s — move or re-clone it there" % want)
-    else:
+    here = os.path.realpath(root)
+    if here == os.path.realpath(want):
         print("  + location: %s" % root)
+    elif os.path.join(".claude", "plugins") in here:
+        # Installed from a marketplace. Claude Code loads it from exactly here,
+        # so telling the reader to move it would break the thing they just
+        # installed — which is what this said until the flow was actually run.
+        print("  + location: %s" % root)
+        print("    installed from a marketplace; Claude Code loads it from here")
+    else:
+        print("  ! this clone is at %s" % root)
+        print("  ! Claude Code loads it only from %s, or from a marketplace "
+              "install — move or re-clone it there" % want)
     print("  + python: %s (%s)" % (sys.executable, sys.version.split()[0]))
 
     # Entry point. The shell fast path exits in ~5 ms using builtins only and
@@ -3348,6 +3385,13 @@ def cli_doctor(_args):
     hooks = os.path.join(plugin_root, "hooks", "hooks.json")
     print("hooks        : %s" % (hooks if os.path.exists(hooks)
                                  else "MISSING — run the installer"))
+    # Every block message this plugin writes tells the agent to run `agentbus
+    # <something>`. If that command does not resolve, the agent is handed advice
+    # it cannot act on, so this is worth a line of its own.
+    import shutil
+    found = shutil.which("agentbus")
+    print("command      : %s" % (found or "NOT on PATH — run `%s install`"
+                                 % os.path.realpath(__file__)))
 
 
 COMMANDS = {
