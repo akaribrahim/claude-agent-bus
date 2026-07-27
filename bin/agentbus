@@ -597,6 +597,47 @@ def recent_writes(sid, cutoff, compact=False):
     return out
 
 
+def follow_cwd(rec, cwd, trusted=True):
+    """Keep a session's recorded worktree in step with where it is working.
+
+    Claude Code can move a session into a worktree it creates under
+    `.claude/worktrees/`, and the record's root is derived once, at SessionStart.
+    Left alone it stays wrong for the rest of the session — and everything that
+    matters reads it. `serve` starts the service from that root, so the service
+    comes up from the tree the session *started* in while the message says it
+    used yours; `serving_check` compares against that root, so the session is
+    told the port is fine when it is answering with somebody else's code.
+
+    That is the exact silent wrong-checkout failure this plugin exists to
+    prevent, produced by the plugin itself. Reported from real use on
+    2026-07-27, after it quietly reverted an API to `main` and an agent spent
+    time on a fix that had stopped being deployed.
+
+    The new worktree sits *inside* the old root's path, so noticing it means
+    asking git again rather than comparing prefixes.
+
+    A hook payload's `cwd` is the session's own and is taken as given. The CLI's
+    is only wherever somebody happened to run a command from — a human in
+    another terminal could be anywhere — so from there a move is followed only
+    within the same repository. That still covers the case this exists for,
+    because every worktree of one repository shares its key."""
+    if not cwd or cwd == rec.get("cwd"):
+        return rec
+    root, repo_key, label, branch = git_facts(cwd)
+    if not trusted and repo_key != rec.get("repo_key"):
+        return rec
+    moved = os.path.realpath(root) != os.path.realpath(rec.get("root") or "")
+    rec.update({"cwd": cwd, "root": root, "repo_key": repo_key,
+                "repo_label": label, "branch": branch})
+    write_json(os.path.join(SESSIONS, "%s.json" % rec["sid"]), rec)
+    if moved:
+        # The others' rosters said this session was somewhere it no longer is,
+        # and one of them may be holding off on a file because of it.
+        emit(rec["sid"], rec.get("agent"), repo_key, "note",
+             "moved to %s (%s)" % (short_path(root), branch or "-"))
+    return rec
+
+
 def current_session(payload=None):
     """Which session am I? Hooks are told on stdin; the CLI reads the environment
     Claude Code exports into every Bash call."""
@@ -609,6 +650,13 @@ def current_session(payload=None):
     rec = read_json(os.path.join(SESSIONS, "%s.json" % sid))
     if rec:
         rec["sid"] = sid
+        if payload:
+            rec = follow_cwd(rec, payload.get("cwd"))
+        else:
+            # The CLI runs from wherever the agent's Bash tool is standing, which
+            # is the one signal available before the next hook fires — and
+            # `serve` is usually the very next thing after moving worktree.
+            rec = follow_cwd(rec, os.getcwd(), trusted=False)
     return sid, rec
 
 

@@ -253,6 +253,15 @@ except Exception:
   done
 }
 
+session_field() {   # <session id> <key> → one field of a session record
+  python3 -c "
+import json, sys
+try:
+    print(json.load(open('$AGENTBUS_HOME/sessions/$1.json')).get('$2', ''))
+except Exception:
+    pass"
+}
+
 read_seq() {
   local n=0
   [ -r "$AGENTBUS_HOME/events.seq" ] && read -r n < "$AGENTBUS_HOME/events.seq"

@@ -122,4 +122,54 @@ assert_equal wt1 "$out" "run pointed the service at this worktree and used it"
 assert_equal 0 "$(locks_held)" "run gave the resource back afterwards"
 assert_equal wt1 "$(fetch)" "and left it serving the worktree it moved it to"
 
+# ---- a session that moves into a worktree mid-session ----------------------
+#
+# Claude Code creates worktrees under `.claude/worktrees/` and moves a session
+# into one. The session's root was derived once, at SessionStart, and everything
+# that matters reads it: `serve` starts the service from that root, and
+# `serving_check` compares against it. Left stale, `agentbus serve` restarts the
+# service from the tree the session *started* in and reports "restarted from
+# your worktree" — the exact silent wrong-checkout failure this plugin exists to
+# prevent, produced by the plugin itself.
+#
+# Reported from real use on 2026-07-27, after it quietly reverted an API to
+# main and an agent spent time on a fix that had stopped being deployed.
+
+INNER="$REPO/.claude/worktrees/agent-abc"
+git -C "$REPO" worktree add -q -b feat/inner "$INNER" > /dev/null 2>&1
+printf 'inner\n' > "$INNER/which.txt"
+
+new_session sess-move "$REPO"
+assert_equal "$REPO" "$(session_field sess-move root)" \
+  "a session starts in the checkout it was opened in"
+
+# One hook carrying the new cwd is all it takes — and `prompt-submit` is the one
+# that always runs the engine, so the correction lands at the session's next
+# turn whatever else is going on. (A `pre-tool` for an unguarded command would
+# not: the fast path filters it out before the engine is ever woken, which is
+# exactly why the first version of this test passed against the broken build.)
+ab_hook prompt-submit "$(payload session sid=sess-move "cwd=$INNER" title=x)" > /dev/null
+assert_equal "$INNER" "$(session_field sess-move root)" \
+  "and follows the agent into a worktree under .claude/worktrees/"
+assert_equal "feat/inner" "$(session_field sess-move branch)" "branch and all"
+assert_contains "$(ab sess-a inbox)" "moved to" \
+  "and the others are told, because their rosters said otherwise"
+
+out=$(ab sess-move serve web 2>&1)
+assert_contains "$out" "restarted from your worktree" "serve reports the worktree"
+assert_equal inner "$(fetch)" "and the port answers with it — which is the whole point"
+
+# The CLI follows too, because `serve` is usually the very next thing after a
+# move and no hook has fired in between. Only within one repository, though:
+# `agentbus status` run from somewhere unrelated must not relocate a session.
+new_session sess-cli "$REPO"
+( cd "$INNER" && ab sess-cli name > /dev/null )
+assert_equal "$INNER" "$(session_field sess-cli root)" \
+  "a CLI call from the worktree moves the session too"
+OTHER=$(make_repo servother)
+commit_all "$OTHER"
+( cd "$OTHER" && ab sess-cli name > /dev/null )
+assert_equal "$INNER" "$(session_field sess-cli root)" \
+  "but a CLI call from an unrelated repository does not"
+
 finish

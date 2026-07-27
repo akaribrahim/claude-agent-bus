@@ -277,6 +277,14 @@ free.
   way to notice.
 - **Locks see Bash tools only.** A shared service reached through an MCP tool, or
   a file written by something other than `Edit`/`Write`, is invisible to them.
+- **Subagents are not separate sessions.** A subagent launched with the Task
+  tool runs inside its parent and its hooks carry the parent's session id, so
+  the bus sees one session per terminal. Cross-terminal guards are unaffected —
+  a subagent's guarded command takes the lock for its session, and the other
+  terminals are blocked correctly. But **two subagents running in parallel under
+  one session are invisible to each other**: they share an identity, so a lock
+  one of them holds reads as "already yours" to the other and both proceed.
+  Two parallel agents driving one simulator will not be serialised.
 - **Windows is implemented but unverified.** The Python entry point, the process
   checks and the installer all exist and have never been run on real Windows
   hardware. Treat it as untested rather than supported.
