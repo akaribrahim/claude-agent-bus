@@ -626,16 +626,36 @@ def follow_cwd(rec, cwd, trusted=True):
     root, repo_key, label, branch = git_facts(cwd)
     if not trusted and repo_key != rec.get("repo_key"):
         return rec
-    moved = os.path.realpath(root) != os.path.realpath(rec.get("root") or "")
     rec.update({"cwd": cwd, "root": root, "repo_key": repo_key,
                 "repo_label": label, "branch": branch})
     write_json(os.path.join(SESSIONS, "%s.json" % rec["sid"]), rec)
-    if moved:
-        # The others' rosters said this session was somewhere it no longer is,
-        # and one of them may be holding off on a file because of it.
-        emit(rec["sid"], rec.get("agent"), repo_key, "note",
-             "moved to %s (%s)" % (short_path(root), branch or "-"))
+    # No announcement. The first version of this emitted a note on every move,
+    # and a session running parallel subagents in different worktrees moves on
+    # every other tool call: it produced thirty notes in three minutes into
+    # every other session's context in that repository. A move is visible in the
+    # roster, which is where somebody looking for it will look.
     return rec
+
+
+def caller_view(me, cwd):
+    """`me`, but rooted where this particular call is actually running.
+
+    A session has one worktree; a session running parallel subagents in two
+    worktrees does not, and the guards need an answer per call rather than per
+    session. `serving_check` asks "is this service answering for *my* tree", and
+    for a subagent the honest answer is about the subagent's tree, not its
+    parent's.
+
+    A view, not a write. Persisting it was the first thing tried and it was
+    worse: two subagents dragged the session's root back and forth between them
+    on every tool call, so the record was not even consistently wrong."""
+    if not cwd or cwd == me.get("cwd"):
+        return me
+    root, repo_key, label, branch = git_facts(cwd)
+    view = dict(me)
+    view.update({"cwd": cwd, "root": root, "repo_key": repo_key,
+                 "repo_label": label, "branch": branch})
+    return view
 
 
 def current_session(payload=None):
@@ -650,13 +670,22 @@ def current_session(payload=None):
     rec = read_json(os.path.join(SESSIONS, "%s.json" % sid))
     if rec:
         rec["sid"] = sid
-        if payload:
+        if payload and not payload.get("agent_id"):
+            # A subagent's tool call carries its own cwd and an `agent_id`. That
+            # cwd is the subagent's, not the session's — two subagents working
+            # in different worktrees would otherwise drag the session's root
+            # back and forth between them on every tool call, which is worse
+            # than the stale root this exists to fix, because it is not even
+            # consistently wrong.
             rec = follow_cwd(rec, payload.get("cwd"))
         else:
-            # The CLI runs from wherever the agent's Bash tool is standing, which
-            # is the one signal available before the next hook fires — and
-            # `serve` is usually the very next thing after moving worktree.
-            rec = follow_cwd(rec, os.getcwd(), trusted=False)
+            # The CLI runs from wherever the caller is standing — a moved
+            # session, or a subagent in its own worktree. That is the right
+            # answer for `serve` and `run`, and it must not be written back:
+            # the caller may be one of several subagents in several worktrees.
+            here = caller_view(rec, os.getcwd())
+            if here.get("repo_key") == rec.get("repo_key"):
+                rec = here
     return sid, rec
 
 
@@ -2071,6 +2100,7 @@ def hook_pre_tool(payload):
             return
     tool = payload.get("tool_name")
     ti = payload.get("tool_input") or {}
+    me = caller_view(me, payload.get("cwd"))
     sessions = load_sessions()
     if tool == "Bash":
         return guard_bash(me, ti.get("command", ""), sessions,

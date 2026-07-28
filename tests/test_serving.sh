@@ -152,8 +152,24 @@ ab_hook prompt-submit "$(payload session sid=sess-move "cwd=$INNER" title=x)" > 
 assert_equal "$INNER" "$(session_field sess-move root)" \
   "and follows the agent into a worktree under .claude/worktrees/"
 assert_equal "feat/inner" "$(session_field sess-move branch)" "branch and all"
-assert_contains "$(ab sess-a inbox)" "moved to" \
-  "and the others are told, because their rosters said otherwise"
+# Not announced: a session running parallel subagents in different worktrees
+# moves on every other tool call, and the first version of this emitted a note
+# each time — thirty in three minutes into everybody else's context. The roster
+# is where somebody looking for it will look.
+assert_contains "$(ab sess-a status)" "$INNER" \
+  "and the roster shows where it is now"
+assert_not_contains "$(ab sess-a inbox)" "moved to" \
+  "without announcing every move to everyone"
+
+# A subagent's tool call carries its own cwd and an agent_id. That cwd is the
+# subagent's, not the session's, and following it drags the root back and forth
+# between two subagents working in two worktrees.
+ab_hook prompt-submit "$(python3 -c "
+import json
+print(json.dumps({'session_id':'sess-move','cwd':'$WT2','agent_id':'sub-1',
+                  'agent_type':'general-purpose','hook_event_name':'UserPromptSubmit'}))")" > /dev/null
+assert_equal "$INNER" "$(session_field sess-move root)" \
+  "a subagent working elsewhere does not move the session"
 
 out=$(ab sess-move serve web 2>&1)
 assert_contains "$out" "restarted from your worktree" "serve reports the worktree"
