@@ -9,3 +9,10 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Kept on this machine, never published. The repository is public and these
+# files quote a private product codebase — branch names, PR numbers, entity
+# ids, somebody else's bugs. They are the record of what actually happened when
+# several sessions worked one repository for a day, which is worth having and
+# is not ours to hand out. See notes/README.md.
+notes/
