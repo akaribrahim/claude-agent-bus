@@ -847,6 +847,28 @@ def hook_subagent_stop(payload):
         forget_agent(sid, aid)
 
 
+def name_hint_once(me):
+    """Told to a subagent once: the name everybody else sees it by.
+
+    A subagent has no way to find this out for itself. Its Bash environment is
+    its parent's, so `agentbus post` is attributed to the parent — and the
+    agents on this machine had noticed, and were writing "(agent /2)" into the
+    body of every message by hand to compensate. Giving them the name is the
+    honest fix: the tool should do that, not the agent."""
+    aid = me.get("agent_id")
+    if not aid:
+        return ""
+    rec = read_json(agent_path(me.get("sid"), aid))
+    if not rec or rec.get("told"):
+        return ""
+    rec["told"] = now()
+    write_json(agent_path(me.get("sid"), aid), rec)
+    return ("agent-bus: on this machine you are `%s` — that is the name the "
+            "other agents see, and the name to reach you at. Sign what you say "
+            "with it, or it is attributed to the session that started you:\n"
+            "  agentbus post --as %s \"...\"" % (rec["name"], rec["name"]))
+
+
 def party_view(me, payload):
     """`me`, seen as whichever party is actually acting.
 
@@ -2310,6 +2332,9 @@ def hook_post_batch(payload):
     me = party_view(me, payload)
     release_batch_claims(me, payload)
     blocks = []
+    hint = name_hint_once(me)
+    if hint:
+        blocks.append(hint)
     if read_int(LIVEFILE, 0) >= 2:
         note = interference_note(me, batch_bash_output(payload), load_sessions())
         if note:
@@ -3011,15 +3036,34 @@ def enqueue(me, res):
         write_json(lock_path(me["repo_key"], res), lock)
 
 
+def speak_as(me, name):
+    """The name this caller may sign a message with: its own, or one of its own
+    subagents'. Not anybody else's — a name on this bus is worth something only
+    because it says who actually spoke."""
+    if not name or name == me.get("agent"):
+        return me.get("agent")
+    for a in load_agents(me.get("sid")):
+        if a.get("name") == name:
+            return name
+    return None
+
+
 def cli_post(args):
     me = need_me()
     pos = positional(args)
     text = " ".join(pos).strip()
     if not text:
-        print('usage: agentbus post [--to <agent>] "message"', file=sys.stderr)
+        print('usage: agentbus post [--to <agent>] [--as <you>] "message"',
+              file=sys.stderr)
+        sys.exit(1)
+    sender = speak_as(me, opt(args, "--as"))
+    if not sender:
+        print("agent-bus: '%s' is not you or one of your subagents. "
+              "`agentbus whois` lists who is who." % opt(args, "--as"),
+              file=sys.stderr)
         sys.exit(1)
     to = opt(args, "--to")
-    emit(me["sid"], me["agent"], me["repo_key"], "note", text, to=to)
+    emit(me["sid"], sender, me["repo_key"], "note", text, to=to)
     print("posted%s" % (" to %s" % to if to else " to everyone on this repo"))
 
 
@@ -3924,7 +3968,7 @@ HOOKS = {
 USAGE = """agentbus — coordination between parallel Claude Code sessions
 
   status                       who is live, what is held, what serves whom
-  post [--to <agent>] "..."    leave a message for the others
+  post [--to <agent>] [--as <you>] "..."   leave a message for the others
   inbox                        everything addressed to this repo / to you
   watch [--repo] [-n 20]       follow every agent on this machine, live
   run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release

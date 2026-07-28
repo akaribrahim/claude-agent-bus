@@ -165,6 +165,42 @@ out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
 assert_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
   "skip the login flow" "a parent can address its own subagent"
 
+# ---- a subagent is told its own name, once ---------------------------------
+#
+# It has no way to find this out for itself: its Bash environment is its
+# parent's, so `agentbus post` is attributed to the parent. The agents on this
+# machine had noticed and were writing "(agent /2)" into the body of every
+# message by hand. The tool should do that, not the agent.
+
+start_sub sub-ccc
+out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
+  "agent_id=sub-ccc" agent_type=general-purpose "cmd=ls" id=t-c1)")
+ctx=$(json_field "$out" hookSpecificOutput additionalContext)
+assert_contains "$ctx" "you are \`$P/3\`" "a subagent is told the name others see"
+assert_contains "$ctx" "agentbus post --as $P/3" "and how to sign with it"
+
+out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
+  "agent_id=sub-ccc" agent_type=general-purpose "cmd=ls" id=t-c2)")
+assert_not_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
+  "on this machine you are" "and told only once"
+
+out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" "cmd=ls" id=t-p8)")
+assert_not_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
+  "on this machine you are" "the session itself is never told this"
+
+# ---- and can sign with it ---------------------------------------------------
+
+ab sess-p post --as "$P/3" "the checkout probe is mine, do not rerun it" > /dev/null
+out=$(ab sess-other inbox)
+assert_contains "$out" "$P/3" "a message signed as a subagent is attributed to it"
+assert_contains "$out" "checkout probe" "with what it said"
+
+out=$(ab sess-p post --as "someone-elses-agent" "not me" 2>&1)
+assert_contains "$out" "not you or one of your subagents" \
+  "and nobody can speak as an agent that is not theirs"
+out=$(ab sess-other inbox)
+assert_not_contains "$out" "not me" "so the message is not sent at all"
+
 # ---- when a subagent stops, it lets go --------------------------------------
 
 held_before=$(locks_held)

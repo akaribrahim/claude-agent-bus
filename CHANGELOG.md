@@ -17,6 +17,12 @@ Subagents are parties of their own.
   in its own name; can be addressed with `agentbus post --to parent/1` and
   receives messages in its own context; and gives everything back on
   `SubagentStop`.
+- A subagent is told its own name at the end of its first batch of tool calls,
+  and can sign with it: `agentbus post --as parent/2 "..."`. There is no other
+  way for it to find out — its shell environment is its parent's — and the
+  agents on this machine had noticed, and were writing "(agent /2)" into the
+  body of every message by hand. You can only speak as yourself or as one of
+  your own subagents.
 - A parent and its own subagent never conflict, in either direction. Anything
   else deadlocks a parent against the agent it is waiting for.
 - `agentbus run`, `claim`, `serve` and `wait` are guarded by the resource they

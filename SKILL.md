@@ -165,7 +165,16 @@ messages, and it receives them in its own context.
     agentbus post --to <your name>/2 "skip the login flow, it is being rewritten"
 
 Two of your subagents running at once are two parties, so if both reach for the
-simulator one is refused and told which of your agents has it. You and your own
+simulator one is refused and told which of your agents has it.
+
+**If you are the subagent**, you are told your own name at the end of your first
+batch of tool calls, because there is no other way for you to find it out — your
+shell environment is your parent's. Sign what you say with it, or it is
+attributed to the session that started you:
+
+    agentbus post --as <your name> "the checkout probe is mine, do not rerun it"
+
+You can only speak as yourself or as one of your own subagents. You and your own
 subagents never block each other, in either direction.
 
 One thing does *not* separate them: file collisions and the interference note
