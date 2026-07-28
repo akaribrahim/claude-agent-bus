@@ -41,6 +41,10 @@ def main():
     elif kind == "session-end":
         d["hook_event_name"] = "SessionEnd"
         d["reason"] = kv.get("reason", "exit")
+    elif kind == "subagent-start":
+        d["hook_event_name"] = "SubagentStart"
+    elif kind == "subagent-stop":
+        d["hook_event_name"] = "SubagentStop"
     elif kind == "batch":
         d["hook_event_name"] = "PostToolBatch"
         # The real shape, taken from Claude Code 2.1.220: one entry per tool

@@ -7,7 +7,11 @@
           {
             "type": "command",
             "command": "__PYTHON__",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "session-start"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
+              "hook",
+              "session-start"
+            ],
             "timeout": 20
           }
         ]
@@ -19,7 +23,11 @@
           {
             "type": "command",
             "command": "__PYTHON__",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "prompt-submit"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
+              "hook",
+              "prompt-submit"
+            ],
             "timeout": 12
           }
         ]
@@ -32,7 +40,11 @@
           {
             "type": "command",
             "command": "__PYTHON__",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "pre-tool"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
+              "hook",
+              "pre-tool"
+            ],
             "timeout": 15
           }
         ]
@@ -45,7 +57,11 @@
           {
             "type": "command",
             "command": "__PYTHON__",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "record-write"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
+              "hook",
+              "record-write"
+            ],
             "timeout": 10
           }
         ]
@@ -56,7 +72,11 @@
           {
             "type": "command",
             "command": "__PYTHON__",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "post-bash"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
+              "hook",
+              "post-bash"
+            ],
             "timeout": 10
           }
         ]
@@ -68,7 +88,11 @@
           {
             "type": "command",
             "command": "__PYTHON__",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "post-batch"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
+              "hook",
+              "post-batch"
+            ],
             "timeout": 15
           }
         ]
@@ -80,8 +104,44 @@
           {
             "type": "command",
             "command": "__PYTHON__",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/agentbus", "hook", "session-end"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
+              "hook",
+              "session-end"
+            ],
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
+              "hook",
+              "subagent-start"
+            ],
+            "timeout": 12
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__PYTHON__",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
+              "hook",
+              "subagent-stop"
+            ],
+            "timeout": 12
           }
         ]
       }

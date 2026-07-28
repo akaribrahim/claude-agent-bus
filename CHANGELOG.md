@@ -2,6 +2,34 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 1.1.0 — 2026-07-28
+
+Subagents are parties of their own.
+
+- A subagent launched with the Task tool used to share its parent's identity,
+  because its hooks carry the parent's session id. Two subagents running in
+  parallel were therefore invisible to each other: a lock one held read as
+  "already yours" to the other and both walked through. Two agents driving one
+  simulator, inside a single session, silently — the failure this plugin exists
+  to stop, happening where nobody was looking for it.
+- Now each is its own party. It registers on `SubagentStart` as `parent/1`,
+  appears in `whois`, in `status` and in what a new session is told; takes locks
+  in its own name; can be addressed with `agentbus post --to parent/1` and
+  receives messages in its own context; and gives everything back on
+  `SubagentStop`.
+- A parent and its own subagent never conflict, in either direction. Anything
+  else deadlocks a parent against the agent it is waiting for.
+- `agentbus run`, `claim`, `serve` and `wait` are guarded by the resource they
+  name. A subagent's Bash environment is byte-identical to its parent's, so by
+  the time the CLI is running nothing in it knows which subagent is calling; the
+  decision is made in the hook, where `agent_id` is on the payload.
+- A session that moves into a worktree mid-session is followed, and the guards
+  decide from the tree the caller is actually in rather than from one root per
+  session — which a session with subagents in two worktrees does not have.
+
+Two new hook events, `SubagentStart` and `SubagentStop`, so **re-run
+`install.sh` and then `/reload-plugins`** in each running session after updating.
+
 ## 1.0.0 — 2026-07-28
 
 Two sessions no longer only take turns on a port; they stay out of each other's

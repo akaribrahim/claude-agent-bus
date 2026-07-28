@@ -385,14 +385,85 @@ PY
   end_session m4b
 }
 
+# ============================================================== subagents =====
+
+subagents() {
+  printf '\nsubagents — one session, two parties\n'
+  local repo; repo=$(make_fixture sub)
+  python3 - "$repo/.claude/agent-bus.json" <<'PY'
+import json, os, sys
+os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)
+json.dump({"resources": [{
+    "name": "simulator", "desc": "the one simulator on this machine",
+    "why": "One simulator. Two runs at once interleave taps and both fail.",
+    "patterns": [r"\bmaestro\b"]}]}, open(sys.argv[1], "w"), indent=2)
+PY
+  ( cd "$repo" && git add -A > /dev/null 2>&1 && git commit -qm cfg > /dev/null 2>&1 )
+
+  # A second session, so the guards are awake at all.
+  start_held subw "$repo" 8 "Bash"
+  send_wait subw 8 "Run this with Bash: agentbus name" 90 \
+    || { bad "a witness session is running" ""; return; }
+  ok "a witness session is running"
+
+  # Sent without waiting, because what is being measured only exists while the
+  # subagent is alive: SubagentStop removes its record and gives its locks back,
+  # so anything checked after the turn has finished is checked too late.
+  start_held subp "$repo" 9 "Task Bash"
+  msg "Use the Task tool to launch ONE general-purpose subagent. Its only job: run the Bash command 'maestro test flows/a.yaml', then run 'sleep 20', then report what happened." >&9
+
+  local seen_agent="" seen_lock="" i
+  for i in $(seq 1 180); do
+    [ -z "$seen_agent" ] && seen_agent=$(python3 -c "
+import json, glob
+for f in glob.glob('$T/bus/agents/*.json'):
+    r = json.load(open(f))
+    print('%s %s %s' % (r.get('name'), r.get('agent_type'), r.get('agent_id')))
+    break")
+    [ -z "$seen_lock" ] && seen_lock=$(python3 -c "
+import json, glob
+for f in glob.glob('$T/bus/locks/*.json'):
+    r = json.load(open(f))
+    print('%s %s %s' % (r.get('resource'), r.get('agent'), r.get('agent_id')))
+    break")
+    [ -n "$seen_agent" ] && [ -n "$seen_lock" ] && break
+    sleep 1
+  done
+
+  check "$seen_agent" "/1" "a real subagent registers itself under its parent"
+  check "$seen_agent" "general-purpose" "with the kind of agent it is"
+  check "$seen_lock" "simulator" "and its command claims the shared resource"
+  check "$seen_lock" "/1" "attributed to the subagent, not to the session"
+
+  # And gives it all back when it stops.
+  for i in $(seq 1 120); do
+    [ -z "$(ls "$T/bus"/agents/*.json 2>/dev/null)" ] && break
+    sleep 1
+  done
+  if [ -z "$(ls "$T/bus"/agents/*.json 2>/dev/null)" ]; then
+    ok "and is gone from the roster when it stops"
+  else
+    bad "and is gone from the roster when it stops" "$(ls "$T/bus"/agents/)"
+  fi
+  if [ -z "$(ls "$T/bus"/locks/*.json 2>/dev/null)" ]; then
+    ok "with everything it was holding"
+  else
+    bad "with everything it was holding" "$(ls "$T/bus"/locks/)"
+  fi
+
+  end_session subp
+  end_session subw
+}
+
 printf 'live acceptance — model %s\n  workspace %s\n' "$MODEL" "$T"
 
 case "$WHICH" in
   m2)  m2 ;;
+  sub) subagents ;;
   m3)  m3 ;;
   m4)  m4 ;;
-  all) m3; m2; m4 ;;
-  *)   echo "usage: $0 [m2|m3|m4|all]" >&2; exit 1 ;;
+  all) m3; m2; m4; subagents ;;
+  *)   echo "usage: $0 [m2|m3|m4|sub|all]" >&2; exit 1 ;;
 esac
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

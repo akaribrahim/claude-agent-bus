@@ -6,18 +6,25 @@
   },
   "metadata": {
     "description": "Coordination for parallel Claude Code sessions on one machine.",
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "plugins": [
     {
       "name": "agent-bus",
       "source": "./",
       "description": "Machine-wide coordination for parallel Claude Code sessions: presence, shared-resource locks, service ownership, declared file ownership, an interference guard, handoff summaries, and messaging between agents.",
-      "version": "1.0.0",
-      "author": { "name": "Ibrahim Akar" },
+      "version": "1.1.0",
+      "author": {
+        "name": "Ibrahim Akar"
+      },
       "homepage": "https://github.com/akaribrahim/claude-agent-bus",
       "license": "MIT",
-      "keywords": ["coordination", "worktrees", "parallel-agents", "hooks"]
+      "keywords": [
+        "coordination",
+        "worktrees",
+        "parallel-agents",
+        "hooks"
+      ]
     }
   ]
 }

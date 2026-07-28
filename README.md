@@ -236,6 +236,21 @@ moves.
 | `PostToolBatch` | Deliver messages; release what a *failed* command took, since `PostToolUse` does not fire for those; and if something in the batch failed and named a file somebody else is mid-edit in, say so. |
 | `SessionEnd` | Write the handoff, release everything, deregister. |
 
+**Subagents are parties of their own.** A subagent launched with the Task tool
+runs inside its parent's process and its hooks carry the parent's session id, so
+without help two of them running in parallel share one identity — a lock one
+holds reads as "already yours" to the other, and both drive the simulator. What
+tells them apart is `agent_id`, which Claude Code puts on every hook a subagent
+causes and on none the session itself causes. Each registers on `SubagentStart`
+as `parent/1`, takes locks in its own name, can be addressed with
+`agentbus post --to parent/1`, and gives everything back on `SubagentStop`. A
+parent and its own subagent never block each other, in either direction —
+anything else deadlocks a parent against the agent it is waiting for.
+
+That decision is made in the hook rather than in the CLI on purpose: a
+subagent's Bash environment is byte-identical to its parent's, so by the time
+`agentbus run` is executing, nothing in it knows which subagent is calling.
+
 A bash fast path runs first and decides in a few milliseconds whether the Python
 engine needs to run at all — shell builtins only, short-circuiting before it has
 even read the payload when you are the only session. On hosts without bash the
@@ -277,14 +292,10 @@ free.
   way to notice.
 - **Locks see Bash tools only.** A shared service reached through an MCP tool, or
   a file written by something other than `Edit`/`Write`, is invisible to them.
-- **Subagents are not separate sessions.** A subagent launched with the Task
-  tool runs inside its parent and its hooks carry the parent's session id, so
-  the bus sees one session per terminal. Cross-terminal guards are unaffected —
-  a subagent's guarded command takes the lock for its session, and the other
-  terminals are blocked correctly. But **two subagents running in parallel under
-  one session are invisible to each other**: they share an identity, so a lock
-  one of them holds reads as "already yours" to the other and both proceed.
-  Two parallel agents driving one simulator will not be serialised.
+- **Subagents share their parent's writes.** Locks, presence and messages treat
+  each subagent as its own party, but the file-collision guard and the
+  interference note still work per session, so two subagents editing one file
+  are not warned about each other.
 - **Windows is implemented but unverified.** The Python entry point, the process
   checks and the installer all exist and have never been run on real Windows
   hardware. Treat it as untested rather than supported.

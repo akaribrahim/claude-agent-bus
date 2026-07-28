@@ -21,9 +21,10 @@ ENGINE="$HERE/agentbus"
 [ -x "$ENGINE" ] || exit 0
 
 case "$ev" in
-  session-start|session-end|prompt-submit)
-    # Once per session or per user turn — always worth the engine. stdin is
-    # inherited rather than slurped, so the payload never passes through bash.
+  session-start|session-end|prompt-submit|subagent-start|subagent-stop)
+    # Once per session, per user turn, or per subagent — always worth the
+    # engine. stdin is inherited rather than slurped, so the payload never
+    # passes through bash.
     exec "$ENGINE" hook "$ev"
     ;;
 esac

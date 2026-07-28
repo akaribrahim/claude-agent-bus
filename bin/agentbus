@@ -64,6 +64,7 @@ WRITES = os.path.join(BUS, "writes")
 LOCKS = os.path.join(BUS, "locks")
 AUTOCLAIM = os.path.join(BUS, "autoclaim")
 OWNS = os.path.join(BUS, "owns")
+AGENTS = os.path.join(BUS, "agents")
 SERVES = os.path.join(BUS, "serves")
 MATCHED = os.path.join(BUS, "matched")
 REPOS = os.path.join(BUS, "repos")
@@ -139,7 +140,7 @@ def now():
 
 def ensure_dirs():
     for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS, AUTOCLAIM,
-              OWNS, SERVES, MATCHED):
+              OWNS, AGENTS, SERVES, MATCHED):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -476,6 +477,8 @@ def load_sessions(reap=False):
 
 def forget_session(sid):
     release_all(sid, quiet=True)
+    for a in load_agents(sid):
+        forget_agent(sid, a.get("agent_id"))
     for p in (os.path.join(SESSIONS, "%s.json" % sid), beat_path(sid),
               os.path.join(CURSORS, sid), os.path.join(HOTFOR, sid),
               os.path.join(OWNS, "%s.json" % sid),
@@ -507,6 +510,12 @@ def refresh_derived(sessions=None):
                 continue
             for tok in toks:
                 tokens.add(re.escape(tok))
+    # Every `agentbus` command wakes the engine when this repository declares
+    # anything. `agentbus serve web` names its resource and nothing else, so
+    # none of the patterns' literals appear in it — and the guard has to see it,
+    # because deciding which subagent is asking can only be done in the hook.
+    if tokens or unfilterable:
+        tokens.add(re.escape("agentbus"))
     # A resource whose patterns have no mandatory literal cannot be pre-filtered.
     # Waking the engine on every command costs milliseconds; missing the guard
     # costs a silently wrong test, so the gate opens for everything instead.
@@ -691,6 +700,141 @@ def current_session(payload=None):
     return sid, rec
 
 
+# -------------------------------------------------------------- subagents ----
+#
+# A subagent launched with the Task tool runs inside its parent's process and
+# its hooks carry the parent's `session_id`. Everything here treats "who is
+# acting" as a *party* rather than a session: the session itself, or one
+# subagent within it.
+#
+# That matters because two subagents run genuinely in parallel. Before this they
+# shared an identity, so a lock one held read as "already yours" to the other
+# and both walked through — two agents driving one simulator, which is the
+# failure this plugin exists to stop, happening inside a single session.
+#
+# What tells them apart is `agent_id`, which Claude Code puts on every hook a
+# subagent causes — SubagentStart, its own PreToolUse, PostToolUse and
+# PostToolBatch, and SubagentStop — and on none that the session itself causes.
+# It is *not* in the environment of the Bash tool, so the CLI cannot know which
+# subagent is calling it; every decision that needs to know is therefore made in
+# the hook, where it is known.
+
+def agent_path(sid, aid):
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", "%s__%s" % (sid, aid))
+    return os.path.join(AGENTS, "%s.json" % safe)
+
+
+def load_agents(sid=None):
+    """Live subagents, optionally just one session's."""
+    out = []
+    try:
+        names = os.listdir(AGENTS)
+    except OSError:
+        return out
+    for name in sorted(names):
+        if not name.endswith(".json"):
+            continue
+        rec = read_json(os.path.join(AGENTS, name))
+        if not rec or (sid and rec.get("sid") != sid):
+            continue
+        out.append(rec)
+    out.sort(key=lambda r: r.get("started", 0))
+    return out
+
+
+def forget_agent(sid, aid):
+    release_all_for(sid, aid, quiet=True)
+    for path in (agent_path(sid, aid),
+                 os.path.join(CURSORS, party_key({"sid": sid, "agent_id": aid}))):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def party_key(me):
+    """One string naming the party that acts: a session, or a subagent in it."""
+    aid = me.get("agent_id") or ""
+    return "%s__%s" % (me.get("sid") or "", aid) if aid else (me.get("sid") or "")
+
+
+def same_party(holder, me):
+    """Whether a lock held by `holder` is already this caller's to use.
+
+    Two different subagents conflict. A parent and its own subagent never do —
+    a parent that claimed something and then delegated must not deadlock against
+    the agent it is waiting for, and a backgrounded subagent must not be blocked
+    by the session that started it."""
+    if (holder.get("sid") or "") != (me.get("sid") or ""):
+        return False
+    a = holder.get("agent_id") or ""
+    b = me.get("agent_id") or ""
+    return a == b or not a or not b
+
+
+def subagent_name(parent_agent, sid):
+    """`checkout-rewrite/2` — obviously that session's, and typeable."""
+    taken = {a.get("name") for a in load_agents(sid)}
+    for n in range(1, 60):
+        cand = "%s/%d" % (parent_agent or "agent", n)
+        if cand not in taken:
+            return cand
+    return "%s/x" % (parent_agent or "agent")
+
+
+def hook_subagent_start(payload):
+    sid = payload.get("session_id")
+    aid = payload.get("agent_id")
+    if not sid or not aid:
+        return
+    ensure_dirs()
+    parent = read_json(os.path.join(SESSIONS, "%s.json" % sid)) or {}
+    cwd = payload.get("cwd") or parent.get("cwd") or os.getcwd()
+    root, repo_key, label, branch = git_facts(cwd)
+    write_json(agent_path(sid, aid), {
+        "sid": sid, "agent_id": aid,
+        "agent_type": payload.get("agent_type") or "agent",
+        "name": subagent_name(parent.get("agent"), sid),
+        "parent": parent.get("agent"), "cwd": cwd, "root": root,
+        "repo_key": repo_key, "repo_label": label, "branch": branch,
+        "started": now(), "seen": now(),
+    })
+    # Its cursor starts at the end of the stream: a subagent that lives for two
+    # minutes does not want the last hour of the repository's chatter.
+    write_text(os.path.join(CURSORS, party_key({"sid": sid, "agent_id": aid})),
+               "%d\n" % read_int(SEQFILE, 0))
+
+
+def hook_subagent_stop(payload):
+    sid, aid = payload.get("session_id"), payload.get("agent_id")
+    if sid and aid:
+        forget_agent(sid, aid)
+
+
+def party_view(me, payload):
+    """`me`, seen as whichever party is actually acting.
+
+    A subagent gets its own name and its own worktree; everything else — the
+    repo, the session id — it shares with its parent."""
+    aid = payload.get("agent_id") if payload else None
+    if not aid:
+        return me
+    view = dict(me)
+    view["agent_id"] = aid
+    view["agent_type"] = payload.get("agent_type") or "agent"
+    rec = read_json(agent_path(me.get("sid"), aid))
+    if rec:
+        view["agent"] = rec.get("name") or view.get("agent")
+        for k in ("root", "repo_key", "repo_label", "branch"):
+            if rec.get(k):
+                view[k] = rec[k]
+    else:
+        # SubagentStart was missed — the plugin was installed mid-session, or
+        # the hook is not wired yet. Still tell it apart from its parent.
+        view["agent"] = "%s/?" % (me.get("agent") or "agent")
+    return view
+
+
 # ---------------------------------------------------------------- events ----
 
 def emit(sid, agent, repo_key, kind, text, to=None, extra=None):
@@ -763,7 +907,9 @@ def interesting_to(rec, me):
     """An event reaches a session when it is addressed to it, or when it happened
     in the same repository and says something. Work in another project stays out
     of the way entirely."""
-    if rec.get("sid") == me.get("sid"):
+    # Not `sid`: a subagent shares its parent's, and a message from one to the
+    # other would be filtered out as the reader's own.
+    if rec.get("sid") == me.get("sid") and rec.get("agent") == me.get("agent"):
         return False
     if rec.get("to"):
         return rec["to"] == me.get("agent")
@@ -774,8 +920,8 @@ def interesting_to(rec, me):
 
 def deliver(me, advance=True):
     """Everything this session has not been shown yet, formatted for context."""
-    sid = me.get("sid")
-    cursor = read_int(os.path.join(CURSORS, sid), 0)
+    key = party_key(me)
+    cursor = read_int(os.path.join(CURSORS, key), 0)
     seq = read_int(SEQFILE, 0)
     if cursor > seq:
         cursor = 0  # the counter was reset or restored under us; do not wedge
@@ -787,7 +933,7 @@ def deliver(me, advance=True):
         # Advance to what was actually read, not to the sequence number sampled
         # before reading: an event appended in between would be shown twice.
         top = max([seq] + [r.get("i", 0) for r in fresh])
-        write_text(os.path.join(CURSORS, sid), "%d\n" % top)
+        write_text(os.path.join(CURSORS, key), "%d\n" % top)
     if not mine:
         return ""
     shown = mine[-MAX_DELIVER:]
@@ -844,7 +990,7 @@ def do_claim(me, res, why="", mode="soft", steal=False, sessions=None):
     with Mutex("lock-" + re.sub(r"[^A-Za-z0-9]", "_", res)[:40]):
         lock = load_lock(repo_key, res)
         holder, stealable, reason = lock_state(lock, sessions)
-        if lock and lock.get("sid") == me.get("sid"):
+        if lock and same_party(lock, me):
             lock["last_used"] = now()
             if mode == "hard":
                 lock["mode"] = "hard"
@@ -857,6 +1003,7 @@ def do_claim(me, res, why="", mode="soft", steal=False, sessions=None):
         queue = (lock or {}).get("queue", []) if lock else []
         queue = [q for q in queue if q.get("sid") != me.get("sid")]
         new = {"resource": res, "repo": repo_key, "sid": me.get("sid"),
+               "agent_id": me.get("agent_id") or "",
                "agent": me.get("agent"), "worktree": me.get("root"),
                "branch": me.get("branch"), "mode": mode, "why": why,
                "acquired_at": now(), "last_used": now(), "queue": queue}
@@ -882,7 +1029,7 @@ def do_release(me, res, quiet=False):
     # this would delete theirs.
     with Mutex("lock-" + re.sub(r"[^A-Za-z0-9]", "_", res)[:40]):
         lock = load_lock(repo_key, res)
-        if not lock or lock.get("sid") != me.get("sid"):
+        if not lock or not same_party(lock, me):
             return False
         waiting = lock.get("queue", [])
         try:
@@ -915,6 +1062,28 @@ def release_all(sid, quiet=False):
             if not quiet:
                 emit(sid, lock.get("agent"), lock.get("repo"), "lock",
                      "released '%s'" % lock.get("resource"))
+    return n
+
+
+def release_all_for(sid, aid, quiet=False):
+    """Everything one subagent was holding, given back when it stops."""
+    try:
+        names = os.listdir(LOCKS)
+    except OSError:
+        return 0
+    n = 0
+    for name in names:
+        lock = read_json(os.path.join(LOCKS, name))
+        if not lock or lock.get("sid") != sid or (lock.get("agent_id") or "") != aid:
+            continue
+        try:
+            os.unlink(os.path.join(LOCKS, name))
+            n += 1
+        except OSError:
+            pass
+        if not quiet:
+            emit(sid, lock.get("agent"), lock.get("repo"), "lock",
+                 "released '%s'" % lock.get("resource"))
     return n
 
 
@@ -1735,9 +1904,41 @@ def command_targets(cmd, depth=0):
     return out
 
 
+def explicit_resources(cmd, cfg):
+    """Resources named outright on an `agentbus` command line.
+
+    `agentbus run simulator -- maestro test` is a request for the simulator, and
+    the guard has to see it as one. The CLI cannot: a subagent's Bash
+    environment is byte-identical to its parent's, so by the time `agentbus run`
+    is executing, nothing there knows which subagent is calling. Deciding it
+    here, in the hook, where `agent_id` is on the payload, is what makes
+    `agentbus run` serialise between two subagents instead of handing both of
+    them the same rig."""
+    out = []
+    by_name = {r["name"]: r for r in cfg.get("resources", [])}
+    for seg in split_segments(strip_heredocs(cmd)):
+        toks = tokens_of(seg)
+        while toks and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0])
+                        or os.path.basename(toks[0]) in WRAPPERS):
+            toks = toks[1:]
+        if len(toks) < 3 or os.path.basename(toks[0]) != "agentbus":
+            continue
+        if toks[1] not in ("run", "claim", "serve", "wait"):
+            continue
+        for name in toks[2].split(","):
+            res = by_name.get(name.strip())
+            if res and res["name"] not in [h["name"] for h in out]:
+                res = dict(res)
+                # `serve` and `run` exist to move a service to your tree, so the
+                # "this is serving somebody else" check must not stop them.
+                res["_explicit"] = True
+                out.append(res)
+    return out
+
+
 def resources_for(cmd, cfg):
     """Which declared resources this command would touch."""
-    hits = []
+    hits = explicit_resources(cmd, cfg)
     resources = cfg.get("resources", [])
     if not resources:
         return hits
@@ -1783,6 +1984,10 @@ def roster_text(me, sessions):
                 ago(s.get("beat")), idle))
             if s.get("doing"):
                 lines.append("      doing: %s" % s["doing"])
+            for a in load_agents(s["sid"]):
+                lines.append("      · %s  (%s, %s)" % (
+                    a.get("name"), a.get("agent_type"),
+                    short_path(a.get("root", ""))))
             owned = owns_summary(s["sid"])
             if owned:
                 lines.append("      owns: %s" % owned)
@@ -2062,6 +2267,7 @@ def hook_post_batch(payload):
     if not me:
         return
     touch_beat(sid)
+    me = party_view(me, payload)
     release_batch_claims(me, payload)
     blocks = []
     if read_int(LIVEFILE, 0) >= 2:
@@ -2102,7 +2308,7 @@ def hook_pre_tool(payload):
             return
     tool = payload.get("tool_name")
     ti = payload.get("tool_input") or {}
-    me = caller_view(me, payload.get("cwd"))
+    me = party_view(caller_view(me, payload.get("cwd")), payload)
     sessions = load_sessions()
     if tool == "Bash":
         return guard_bash(me, ti.get("command", ""), sessions,
@@ -2121,7 +2327,8 @@ def remember_autoclaim(me, tool_use_id, names):
     if not tool_use_id or not names:
         return
     write_json(autoclaim_path(tool_use_id),
-               {"sid": me.get("sid"), "repo": me.get("repo_key"), "resources": names})
+               {"sid": me.get("sid"), "party": party_key(me),
+                "repo": me.get("repo_key"), "resources": names})
 
 
 def response_text(tool_response):
@@ -2239,7 +2446,8 @@ def release_autoclaim(me, tool_use_id):
         return
     rec = read_json(autoclaim_path(tool_use_id))
     forget_autoclaim(tool_use_id)
-    if not rec or rec.get("sid") != me.get("sid"):
+    # Exactly this party: one subagent must not hand back what another took.
+    if not rec or rec.get("party", rec.get("sid")) != party_key(me):
         return
     for name in rec.get("resources", []):
         lock = load_lock(me.get("repo_key"), name)
@@ -2259,7 +2467,7 @@ def hook_post_bash(payload):
     sid, me = current_session(payload)
     if not me:
         return
-    release_autoclaim(me, payload.get("tool_use_id"))
+    release_autoclaim(party_view(me, payload), payload.get("tool_use_id"))
 
 
 def lock_name(me, res):
@@ -2299,6 +2507,8 @@ def serving_check(me, hits):
     session that ended while its detached server kept answering."""
     mine = os.path.realpath(me.get("root") or "")
     for res in hits:
+        if res.get("_explicit"):
+            continue   # `agentbus serve`/`run` are how a service gets moved
         if not res.get("start") and not res.get("port"):
             continue
         root, how = serving(me.get("repo_key"), res)
@@ -2357,7 +2567,7 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
     blocked = []
     for res in hits:
         lock = load_lock(me.get("repo_key"), lock_name(me, res))
-        if lock and lock.get("sid") == me.get("sid"):
+        if lock and same_party(lock, me):
             continue
         holder, stealable, _ = lock_state(lock, sessions)
         if holder and not stealable:
@@ -2396,7 +2606,10 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         'agent-bus: BLOCKED. "%s" (%s) is in use by another live Claude Code '
         'session.' % (res["name"], res.get("desc", "shared resource")),
         "",
-        "  holder    : %s   branch %s" % (holder.get("agent"),
+        # The lock's own name, not the session's: a lock taken by a subagent is
+        # held by that subagent, and telling the reader to go and talk to the
+        # session would point them at the wrong agent.
+        "  holder    : %s   branch %s" % (lock.get("agent") or holder.get("agent"),
                                           holder.get("branch") or "-"),
         "  worktree  : %s%s" % (short_path(holder.get("root", "")),
                                 "   (the same one you are in)" if same_tree else ""),
@@ -2412,7 +2625,20 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         lines += ["", "  Your command drives '%s', which is only meaningful against "
                       "the '%s' serving your worktree — so it needs that too."
                   % (res["_implied_by"], res["name"])]
-    if same_tree:
+    sibling = (lock.get("sid") == me.get("sid")
+               and (lock.get("agent_id") or "") and (me.get("agent_id") or ""))
+    if sibling:
+        # Two subagents of one session. Nothing here is about checkouts — they
+        # share one — so the same-checkout wording below would be answering a
+        # question nobody asked, while the resource's own `why` is exactly the
+        # point: one of the thing, two of you.
+        lines += ["", "  You are two agents of the same session, running at the "
+                      "same time. Wait for theirs to finish — an automatic claim "
+                      "lasts only as long as one command — or split the work so "
+                      "you are not both driving it."]
+        if res.get("why"):
+            lines += ["", "  " + res["why"]]
+    elif same_tree:
         # The configured `why` explains cross-worktree damage. Two sessions in
         # ONE checkout are running the same code, so quoting it here would state
         # something the agent can see is false — and an agent that catches the
@@ -2431,7 +2657,8 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         "direct binary path or a subshell all reach the same service.",
         "",
         "  agentbus status                       what is going on",
-        '  agentbus post --to %s "..."   ask them' % holder.get("agent"),
+        '  agentbus post --to %s "..."   ask them'
+        % (lock.get("agent") or holder.get("agent")),
         '  agentbus wait %s --why "..."  queue; takes it the moment it frees'
         % res["name"],
     ]
@@ -2591,6 +2818,10 @@ def cli_status(_args):
         print(" %s %-18s %-42s %-28s %s" % (
             mark, s.get("agent"), short_path(s.get("root", "")),
             s.get("branch") or "-", ago(s.get("beat"))))
+        for a in load_agents(s["sid"]):
+            print("   %-18s %-42s %-28s %s" % (
+                "  · " + (a.get("name") or "?"), short_path(a.get("root", "")),
+                a.get("branch") or "-", a.get("agent_type") or ""))
     print()
     lk = locks_text(me, sessions)
     print(lk if lk else "No shared resources declared for this repo "
@@ -2609,6 +2840,10 @@ def cli_whois(_args):
     for s in load_sessions():
         print("%-18s %-42s %s" % (s.get("agent"), short_path(s.get("root", "")),
                                   s.get("branch") or "-"))
+        for a in load_agents(s["sid"]):
+            print("  · %-16s %-42s %s" % (
+                a.get("name"), short_path(a.get("root", "")),
+                a.get("agent_type") or ""))
 
 
 def opt(args, name, default=None):
@@ -3533,6 +3768,7 @@ COMMANDS = {
 
 HOOKS = {
     "session-start": hook_session_start, "prompt-submit": hook_prompt_submit,
+    "subagent-start": hook_subagent_start, "subagent-stop": hook_subagent_stop,
     "pre-tool": hook_pre_tool, "post-batch": hook_post_batch,
     "session-end": hook_session_end, "record-write": hook_record_write,
     "post-bash": hook_post_bash,

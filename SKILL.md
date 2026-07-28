@@ -155,6 +155,23 @@ A resource entry:
 | `scope: "worktree"` | contended only by sessions in the *same* checkout |
 | `hint` | extra text shown when blocking |
 
+## If you launch subagents
+
+A subagent you launch with the Task tool is a party of its own on the bus. It
+appears in the roster as `<your name>/1`, `/2` and so on, and everything works
+for it the way it works for you: it takes locks in its own name, it can be sent
+messages, and it receives them in its own context.
+
+    agentbus post --to <your name>/2 "skip the login flow, it is being rewritten"
+
+Two of your subagents running at once are two parties, so if both reach for the
+simulator one is refused and told which of your agents has it. You and your own
+subagents never block each other, in either direction.
+
+One thing does *not* separate them: file collisions and the interference note
+still work per session, so two subagents editing one file are not warned about
+each other. Split the files between them yourself.
+
 ## Handing over
 
 When your session ends, agent-bus writes a summary into the other sessions'

@@ -129,6 +129,11 @@ fix it.
       and a recorded demo.
 - [ ] (post-1.0) Windows verification on the author's work machine; README claim upgraded
       from "unverified" to "verified" or bugs filed.
+- [x] (1.1) Subagents as parties of their own — locks, presence and messaging.
+      Done 2026-07-28 at the author's request, after a live session running two backgrounded
+      agents showed the gap. `make test` → 11 files, 545 assertions; live acceptance verifies
+      it against a real Claude Code subagent. Two new hook events, so `./install.sh` and
+      `/reload-plugins` are needed.
 - [ ] (M8, 1.1) Per-worktree port allocation in the plugin — `agentbus port` / `agentbus env`.
 - [ ] (M9, 1.1) Wire the author's private product repository to per-worktree ports (separate pull request
       in that repository).
@@ -342,6 +347,24 @@ fix it.
   `source` (`"./"` for a single-plugin repository), `description`, `version`, `author`,
   `homepage`, `license` and `keywords`. `claude plugin marketplace add` takes a URL, a path
   or a GitHub repo, which is what made it testable without pushing.
+
+- Observation (1.1): a subagent's hook payloads carry `agent_id` and `agent_type`; the
+  session's own carry neither. Every hook a subagent causes has them — SubagentStart, its
+  own PreToolUse, PostToolUse and PostToolBatch, and SubagentStop — which is enough to give
+  it an identity, a lifecycle and a mailbox. Measured against Claude Code 2.1.220 with a
+  settings-file hook that logged every event.
+
+- Observation (1.1): the subagent's Bash environment is **byte-identical** to its parent's —
+  no `agent_id`, nothing. So the CLI cannot know which subagent is calling it, and
+  `agentbus run simulator -- maestro test` could not take a per-subagent lock from inside
+  the CLI. The guard now recognises the resource named on an `agentbus run|claim|serve|wait`
+  command line and claims it in `PreToolUse`, where `agent_id` is on the payload. That also
+  meant adding `agentbus` itself to the shell pre-filter's tokens: `agentbus serve web`
+  contains none of the patterns' literals, so the engine would never have been woken.
+
+- Observation (1.1): the deny message named the *session* for a lock a subagent held,
+  because it read the holder from the session record. It now reads the name off the lock,
+  which is the party that took it.
 
 ## Decision Log
 
@@ -588,6 +611,26 @@ fix it.
   Rationale: two commands genuinely wire the hooks, and that is most of the value — but the
   CLI is what every block message tells the agent to use. Saying so is better than a first
   experience where the guard fires and the advice does not work.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (1.1): a parent and its own subagent never conflict, in either direction, while
+  two subagents always do.
+  Rationale: a parent that claimed something and then delegated would otherwise deadlock
+  against the agent it is waiting for, and a backgrounded subagent would be blocked by the
+  session that started it. Two siblings are the case that needs serialising and the only one.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (1.1): locks, presence and messaging are party-aware; the file-collision guard
+  and the interference note are not, and stay per session.
+  Rationale: those two read from one writes log per session, and splitting it per party
+  would also split what the handoff and the cross-session collision checks see. The
+  simulator case is what was asked for and what the evidence showed; the rest is documented
+  as a limit rather than half-built.
+  Date/Author: 2026-07-28, Claude.
+
+- Decision (1.1): a subagent's cursor starts at the end of the stream when it registers.
+  Rationale: a subagent that lives for two minutes does not want the last hour of the
+  repository's chatter, and would spend its context on it.
   Date/Author: 2026-07-28, Claude.
 
 ## Outcomes & Retrospective
