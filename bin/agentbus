@@ -782,27 +782,34 @@ def subagent_name(parent_agent, sid):
     return "%s/x" % (parent_agent or "agent")
 
 
-def hook_subagent_start(payload):
-    sid = payload.get("session_id")
-    aid = payload.get("agent_id")
+def register_agent(sid, aid, agent_type=None, cwd=None):
+    """Record a subagent. Also reachable from the ordinary hooks, because a
+    subagent that missed SubagentStart — the plugin was installed or reloaded
+    while it was already running — would otherwise stay nameless and invisible
+    for its whole life. Sessions have had the same fallback since the beginning;
+    this is the same idea one level down."""
     if not sid or not aid:
-        return
+        return None
     ensure_dirs()
     parent = read_json(os.path.join(SESSIONS, "%s.json" % sid)) or {}
-    cwd = payload.get("cwd") or parent.get("cwd") or os.getcwd()
+    cwd = cwd or parent.get("cwd") or os.getcwd()
     root, repo_key, label, branch = git_facts(cwd)
-    write_json(agent_path(sid, aid), {
-        "sid": sid, "agent_id": aid,
-        "agent_type": payload.get("agent_type") or "agent",
-        "name": subagent_name(parent.get("agent"), sid),
-        "parent": parent.get("agent"), "cwd": cwd, "root": root,
-        "repo_key": repo_key, "repo_label": label, "branch": branch,
-        "started": now(), "seen": now(),
-    })
+    rec = {"sid": sid, "agent_id": aid, "agent_type": agent_type or "agent",
+           "name": subagent_name(parent.get("agent"), sid),
+           "parent": parent.get("agent"), "cwd": cwd, "root": root,
+           "repo_key": repo_key, "repo_label": label, "branch": branch,
+           "started": now(), "seen": now()}
+    write_json(agent_path(sid, aid), rec)
     # Its cursor starts at the end of the stream: a subagent that lives for two
     # minutes does not want the last hour of the repository's chatter.
     write_text(os.path.join(CURSORS, party_key({"sid": sid, "agent_id": aid})),
                "%d\n" % read_int(SEQFILE, 0))
+    return rec
+
+
+def hook_subagent_start(payload):
+    register_agent(payload.get("session_id"), payload.get("agent_id"),
+                   payload.get("agent_type"), payload.get("cwd"))
 
 
 def hook_subagent_stop(payload):
@@ -829,9 +836,13 @@ def party_view(me, payload):
             if rec.get(k):
                 view[k] = rec[k]
     else:
-        # SubagentStart was missed — the plugin was installed mid-session, or
-        # the hook is not wired yet. Still tell it apart from its parent.
-        view["agent"] = "%s/?" % (me.get("agent") or "agent")
+        # SubagentStart was missed — the plugin was installed or reloaded while
+        # this subagent was already running. Record it now rather than leaving
+        # it nameless for the rest of its life.
+        rec = register_agent(me.get("sid"), aid, view.get("agent_type"),
+                             me.get("cwd"))
+        if rec:
+            view["agent"] = rec["name"]
     return view
 
 
@@ -1040,8 +1051,8 @@ def do_release(me, res, quiet=False):
         tail = ""
         if waiting:
             tail = " — waiting: %s" % ", ".join(q.get("agent", "?") for q in waiting)
-        emit(me.get("sid"), me.get("agent"), repo_key, "lock",
-             "released '%s'%s" % (res, tail))
+        emit(me.get("sid"), lock.get("agent") or me.get("agent"), repo_key,
+             "lock", "released '%s'%s" % (res, tail))
     return True
 
 
@@ -2284,6 +2295,18 @@ def hook_post_batch(payload):
         "additionalContext": "\n\n".join(blocks)}}))
 
 
+def note_block(me, what, why):
+    """Record that something was refused.
+
+    A denial used to leave no trace at all: the agent was told, and nobody else
+    could ever see that it had happened. So "did the bus actually stop anything
+    today" was unanswerable, which is a poor position for a tool whose whole
+    claim is that it stops things. Not delivered into anyone's context — it is
+    for the log, `watch` and `status`."""
+    emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
+         "blocked on %s — %s" % (what, why))
+
+
 def deny(reason):
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
@@ -2523,6 +2546,8 @@ def serving_check(me, hits):
                 "get may belong to another worktree. `agentbus serve %s` restarts "
                 "it from yours." % (res.get("port") or res["name"], res["name"]))
         rec = read_json(serve_path(me.get("repo_key"), res["name"])) or {}
+        note_block(me, "'%s'" % res["name"],
+                   "it is serving %s" % short_path(root or "?"))
         lines = [
             'agent-bus: BLOCKED. "%s" (%s) is serving a different checkout, so '
             "this command would exercise that code and report it as yours."
@@ -2600,6 +2625,8 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
                 note_ctx(text)
             return
     res, lock, holder = blocked[0]
+    note_block(me, "'%s'" % res["name"],
+               "held by %s" % (lock.get("agent") or holder.get("agent")))
     same_tree = (os.path.realpath(holder.get("root") or "")
                  == os.path.realpath(me.get("root") or ""))
     lines = [
@@ -2705,6 +2732,7 @@ def guard_file(me, path, sessions):
     # JSON documents on stdout and corrupt the session's view of the hook.
     verdict, text = ownership_verdict(me, path, sessions)
     if verdict == "deny":
+        note_block(me, short_path(path), "somebody has declared it theirs")
         deny(text)
         return
     if verdict == "note":
@@ -2728,6 +2756,7 @@ def guard_file(me, path, sessions):
                 same_repo.append((s, hit2))
     if same_tree:
         s, hit = same_tree[0]
+        note_block(me, short_path(path), "%s is editing it" % s.get("agent"))
         deny("\n".join([
             "agent-bus: BLOCKED. Another live session is editing this exact file in "
             "this exact checkout — your write would be made on top of theirs, or "
@@ -2963,6 +2992,58 @@ def cli_post(args):
     to = opt(args, "--to")
     emit(me["sid"], me["agent"], me["repo_key"], "note", text, to=to)
     print("posted%s" % (" to %s" % to if to else " to everyone on this repo"))
+
+
+def watch_line(r, width=None):
+    """One event, formatted for a human reading over the agents' shoulders."""
+    when = time.strftime("%H:%M:%S", time.localtime(r.get("ts", 0)))
+    who = r.get("agent", "?")
+    kind = r.get("kind", "?")
+    repo = (r.get("repo") or "").split(":")[0]
+    to = " → %s" % r["to"] if r.get("to") else ""
+    head = "%s  %-20s %-8s %-14s" % (when, (who + to)[:20], kind, repo[:14])
+    text = (r.get("text") or "").rstrip()
+    if "\n" not in text:
+        return head + text
+    pad = " " * 10
+    return head + text.split("\n")[0] + "\n" + "\n".join(
+        pad + ln for ln in text.split("\n")[1:])
+
+
+def cli_watch(args):
+    """Follow what every agent on this machine is doing, as it happens.
+
+    `status` is a snapshot and `inbox` is what was addressed to you. Neither
+    answers "what is going on right now", which is the question somebody with
+    four terminals open actually has — and until refusals were recorded as
+    events, nothing answered "did it stop anything today" either.
+
+    Polling, not inotify: two file reads a second, no dependency, same on both
+    platforms."""
+    only_repo = flag(args, "--repo")
+    tail = int(opt(args, "-n", "15"))
+    me = None
+    if only_repo:
+        _, me = current_session()
+        if not me:
+            root, repo_key, label, _ = git_facts(os.getcwd())
+            me = {"repo_key": repo_key}
+    seq = read_int(SEQFILE, 0)
+    start = max(0, seq - tail)
+    print("agent-bus — following%s. Ctrl-C to stop.\n"
+          % (" this repository" if only_repo else " every repository"))
+    shown = start
+    try:
+        while True:
+            for r in read_events(after=shown):
+                shown = max(shown, r.get("i", 0))
+                if only_repo and r.get("repo") != me.get("repo_key"):
+                    continue
+                print(watch_line(r))
+                sys.stdout.flush()
+            time.sleep(0.8)
+    except KeyboardInterrupt:
+        print()
 
 
 def cli_inbox(_args):
@@ -3797,6 +3878,7 @@ COMMANDS = {
     "release": cli_release, "wait": cli_wait, "post": cli_post,
     "note": cli_post, "inbox": cli_inbox, "run": cli_run, "name": cli_name,
     "own": cli_own, "disown": cli_disown, "handoff": cli_handoff,
+    "watch": cli_watch,
     "doing": cli_doing, "init-repo": cli_init_repo, "doctor": cli_doctor,
     "register": cli_register, "install": cli_install, "serve": cli_serve,
     "serves": cli_serves, "forget": cli_forget,
@@ -3815,6 +3897,7 @@ USAGE = """agentbus — coordination between parallel Claude Code sessions
   status                       who is live, what is held, what serves whom
   post [--to <agent>] "..."    leave a message for the others
   inbox                        everything addressed to this repo / to you
+  watch [--repo] [-n 20]       follow every agent on this machine, live
   run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
   serve <res>                  restart a service so it serves YOUR worktree
   serves                       which checkout each service is answering for
