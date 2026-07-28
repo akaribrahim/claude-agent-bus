@@ -522,7 +522,36 @@ def refresh_derived(sessions=None):
     write_text(TOKENFILE, ("." if unfilterable
                            else "|".join(sorted(tokens)) if tokens else "") + "\n")
     sweep_locks(sessions)
+    sweep_autoclaims()
     rebuild_hot(sessions)
+
+
+def sweep_autoclaims():
+    """Delete claim records that nothing will ever come back to release.
+
+    An automatic claim is remembered under its tool call's id and forgotten when
+    that call finishes. Anything that stops the finish arriving leaves the record
+    behind for ever — which is exactly what the PostToolUse-on-error hole did
+    until it was found on 2026-07-28, and twenty-two of them were still sitting
+    there afterwards.
+
+    Not merely litter. The shell fast path decides whether PostToolUse is worth
+    an engine start by asking whether *any* claim record exists, so a handful of
+    dead ones make every Bash call in every session on this machine pay ~40ms
+    for nothing, for ever. An hour is far longer than the longest real command
+    and far shorter than the soft lock it would have belonged to."""
+    cutoff = now() - 3600
+    try:
+        names = os.listdir(AUTOCLAIM)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(AUTOCLAIM, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.unlink(path)
+        except OSError:
+            pass
 
 
 def sweep_locks(sessions):

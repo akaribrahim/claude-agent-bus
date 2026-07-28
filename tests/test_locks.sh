@@ -139,6 +139,31 @@ assert_contains "$out" "implies bundler" \
 assert_contains "$out" "agentbus claim simulator,bundler" "and how to take it"
 ab sess-b release simulator > /dev/null
 
+# ---- claim records that nothing will release are swept ---------------------
+#
+# The shell fast path decides whether PostToolUse is worth an engine start by
+# asking whether *any* claim record exists. Twenty-two dead ones were found on
+# the author's machine, left by the PostToolUse-on-error hole, and every Bash
+# call in every session had been paying an engine start for them since.
+
+out=$(ab_hook pre-tool "$(payload bash "sid=sess-b" "cwd=$WT2" "cmd=$CMD" id=sweep-1)")
+assert_allow "$out" "a guarded command claims something"
+assert_file "$AGENTBUS_HOME/autoclaim/sweep-1.json" "and the claim is recorded"
+
+# One that nothing ever came back for.
+cp "$AGENTBUS_HOME/autoclaim/sweep-1.json" "$AGENTBUS_HOME/autoclaim/stale-1.json"
+python3 -c "
+import os, time
+os.utime('$AGENTBUS_HOME/autoclaim/stale-1.json',
+         (time.time() - 7200, time.time() - 7200))"
+
+ab sess-b doctor > /dev/null      # any engine run sweeps
+assert_no_file "$AGENTBUS_HOME/autoclaim/stale-1.json" \
+  "a claim record nothing will release is swept"
+assert_file "$AGENTBUS_HOME/autoclaim/sweep-1.json" \
+  "while the one belonging to a command still running is left alone"
+ab_hook post-bash "$(payload post-bash "sid=sess-b" "cwd=$WT2" id=sweep-1)" > /dev/null
+
 # ---- a session that ends drops what it was holding --------------------------
 
 ab sess-a claim db --why "held across the end of the session" > /dev/null
