@@ -100,6 +100,45 @@ assert_equal 0 "$neither" "no concurrent pair was allowed through twice"
 assert_equal 0 "$both" "no concurrent pair was refused twice"
 assert_equal 0 "$(locks_held)" "nothing is left claimed after the race"
 
+# ---- `run` takes what the resource implies, as the guard already did --------
+#
+# `agentbus run simulator` used to take the simulator and nothing else, while a
+# bare `maestro test` took the simulator *and* everything it implies, because
+# the guard expands `implies` and the CLI did not. The careful command was the
+# weaker one, and another session could re-serve a bundler mid-run.
+#
+# Reported from real use: an agent lost six minutes to it twice and then
+# negotiated a manual protocol with the other session instead of using the tool.
+
+IMPLIES_CFG='{"resources":[
+    {"name":"db","desc":"the shared development database","patterns":["\\bpsql\\b"]},
+    {"name":"bundler","desc":"the bundler on :9000","patterns":["\\bmetro\\b"]},
+    {"name":"simulator","desc":"the one simulator","implies":["bundler"],
+     "patterns":["\\bmaestro\\b"]}]}'
+# Both checkouts: a config written only to the main one is invisible to the
+# session working in the worktree.
+printf '%s' "$IMPLIES_CFG" > "$REPO/.claude/agent-bus.json"
+mkdir -p "$WT2/.claude" && printf '%s' "$IMPLIES_CFG" > "$WT2/.claude/agent-bus.json"
+ab sess-b doctor > /dev/null
+
+out=$(ab sess-b run simulator -- true 2>&1)
+assert_contains "$out" "also taking bundler" "run says what else it is taking"
+assert_contains "$out" "implies" "and why"
+
+# While it runs, the other session must not be able to move the bundler.
+ab sess-b claim simulator --why "holding for the test" > /dev/null
+out=$(ab sess-a claim bundler --why "mine now" 2>&1)
+assert_not_contains "$out" "note:" \
+  "a resource that implies nothing says nothing extra"
+ab sess-a release bundler > /dev/null
+ab sess-b release simulator > /dev/null
+
+out=$(ab sess-b claim simulator --why "just the simulator" 2>&1)
+assert_contains "$out" "implies bundler" \
+  "a deliberate claim is told what it has NOT taken"
+assert_contains "$out" "agentbus claim simulator,bundler" "and how to take it"
+ab sess-b release simulator > /dev/null
+
 # ---- a session that ends drops what it was holding --------------------------
 
 ab sess-a claim db --why "held across the end of the session" > /dev/null

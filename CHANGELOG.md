@@ -23,6 +23,13 @@ Subagents are parties of their own.
   name. A subagent's Bash environment is byte-identical to its parent's, so by
   the time the CLI is running nothing in it knows which subagent is calling; the
   decision is made in the hook, where `agent_id` is on the payload.
+- `agentbus run <res>` now takes what `<res>` implies, as the guard always did.
+  It used to take the named resource and nothing else, so `agentbus run
+  simulator` held the simulator while a bare `maestro test` held the simulator
+  *and* the bundlers and the API — the careful command was the weaker one, and
+  another session could re-serve a bundler mid-run and the run would silently
+  switch to its bundle. `agentbus claim` is not expanded, because a claim is
+  deliberate, but it now says what it has not taken.
 - A session that moves into a worktree mid-session is followed, and the guards
   decide from the tree the caller is actually in rather than from one root per
   session — which a session with subagents in two worktrees does not have.

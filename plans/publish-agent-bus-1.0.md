@@ -366,6 +366,16 @@ fix it.
   because it read the holder from the session record. It now reads the name off the lock,
   which is the party that took it.
 
+- Observation (1.1, from the overnight log): `agentbus run simulator` took the simulator
+  and nothing else, while a bare `maestro test` took the simulator *and* everything it
+  implies — because `resources_for` expands `implies` and `cli_run` never did. The careful
+  command was the weaker one. An agent hit it twice, lost six minutes each time, and wrote:
+  "'agentbus run simulator' bile metro-app'i tutmuyor; siz serve edince benim kosum
+  sessizce sizin bundle'iniza kayiyor". It then negotiated a manual protocol with the other
+  session — "rig tamamen sizde, ben SIFIR servise dokunuyorum" — which is the messaging half
+  of this plugin covering for a hole in the locking half. `run` expands now; `claim` does
+  not, because a claim is deliberate, but it says what it has left unheld.
+
 ## Decision Log
 
 - Decision: 1.0 ships the interference guard, ownership, handoff, zero-config detection,

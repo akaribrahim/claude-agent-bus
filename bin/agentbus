@@ -2882,6 +2882,15 @@ def cli_claim(args):
                                         mode="hard", steal=flag(args, "--steal"))
     if ok:
         print("claimed '%s'" % pos[0])
+        _, implied = expand_implied([pos[0]], me)
+        if implied:
+            # Not expanded silently: a claim is deliberate. But holding the
+            # simulator while somebody else re-serves the bundler under you is
+            # the trap this exists to prevent, so it is said out loud.
+            print("note: '%s' implies %s, which you have NOT taken. "
+                  "`agentbus claim %s` if the run needs them held too."
+                  % (pos[0], ", ".join(implied),
+                     ",".join([pos[0]] + implied)))
         return
     print("'%s' is held by %s (%s, %s). %s" % (
         pos[0], holder.get("agent"), lock.get("mode"),
@@ -3018,6 +3027,30 @@ def cli_serves(_args):
         print("%-12s %-9s %-46s %s" % (res["name"], how, short_path(root or "-"), mark))
 
 
+def expand_implied(names, me):
+    """The named resources, plus whatever they imply.
+
+    `agentbus run simulator` took the simulator and nothing else, while a bare
+    `maestro test` took the simulator *and* the two bundlers and the API —
+    because the guard expands `implies` and the CLI never did. The careful
+    command was the weaker one: another session could re-serve a bundler
+    mid-run and the run would silently switch to its bundle, which is precisely
+    what this plugin exists to prevent.
+
+    Reported from real use on 2026-07-28 by an agent that lost six minutes to it
+    twice and then negotiated a manual protocol with the other session instead.
+    Its exact words: "'agentbus run simulator' bile metro-app'i tutmuyor"."""
+    cfg = repo_config(me.get("repo_key"), me.get("root"))
+    by_name = {r["name"]: r for r in cfg.get("resources", [])}
+    out, added = list(names), []
+    for name in list(names):
+        for dep in (by_name.get(name) or {}).get("implies", []):
+            if dep in by_name and dep not in out:
+                out.append(dep)
+                added.append(dep)
+    return out, added
+
+
 def cli_run(args):
     import subprocess
     me = need_me()
@@ -3032,7 +3065,10 @@ def cli_run(args):
         print("usage: agentbus run <res>[,<res>] [--why \"...\"] -- <command>",
               file=sys.stderr)
         sys.exit(1)
-    names = [x for x in pos[0].split(",") if x]
+    names, implied = expand_implied([x for x in pos[0].split(",") if x], me)
+    if implied:
+        print("agent-bus: also taking %s — %s implies %s."
+              % (", ".join(implied), pos[0], ", ".join(implied)), file=sys.stderr)
     why = opt(head, "--why", " ".join(cmd)[:120])
     taken = []
     try:
