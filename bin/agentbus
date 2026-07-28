@@ -670,14 +670,16 @@ def current_session(payload=None):
     rec = read_json(os.path.join(SESSIONS, "%s.json" % sid))
     if rec:
         rec["sid"] = sid
-        if payload and not payload.get("agent_id"):
+        if payload:
             # A subagent's tool call carries its own cwd and an `agent_id`. That
-            # cwd is the subagent's, not the session's — two subagents working
-            # in different worktrees would otherwise drag the session's root
-            # back and forth between them on every tool call, which is worse
-            # than the stale root this exists to fix, because it is not even
-            # consistently wrong.
-            rec = follow_cwd(rec, payload.get("cwd"))
+            # cwd is the subagent's, not the session's, so it must not move the
+            # session: two subagents working in two worktrees would drag the
+            # root back and forth between them on every tool call, which is
+            # worse than a stale root because it is not even consistently wrong.
+            # The guards still decide from the caller's own tree — see
+            # caller_view in hook_pre_tool.
+            if not payload.get("agent_id"):
+                rec = follow_cwd(rec, payload.get("cwd"))
         else:
             # The CLI runs from wherever the caller is standing — a moved
             # session, or a subagent in its own worktree. That is the right

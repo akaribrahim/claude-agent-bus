@@ -100,6 +100,12 @@ def main():
         print("unknown payload kind: %s" % kind, file=sys.stderr)
         return 1
 
+    # A subagent's hook payload carries these two and the parent's does not,
+    # which is the only thing that tells them apart.
+    if kv.get("agent_id"):
+        d["agent_id"] = kv["agent_id"]
+        d["agent_type"] = kv.get("agent_type", "general-purpose")
+
     print(json.dumps(d))
     return 0
 

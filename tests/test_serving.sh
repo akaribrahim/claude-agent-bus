@@ -164,28 +164,24 @@ assert_not_contains "$(ab sess-a inbox)" "moved to" \
 # A subagent's tool call carries its own cwd and an agent_id. That cwd is the
 # subagent's, not the session's, and following it drags the root back and forth
 # between two subagents working in two worktrees.
-ab_hook prompt-submit "$(python3 -c "
-import json
-print(json.dumps({'session_id':'sess-move','cwd':'$WT2','agent_id':'sub-1',
-                  'agent_type':'general-purpose','hook_event_name':'UserPromptSubmit'}))")" > /dev/null
+ab_hook prompt-submit "$(payload session sid=sess-move "cwd=$WT2" \
+  agent_id=sub-1 agent_type=general-purpose)" > /dev/null
 assert_equal "$INNER" "$(session_field sess-move root)" \
   "a subagent working elsewhere does not move the session"
 
-out=$(ab sess-move serve web 2>&1)
-assert_contains "$out" "restarted from your worktree" "serve reports the worktree"
-assert_equal inner "$(fetch)" "and the port answers with it — which is the whole point"
-
-# The CLI follows too, because `serve` is usually the very next thing after a
-# move and no hook has fired in between. Only within one repository, though:
-# `agentbus status` run from somewhere unrelated must not relocate a session.
+# The CLI decides from where it was run — a moved session, or a subagent in its
+# own worktree — and does not write that back, because the caller may be one of
+# several subagents in several trees.
 new_session sess-cli "$REPO"
-( cd "$INNER" && ab sess-cli name > /dev/null )
-assert_equal "$INNER" "$(session_field sess-cli root)" \
-  "a CLI call from the worktree moves the session too"
+( cd "$INNER" && ab sess-cli serve web > /dev/null 2>&1 )
+assert_equal inner "$(fetch)" "serve from a worktree serves that worktree"
+assert_equal "$REPO" "$(session_field sess-cli root)" \
+  "without moving the session's recorded root"
+
 OTHER=$(make_repo servother)
 commit_all "$OTHER"
 ( cd "$OTHER" && ab sess-cli name > /dev/null )
-assert_equal "$INNER" "$(session_field sess-cli root)" \
-  "but a CLI call from an unrelated repository does not"
+assert_equal "$REPO" "$(session_field sess-cli root)" \
+  "and a call from an unrelated repository changes nothing at all"
 
 finish
