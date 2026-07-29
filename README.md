@@ -205,7 +205,7 @@ agentbus serves                       which checkout each service is answering f
 agentbus own "<glob>" [--why ".."] [--strict]   declare part of the tree yours
 agentbus own --list | disown "<glob>" | disown --all
 agentbus handoff [--note ".."]        summarise what you did, for the others
-agentbus claim <res> [--why ".."] [--steal]
+agentbus claim <res> [--why ".."] [--steal] [--as <you>]
 agentbus wait <res> [--timeout 90]    queue for a held resource
 agentbus release <res> | --all
 agentbus doing "..."                  one line others see in their roster
@@ -250,6 +250,11 @@ anything else deadlocks a parent against the agent it is waiting for.
 That decision is made in the hook rather than in the CLI on purpose: a
 subagent's Bash environment is byte-identical to its parent's, so by the time
 `agentbus run` is executing, nothing in it knows which subagent is calling.
+Which means the spelling matters. `agentbus claim sim` typed as a command is
+seen by the guard and locked in the caller's name; the same line inside a runner
+script is not seen at all, and the lock it makes has to record that it cannot
+name its party — whereupon it blocks every agent in the session rather than
+letting every agent past. `--as <your name>` settles it from inside a script.
 
 A bash fast path runs first and decides in a few milliseconds whether the Python
 engine needs to run at all — shell builtins only, short-circuiting before it has

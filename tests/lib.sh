@@ -262,6 +262,35 @@ except Exception:
     pass"
 }
 
+agent_field() {   # <session id> <agent id> <key> → one field of a subagent record
+  python3 -c "
+import glob, json, os, sys
+for path in glob.glob('$AGENTBUS_HOME/agents/*.json'):
+    try:
+        rec = json.load(open(path))
+    except Exception:
+        continue
+    if rec.get('sid') == '$1' and rec.get('agent_id') == '$2':
+        print(rec.get('$3', ''))
+        break"
+}
+
+lock_lines() {   # → the text of every lock event so far, one per line
+  python3 -c "
+import json
+try:
+    fh = open('$AGENTBUS_HOME/events.jsonl')
+except OSError:
+    raise SystemExit
+for line in fh:
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        continue
+    if rec.get('kind') == 'lock':
+        print(rec.get('text', ''))"
+}
+
 read_seq() {
   local n=0
   [ -r "$AGENTBUS_HOME/events.seq" ] && read -r n < "$AGENTBUS_HOME/events.seq"

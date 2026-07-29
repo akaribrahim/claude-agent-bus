@@ -46,6 +46,11 @@ its detached dev server keeps serving its tree. Point it at yours:
 binary path, or a subshell all reach the same service and produce the same
 silently-wrong result. That is the exact failure this exists to prevent.
 
+The three commands a block tells you to run — `agentbus wait`, `agentbus
+release`, and `agentbus claim … --steal` — are never themselves blocked. They
+exist to act on a lock somebody else is holding, so the way out of a block
+always runs.
+
 ## Running things
 
 Prefer the scoped form — it points the services at your tree, holds them, runs
@@ -176,6 +181,20 @@ attributed to the session that started you:
 
 You can only speak as yourself or as one of your own subagents. You and your own
 subagents never block each other, in either direction.
+
+**Run `agentbus` as a command, not from inside a script.** How you spell it
+decides whether it works. A `agentbus claim simulator` typed as its own command
+is seen by the guard, which knows which agent you are and takes the lock in your
+name. The same line buried in `run-tour.sh` is not: by the time it runs, nothing
+can tell you from your siblings, so the lock has to record that it does not know
+whose it is — and then it blocks all of you rather than letting all of you past.
+If you must claim from inside a script, say who you are:
+
+    agentbus claim simulator --as <your name> --why "batch 1, 7 flows"
+    agentbus release simulator --as <your name>
+
+`--as` works on `claim`, `release`, `wait`, `run` and `serve`. Without it, one
+of your siblings can neither be stopped by your lock nor hand it back.
 
 One thing does *not* separate them: file collisions and the interference note
 still work per session, so two subagents editing one file are not warned about

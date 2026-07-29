@@ -68,7 +68,34 @@ out=$(ab_hook pre-tool "$(payload bash "sid=sess-b" "cwd=$WT2" "cmd=$CMD" id=tu-
 assert_deny "$out" "an explicit claim blocks the other session too"
 reason=$(json_field "$out" hookSpecificOutput permissionDecisionReason)
 assert_contains "$reason" "long migration" "the denial quotes why it was claimed"
-ab sess-a release db > /dev/null
+
+# ---- the way out of a block is not itself blocked ---------------------------
+#
+# The denial above ends in two commands: `agentbus wait db` and, as a last
+# resort, `agentbus claim db --steal`. Both name a resource on an agentbus
+# command line, so until 2026-07-29 the guard claimed them like any other use
+# and refused them — the plugin printing advice it would not let the reader
+# follow. Three agents spent an afternoon negotiating turns by hand over the
+# message bus because of it, having concluded the locks were unusable.
+#
+# The lock is still held by sess-a for every assertion here.
+
+for escape in "agentbus wait db --why 'my turn next'" \
+              "agentbus release db" \
+              "agentbus claim db --steal --why 'they said they were done'"; do
+  out=$(ab_hook pre-tool "$(payload bash "sid=sess-b" "cwd=$WT2" "cmd=$escape" id=esc)")
+  assert_allow "$out" "\`${escape%% --*}\` reaches the CLI while the lock is held"
+done
+assert_equal 1 "$(locks_held)" "and none of them claimed anything on the way past"
+
+# Riding a real use in on the back of a pass-through verb does not work.
+out=$(ab_hook pre-tool "$(payload bash "sid=sess-b" "cwd=$WT2" \
+  "cmd=agentbus wait db && psql -c 'select 1'" id=esc-2)")
+assert_deny "$out" "but a command that really uses it, chained after, is still guarded"
+
+out=$(ab sess-b claim db --steal --why "they said they were done" 2>&1)
+assert_contains "$out" "claimed" "and the steal the message advertises actually works"
+ab sess-b release db > /dev/null
 assert_equal 0 "$(locks_held)" "releasing it frees the resource"
 
 # ---- forty concurrent pairs, exactly one denial each ------------------------
@@ -138,6 +165,38 @@ assert_contains "$out" "implies bundler" \
   "a deliberate claim is told what it has NOT taken"
 assert_contains "$out" "agentbus claim simulator,bundler" "and how to take it"
 ab sess-b release simulator > /dev/null
+
+# ---- the log says what was taken, not only what was given back --------------
+#
+# On 2026-07-29 the day's stream held 219 releases and 7 takes. Every one of the
+# 51 `agentbus run` invocations was silent going in and loud coming out: the
+# guard takes the lock before the CLI is running, the CLI finds it already its
+# own and says nothing, and only the release speaks — four times, once per
+# implied resource. Somebody following `agentbus watch` saw a wall of things
+# being handed back and not one of them being taken.
+
+before=$(lock_lines | wc -l | tr -d ' ')
+ab_hook pre-tool "$(payload bash "sid=sess-b" "cwd=$WT2" \
+  "cmd=agentbus run simulator -- true" id=lg-1)" > /dev/null
+ab sess-b run simulator -- true > /dev/null 2>&1
+new=$(lock_lines | tail -n +$((before + 1)))
+assert_equal 1 "$(printf '%s\n' "$new" | grep -c '^took ')" \
+  "a deliberate run puts exactly one line in for what it took"
+assert_equal 1 "$(printf '%s\n' "$new" | grep -c '^released ')" \
+  "and exactly one matching it when the command ends"
+assert_contains "$new" "+bundler" "each naming everything that came with it"
+
+before=$(lock_lines | wc -l | tr -d ' ')
+ab_hook pre-tool "$(payload bash "sid=sess-b" "cwd=$WT2" "cmd=$CMD" id=lg-2)" > /dev/null
+ab_hook post-bash "$(payload post-bash "sid=sess-b" "cwd=$WT2" id=lg-2)" > /dev/null
+assert_equal "$before" "$(lock_lines | wc -l | tr -d ' ')" \
+  "while an automatic claim for one command says nothing in either direction"
+
+before=$(lock_lines | wc -l | tr -d ' ')
+ab_hook pre-tool "$(payload bash "sid=sess-b" "cwd=$WT2" "cmd=$CMD" id=lg-3)" > /dev/null
+ab sess-b release db > /dev/null
+assert_equal "$before" "$(lock_lines | wc -l | tr -d ' ')" \
+  "and handing that one back by hand does not invent a line to answer"
 
 # ---- claim records that nothing will release are swept ---------------------
 #

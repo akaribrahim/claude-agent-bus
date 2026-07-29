@@ -122,6 +122,22 @@ assert_equal wt1 "$out" "run pointed the service at this worktree and used it"
 assert_equal 0 "$(locks_held)" "run gave the resource back afterwards"
 assert_equal wt1 "$(fetch)" "and left it serving the worktree it moved it to"
 
+# ---- a service pulled back and forth is said out loud -----------------------
+#
+# That was the third handover of `web`, between two checkouts, inside a few
+# seconds. Every one of them was legitimate on its own — took the lock, reported
+# success — so nothing was ever said about the pattern. On 2026-07-29 the API
+# went machine-side, rental-side and back inside seventeen seconds while three
+# agents each ran their tests believing the rig answered for their own tree; two
+# of them worked it out an hour later by reading `lsof`. The lock they needed
+# existed the whole time. What they had no way to see was that they needed it.
+
+churn() { ab sess-b inbox | grep -c "has changed checkouts" | tr -d ' '; }
+assert_equal 1 "$(churn)" "the third handover between two trees is announced"
+out=$(ab sess-b inbox)
+assert_contains "$out" "agentbus claim web" "with the thing to do about it"
+assert_contains "$out" "servwt2" "naming the checkouts it is being pulled between"
+
 # ---- a session that moves into a worktree mid-session ----------------------
 #
 # Claude Code creates worktrees under `.claude/worktrees/` and moves a session
@@ -169,6 +185,38 @@ ab_hook prompt-submit "$(payload session sid=sess-move "cwd=$WT2" \
 assert_equal "$INNER" "$(session_field sess-move root)" \
   "a subagent working elsewhere does not move the session"
 
+# ---- but the subagent itself is judged where it runs ------------------------
+#
+# Its own record is written at SubagentStart from the directory it was launched
+# in, which is its parent's, and the guard read that rather than the cwd on the
+# call in front of it. So an agent that had pointed the service at its own
+# worktree was refused permission to use it, in its own tree, by the plugin that
+# had just moved it there. On 2026-07-29 one of them worked around that with
+# AGENTBUS_OFF=1 for the rest of its turn, which is the one outcome this cannot
+# afford: a guard an agent has caught being wrong is a guard it stops believing.
+
+ab_hook subagent-start "$(payload subagent-start sid=sess-move "cwd=$INNER" \
+  agent_id=sub-wt agent_type=general-purpose)" > /dev/null
+assert_equal "$INNER" "$(agent_field sess-move sub-wt root)" \
+  "a subagent is born where its parent was standing"
+
+( cd "$WT2" && ab sess-b serve web > /dev/null 2>&1 )
+assert_equal wt2 "$(fetch)" "the service is serving wt2"
+
+out=$(ab_hook pre-tool "$(payload bash sid=sess-move "cwd=$WT2" "cmd=$CMD" \
+  id=sv-sub agent_id=sub-wt agent_type=general-purpose)")
+assert_allow "$out" \
+  "a subagent working in the tree the service serves is not blocked from it"
+assert_equal "$WT2" "$(agent_field sess-move sub-wt root)" \
+  "and its record has followed it there"
+ab_hook post-bash "$(payload post-bash sid=sess-move "cwd=$WT2" id=sv-sub)" > /dev/null
+
+# The other direction still holds: the same subagent, back in its parent's tree,
+# is refused — this is not a blanket exemption for subagents.
+out=$(ab_hook pre-tool "$(payload bash sid=sess-move "cwd=$INNER" "cmd=$CMD" \
+  id=sv-sub2 agent_id=sub-wt agent_type=general-purpose)")
+assert_deny "$out" "and in a tree the service does not serve it is still refused"
+
 # The CLI decides from where it was run — a moved session, or a subagent in its
 # own worktree — and does not write that back, because the caller may be one of
 # several subagents in several trees.
@@ -177,6 +225,9 @@ new_session sess-cli "$REPO"
 assert_equal inner "$(fetch)" "serve from a worktree serves that worktree"
 assert_equal "$REPO" "$(session_field sess-cli root)" \
   "without moving the session's recorded root"
+# Said once, not once per handover. A warning that repeats every few seconds is
+# read as noise and then the one that matters is read as noise too.
+assert_equal 1 "$(churn)" "and the churn warning is not repeated for each move"
 
 OTHER=$(make_repo servother)
 commit_all "$OTHER"

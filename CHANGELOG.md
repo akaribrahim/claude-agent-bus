@@ -2,6 +2,48 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 1.2.0 — 2026-07-29
+
+A day with four subagents working three worktrees, read back out of the event
+log. Five things it found, none of which any test could have.
+
+- **The way out of a block is no longer blocked.** Every denial ends in
+  `agentbus wait <res>` and, as a last resort, `agentbus claim <res> --steal`.
+  Both name a resource on an `agentbus` command line, so the guard claimed them
+  like any other use and refused them — the plugin printing advice it would not
+  let you follow. `wait`, `release` and `--steal` now pass untouched. A real use
+  chained after one (`agentbus wait sim && maestro test`) is still guarded.
+- **A lock now admits when it does not know whose it is.** `agentbus claim`
+  typed as a command is seen by the guard, which knows which agent you are.
+  The same line inside a runner script is not, and the CLI cannot tell a
+  subagent from its parent — so the lock was recorded with no owner, and an
+  empty owner meant "the session itself", which every subagent walks past.
+  Three subagents each took the simulator that way, each was told it held it
+  alone, and they went off and built a `mkdir` mutex in a scratch directory.
+  Such a lock now blocks every agent in the session and says how to settle it:
+  `--as <your name>`, which works on `claim`, `release`, `wait`, `run` and
+  `serve`. A session with one subagent is unaffected — nothing there can be
+  ambiguous in a way that hurts.
+- **One agent can no longer hand back another's lock.** `agentbus release` from
+  a script looks exactly like the parent's, and the parent is allowed past its
+  own subagent's lock — so a sibling could give away a rig mid-run. Releasing
+  now requires showing whose it is; `release --all` gives back your own.
+- **A subagent is judged where it is running, not where it was launched.** Its
+  worktree was recorded once, from wherever its parent was standing, so an agent
+  that had itself pointed the API at its own checkout was then refused
+  permission to use it. It turned the plugin off with `AGENTBUS_OFF=1` and
+  carried on, which is the one outcome this cannot afford.
+- **The log says what was taken.** The day's stream held 219 releases and 7
+  takes: the guard claims silently before the CLI is running, and only the
+  release spoke — once per implied resource. A deliberate `agentbus run` or
+  `claim` now puts one line in for the whole group and one matching it at the
+  end; automatic per-command claims stay silent both ways.
+- **A service being pulled back and forth is said out loud.** `api` changed
+  checkouts three times in seventeen seconds while three agents each believed
+  the rig was answering for their own tree; two found out an hour later with
+  `lsof`. Three handovers between two checkouts in ten minutes now tells
+  everyone, once, and points at the lock that prevents it.
+
 ## 1.1.0 — 2026-07-28
 
 Subagents are parties of their own.

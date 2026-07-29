@@ -65,6 +65,7 @@ LOCKS = os.path.join(BUS, "locks")
 AUTOCLAIM = os.path.join(BUS, "autoclaim")
 OWNS = os.path.join(BUS, "owns")
 AGENTS = os.path.join(BUS, "agents")
+HINTS = os.path.join(BUS, "hints")
 SERVES = os.path.join(BUS, "serves")
 MATCHED = os.path.join(BUS, "matched")
 REPOS = os.path.join(BUS, "repos")
@@ -140,7 +141,7 @@ def now():
 
 def ensure_dirs():
     for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS, AUTOCLAIM,
-              OWNS, AGENTS, SERVES, MATCHED):
+              OWNS, AGENTS, HINTS, SERVES, MATCHED):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -523,6 +524,7 @@ def refresh_derived(sessions=None):
                            else "|".join(sorted(tokens)) if tokens else "") + "\n")
     sweep_locks(sessions)
     sweep_autoclaims()
+    sweep_hints()
     rebuild_hot(sessions)
 
 
@@ -708,6 +710,10 @@ def current_session(payload=None):
     rec = read_json(os.path.join(SESSIONS, "%s.json" % sid))
     if rec:
         rec["sid"] = sid
+        # A hook is told who is acting; the CLI has to be told or guess. Which
+        # of the two this is decides whether a lock taken here can name its
+        # party or has to admit it cannot — see `same_party`.
+        rec["party_known"] = bool(payload)
         if payload:
             # A subagent's tool call carries its own cwd and an `agent_id`. That
             # cwd is the subagent's, not the session's, so it must not move the
@@ -726,6 +732,22 @@ def current_session(payload=None):
             here = caller_view(rec, os.getcwd())
             if here.get("repo_key") == rec.get("repo_key"):
                 rec = here
+            # The guard saw this same command a moment ago and knew which
+            # subagent was running it. That is the only place the answer exists.
+            hint = take_party_hint(rec)
+            if hint:
+                rec = dict(rec)
+                rec["agent_id"] = hint.get("agent_id")
+                rec["agent"] = hint.get("agent") or rec.get("agent")
+                rec["party_known"] = True
+                if hint.get("agent_id"):
+                    # A shell is the one place a subagent's real directory can
+                    # be seen. One that only ever `cd`s inside its commands has
+                    # a record still saying it is where it was launched, and
+                    # every hook payload agrees with that record — so this is
+                    # the only chance anything has to correct it.
+                    follow_agent_cwd(read_json(agent_path(sid, hint["agent_id"])),
+                                     os.getcwd())
     return sid, rec
 
 
@@ -787,18 +809,171 @@ def party_key(me):
     return "%s__%s" % (me.get("sid") or "", aid) if aid else (me.get("sid") or "")
 
 
-def same_party(holder, me):
+_SIBLINGS = {}
+
+
+def sibling_count(sid):
+    """How many subagents this session has.
+
+    Memoised for the life of the process, which for a hook is one call and for
+    the CLI is one command. The exception is `agentbus wait`, which loops for up
+    to ninety seconds and will not notice a subagent starting or stopping under
+    it — it would keep treating an unidentified lock as blocking for the rest of
+    that wait. Worth knowing rather than worth a cache invalidation: the wrong
+    answer there is one the caller was already going to sit through."""
+    if sid not in _SIBLINGS:
+        _SIBLINGS[sid] = len(load_agents(sid))
+    return _SIBLINGS[sid]
+
+
+def same_party(holder, me, siblings=None):
     """Whether a lock held by `holder` is already this caller's to use.
 
     Two different subagents conflict. A parent and its own subagent never do —
     a parent that claimed something and then delegated must not deadlock against
     the agent it is waiting for, and a backgrounded subagent must not be blocked
-    by the session that started it."""
+    by the session that started it.
+
+    The awkward case is a lock with no `agent_id` at all. It means one of two
+    things and they want opposite answers: the session itself took it (in which
+    case its own subagents must pass), or it was taken through the CLI, where a
+    subagent cannot be told from its parent (in which case the siblings must
+    NOT pass). Locks now say which — `party_known` — because reading the second
+    as the first is what let three subagents drive one simulator on 2026-07-29
+    while each was told it held it alone.
+
+    With fewer than two subagents the ambiguity cannot do harm: parent and only
+    child never conflict in either direction, so an unidentified holder is left
+    permissive rather than blocking a session against itself."""
     if (holder.get("sid") or "") != (me.get("sid") or ""):
         return False
     a = holder.get("agent_id") or ""
     b = me.get("agent_id") or ""
-    return a == b or not a or not b
+    if a == b:
+        return True
+    if a and b:
+        return False        # two different subagents: the case that must serialise
+    if holder.get("party_known", True):
+        return True         # the side with no id is known to be the session itself
+    if siblings is None:
+        siblings = sibling_count(holder.get("sid"))
+    return siblings < 2
+
+
+def may_release(lock, me, siblings=None):
+    """Whether this caller may hand back that lock.
+
+    Stricter than `same_party` on purpose. Guarding asks "would running this
+    collide", and a parent must not collide with its own subagent. Releasing
+    asks "is this yours to give away", and a sibling running `agentbus release`
+    through the CLI looks exactly like the parent — which is how one agent
+    could hand back another's rig in the middle of its run."""
+    if not same_party(lock, me, siblings):
+        return False
+    a = lock.get("agent_id") or ""
+    if not a or a == (me.get("agent_id") or ""):
+        return True
+    # The lock names a specific subagent and the caller cannot prove it is that
+    # subagent. `--as` is how it says so; `release --all` is how a session gives
+    # back everything it owns without having to.
+    return bool(me.get("party_known"))
+
+
+def hint_key(tokens):
+    """A key both halves of one `agentbus` command can compute independently.
+
+    The hook sees the whole command line and knows which subagent is running it;
+    the CLI knows neither. They do share the argv of the `agentbus` call itself —
+    the hook's tokeniser produces exactly what the shell hands the process — so
+    the hook can leave the party under that key and the CLI can pick it up."""
+    import hashlib
+    if not tokens:
+        return ""
+    words = [os.path.basename(tokens[0])] + list(tokens[1:])
+    return hashlib.sha1("\x00".join(words).encode("utf-8")).hexdigest()[:16]
+
+
+def leave_party_hint(me, cmd):
+    """Record which party is about to run a lock-taking `agentbus` command.
+
+    Every such command passes through this hook first, and this hook is the one
+    place that knows who is running it: `agent_id` when a subagent is, and its
+    absence — which Claude Code guarantees for the session's own calls — when
+    the session itself is. Either answer is worth recording, because the CLI a
+    few milliseconds later can establish neither.
+
+    A command the hook never sees, because it is buried in a runner script, has
+    no hint and its lock has to admit it cannot name its party."""
+    for seg in split_segments(strip_heredocs(cmd or "")):
+        toks = tokens_of(seg)
+        while toks and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0])
+                        or os.path.basename(toks[0]) in WRAPPERS):
+            toks = toks[1:]
+        if len(toks) < 2 or os.path.basename(toks[0]) != "agentbus":
+            continue
+        if toks[1] not in CLAIMING_VERBS and toks[1] not in PASSTHROUGH_VERBS:
+            continue
+        key = hint_key(toks)
+        if not key:
+            continue
+        path = os.path.join(HINTS, "%s.json" % key)
+        with Mutex("hint"):
+            rec = read_json(path) or {}
+            waiting = [w for w in rec.get("waiting", [])
+                       if now() - w.get("at", 0) < 60]
+            waiting.append({"sid": me.get("sid"),
+                            "agent_id": me.get("agent_id") or "",
+                            "agent": me.get("agent"), "at": now()})
+            write_json(path, {"waiting": waiting[-8:]})
+
+
+def take_party_hint(rec):
+    """The party this CLI call belongs to, if its hook left one.
+
+    Two subagents running the *identical* command line at the same moment can
+    swap hints. Both are real parties of the same session and the window is one
+    process start wide, which is a far smaller error than the one this fixes."""
+    key = hint_key(["agentbus"] + sys.argv[1:])
+    if not key:
+        return None
+    path = os.path.join(HINTS, "%s.json" % key)
+    if not os.path.exists(path):
+        return None     # the common case: no mutex, no work
+    with Mutex("hint"):
+        data = read_json(path)
+        if not data:
+            return None
+        waiting = [w for w in data.get("waiting", [])
+                   if now() - w.get("at", 0) < 60
+                   and w.get("sid") == rec.get("sid")]
+        if not waiting:
+            return None
+        mine = waiting.pop(0)
+        if waiting:
+            write_json(path, {"waiting": waiting})
+        else:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    return mine
+
+
+def sweep_hints():
+    """Hints nobody came back for. A command the guard saw and the CLI never
+    ran — denied, or interrupted — leaves one behind."""
+    cutoff = now() - 300
+    try:
+        names = os.listdir(HINTS)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(HINTS, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.unlink(path)
+        except OSError:
+            pass
 
 
 def subagent_name(parent_agent, sid):
@@ -869,6 +1044,29 @@ def name_hint_once(me):
             "  agentbus post --as %s \"...\"" % (rec["name"], rec["name"]))
 
 
+def follow_agent_cwd(rec, cwd):
+    """Keep a subagent's recorded worktree in step with where it is working.
+
+    Its record is written at SubagentStart from whatever directory it was
+    launched in, which for a subagent is usually its parent's rather than the
+    tree it was told to work in. Everything then read that. On 2026-07-29 an
+    agent that had itself pointed the API at its own worktree was refused
+    permission to use it — the guard compared against the root it was born with
+    — and it carried on with AGENTBUS_OFF=1 rather than argue, which is the one
+    outcome this plugin cannot afford.
+
+    The objection that stopped sessions following their cwd does not apply one
+    level down: it was two subagents dragging their *parent's* single root back
+    and forth, and here each subagent has a record of its own."""
+    if not rec or not cwd or cwd == rec.get("cwd"):
+        return rec
+    root, repo_key, label, branch = git_facts(cwd)
+    rec.update({"cwd": cwd, "root": root, "repo_key": repo_key,
+                "repo_label": label, "branch": branch})
+    write_json(agent_path(rec.get("sid"), rec.get("agent_id")), rec)
+    return rec
+
+
 def party_view(me, payload):
     """`me`, seen as whichever party is actually acting.
 
@@ -882,18 +1080,18 @@ def party_view(me, payload):
     view["agent_type"] = payload.get("agent_type") or "agent"
     rec = read_json(agent_path(me.get("sid"), aid))
     if rec:
-        view["agent"] = rec.get("name") or view.get("agent")
-        for k in ("root", "repo_key", "repo_label", "branch"):
-            if rec.get(k):
-                view[k] = rec[k]
+        rec = follow_agent_cwd(rec, payload.get("cwd"))
     else:
         # SubagentStart was missed — the plugin was installed or reloaded while
         # this subagent was already running. Record it now rather than leaving
         # it nameless for the rest of its life.
         rec = register_agent(me.get("sid"), aid, view.get("agent_type"),
-                             me.get("cwd"))
-        if rec:
-            view["agent"] = rec["name"]
+                             payload.get("cwd") or me.get("cwd"))
+    if rec:
+        view["agent"] = rec.get("name") or view.get("agent")
+        for k in ("cwd", "root", "repo_key", "repo_label", "branch"):
+            if rec.get(k):
+                view[k] = rec[k]
     return view
 
 
@@ -1045,8 +1243,30 @@ def lock_state(lock, sessions):
     return holder, False, ""
 
 
-def do_claim(me, res, why="", mode="soft", steal=False, sessions=None):
-    """(ok, lock, holder, reason). Never blocks; `wait` is the blocking form."""
+def announce_locks(me, verb, names, why=""):
+    """One line for a deliberate claim, and its matching one when it ends.
+
+    On 2026-07-29 the stream carried 219 releases and 7 takes. Every one of the
+    51 `agentbus run` invocations that day was silent going in and loud coming
+    out: the guard takes the lock before the CLI is even running, the CLI finds
+    it already its own and says nothing, and only the release speaks. Somebody
+    reading `agentbus watch` saw a wall of things being handed back and could
+    not see a single one being taken."""
+    if not names:
+        return
+    tail = (" +%s" % ", ".join(names[1:])) if len(names) > 1 else ""
+    emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "lock",
+         "%s '%s'%s%s" % (verb, names[0], tail, (" — " + why) if why else ""))
+
+
+def do_claim(me, res, why="", mode="soft", steal=False, sessions=None,
+             announced=False):
+    """(ok, lock, holder, reason). Never blocks; `wait` is the blocking form.
+
+    `announced` says the caller is putting a line in the stream for this claim
+    itself, so the release can match it. A claim nobody announced is released
+    in silence too — automatic ones last a single command and two events each
+    would drown everything worth reading."""
     sessions = sessions if sessions is not None else load_sessions()
     repo_key = me.get("repo_key", "")
     with Mutex("lock-" + re.sub(r"[^A-Za-z0-9]", "_", res)[:40]):
@@ -1064,8 +1284,13 @@ def do_claim(me, res, why="", mode="soft", steal=False, sessions=None):
             return False, lock, holder, reason
         queue = (lock or {}).get("queue", []) if lock else []
         queue = [q for q in queue if q.get("sid") != me.get("sid")]
+        spoken = bool(holder) or mode == "hard" or bool(why) or announced
         new = {"resource": res, "repo": repo_key, "sid": me.get("sid"),
+               "announced": spoken,
                "agent_id": me.get("agent_id") or "",
+               # Whether the empty `agent_id` above means "the session itself"
+               # or "nobody could tell". `same_party` needs the difference.
+               "party_known": bool(me.get("party_known")),
                "agent": me.get("agent"), "worktree": me.get("root"),
                "branch": me.get("branch"), "mode": mode, "why": why,
                "acquired_at": now(), "last_used": now(), "queue": queue}
@@ -1091,14 +1316,17 @@ def do_release(me, res, quiet=False):
     # this would delete theirs.
     with Mutex("lock-" + re.sub(r"[^A-Za-z0-9]", "_", res)[:40]):
         lock = load_lock(repo_key, res)
-        if not lock or not same_party(lock, me):
+        if not lock or not may_release(lock, me):
             return False
         waiting = lock.get("queue", [])
         try:
             os.unlink(lock_path(repo_key, res))
         except OSError:
             return False
-    if not quiet:
+    # A release is only worth a line if the claim it answers had one. Otherwise
+    # the stream fills with the second half of conversations that never had a
+    # first half — which is exactly what it did.
+    if not quiet and lock.get("announced", True):
         tail = ""
         if waiting:
             tail = " — waiting: %s" % ", ".join(q.get("agent", "?") for q in waiting)
@@ -1483,6 +1711,75 @@ def handoff_text(me, note=""):
 # working directory of a foreign process is readable on macOS and Linux, and not
 # on Windows, and a wrong guess here is worse than no answer.
 
+# How often one service has to change hands before somebody is told. Three
+# handovers between two checkouts inside ten minutes is not a workflow, it is
+# two agents undoing each other — on 2026-07-29 the API went machine-side,
+# rental-side and back in seventeen seconds.
+CHURN_WINDOW = 10 * 60
+CHURN_MOVES = 3
+
+
+def moves_path(repo_key, res):
+    """Where a service's recent handovers are kept.
+
+    Beside the serve record rather than inside it, because stopping a service
+    deletes that record and the history has to outlive the stop — a handover is
+    a stop followed by a start, so keeping it in there would erase the very
+    thing being counted. No `repo` field, so `still_serving` skips it."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", "%s__%s" % (repo_key, res))
+    return os.path.join(SERVES, "%s.moves" % safe)
+
+
+def record_move(me, res, root):
+    """Remember that this service was just pointed at a tree, and answer whether
+    that has now happened often enough, between enough different trees, to be
+    worth telling everybody about."""
+    path = moves_path(me.get("repo_key"), res)
+    rec = read_json(path) or {}
+    moves = [m for m in rec.get("moves", []) if now() - m.get("at", 0) < CHURN_WINDOW]
+    moves.append({"root": root, "by": me.get("agent"), "at": now()})
+    moves = moves[-8:]
+    said = rec.get("said", 0)
+    roots = {m.get("root") for m in moves if m.get("root")}
+    loud = (len(moves) >= CHURN_MOVES and len(roots) >= 2
+            and now() - said >= CHURN_WINDOW)
+    write_json(path, {"moves": moves, "said": now() if loud else said})
+    return moves if loud else []
+
+
+def note_churn(me, res, moves):
+    """Tell everybody that one service is being pulled back and forth.
+
+    Nothing is wrong from any single session's point of view: every `serve` is
+    legitimate, takes the lock properly and reports success. So nothing was ever
+    said, and on 2026-07-29 three agents each ran their tests believing the rig
+    answered for their own checkout while it was in fact changing hands under
+    them. Two of them worked it out an hour in, by reading `lsof`.
+
+    A lock is the answer and they always had one. What they had no way to see
+    was that they needed it."""
+    if not moves:
+        return
+    who = []
+    for m in moves:
+        if m.get("by") and m["by"] not in who:
+            who.append(m["by"])
+    roots = []
+    for m in moves:
+        short = short_path(m.get("root") or "")
+        if short not in roots:
+            roots.append(short)
+    emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "note",
+         "'%s' has changed checkouts %d times in the last %d minutes, between "
+         "%s (%s). Between one handover and the next, a run reports on whichever "
+         "tree happened to hold it — which is what this whole thing exists to "
+         "stop. If you need it for more than one command, hold it for the whole "
+         "stretch instead of taking it per command:\n"
+         "  agentbus claim %s --why \"...\"   then  agentbus release %s"
+         % (res, len(moves), CHURN_WINDOW // 60, " and ".join(roots),
+            ", ".join(who), res, res))
+
+
 def serve_path(repo_key, res):
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", "%s__%s" % (repo_key, res))
     return os.path.join(SERVES, "%s.json" % safe)
@@ -1707,6 +2004,8 @@ def ensure_serving(me, res_cfg, sessions=None):
         return False, detail
     emit(me.get("sid"), me.get("agent"), repo_key, "serve",
          "'%s' now serves %s" % (res_cfg["name"], short_path(me.get("root"))))
+    note_churn(me, res_cfg["name"],
+               record_move(me, res_cfg["name"], me.get("root")))
     return True, "restarted from your worktree (log: %s)" % detail
 
 
@@ -1966,6 +2265,18 @@ def command_targets(cmd, depth=0):
     return out
 
 
+# What an `agentbus` verb means to the guard.
+#
+# The first three take the resource in the caller's name. The last two act ON a
+# lock somebody else is holding, so they must never be blocked by it — and until
+# 2026-07-29 they were: the deny message ended in "agentbus wait <res>" and
+# "agentbus claim <res> --steal", and the guard that had just printed that advice
+# refused both commands. A session in contention had no way out inside the tool,
+# which is why three agents spent an afternoon negotiating turns by hand instead.
+CLAIMING_VERBS = ("run", "claim", "serve")
+PASSTHROUGH_VERBS = ("wait", "release")
+
+
 def explicit_resources(cmd, cfg):
     """Resources named outright on an `agentbus` command line.
 
@@ -1985,8 +2296,12 @@ def explicit_resources(cmd, cfg):
             toks = toks[1:]
         if len(toks) < 3 or os.path.basename(toks[0]) != "agentbus":
             continue
-        if toks[1] not in ("run", "claim", "serve", "wait"):
+        verb = toks[1]
+        if verb not in CLAIMING_VERBS and verb not in PASSTHROUGH_VERBS:
             continue
+        # A steal is a deliberate override of exactly the lock that is in the
+        # way. Denying it leaves the reader holding advice they cannot follow.
+        through = verb in PASSTHROUGH_VERBS or "--steal" in toks
         for name in toks[2].split(","):
             res = by_name.get(name.strip())
             if res and res["name"] not in [h["name"] for h in out]:
@@ -1994,6 +2309,9 @@ def explicit_resources(cmd, cfg):
                 # `serve` and `run` exist to move a service to your tree, so the
                 # "this is serving somebody else" check must not stop them.
                 res["_explicit"] = True
+                res["_verb"] = verb
+                if through:
+                    res["_passthrough"] = True
                 out.append(res)
     return out
 
@@ -2005,25 +2323,38 @@ def resources_for(cmd, cfg):
     if not resources:
         return hits
     by_name = {r["name"]: r for r in resources}
+    seen = {h["name"]: h for h in hits}
     for text in command_targets(cmd):
         for res in resources:
-            if res["name"] in [h["name"] for h in hits]:
-                continue
             for pat in res.get("patterns", []):
                 try:
-                    if re.search(pat, text, re.I):
-                        hits.append(res)
-                        break
+                    if not re.search(pat, text, re.I):
+                        continue
                 except re.error:
                     continue
+                prev = seen.get(res["name"])
+                if prev is None:
+                    hit = dict(res)
+                    seen[res["name"]] = hit
+                    hits.append(hit)
+                elif prev.get("_passthrough"):
+                    # `agentbus wait sim && maestro test …` — the second half is
+                    # a real use of the thing, so the pass-through that let the
+                    # `wait` through must not cover the command riding with it.
+                    prev.pop("_passthrough", None)
+                    prev.pop("_explicit", None)
+                break
     # A Maestro run needs the simulator, but it is also only meaningful against
     # the bundler and API serving your worktree, so one match can pull in others.
     for res in list(hits):
+        if res.get("_passthrough"):
+            continue   # waiting for a thing does not take what the thing implies
         for name in res.get("implies", []):
             dep = by_name.get(name)
-            if dep and dep["name"] not in [h["name"] for h in hits]:
+            if dep and dep["name"] not in seen:
                 dep = dict(dep)
                 dep["_implied_by"] = res["name"]
+                seen[dep["name"]] = dep
                 hits.append(dep)
     return hits
 
@@ -2174,6 +2505,11 @@ def register(payload):
     if not rec.get("agent") or rec.get("agent") in taken:
         rec["agent"] = agent_name_from(branch, label, taken)
     write_json(os.path.join(SESSIONS, "%s.json" % sid), rec)
+    # Only hooks build a record, and a hook is always told who is acting. A
+    # session recovered here that forgot to say so would take locks nothing
+    # could attribute — and then block its own subagents, which is the one
+    # thing the party rules exist to prevent.
+    rec["party_known"] = True
     touch_beat(sid)
     if existing is None:
         # Start at the current end of the stream: nobody wants a backlog.
@@ -2385,9 +2721,18 @@ def hook_pre_tool(payload):
             return
     tool = payload.get("tool_name")
     ti = payload.get("tool_input") or {}
-    me = party_view(caller_view(me, payload.get("cwd")), payload)
+    # party_view first, and not for correctness — `follow_agent_cwd` inside it
+    # already keeps a subagent rooted where it runs. It is for cost: with the
+    # agent's own cwd in hand, caller_view finds nothing to do and returns
+    # without asking git. The other order asks git on every single tool call a
+    # subagent working outside its parent's tree makes, which is the whole of
+    # what a fanned-out session does.
+    me = caller_view(party_view(me, payload), payload.get("cwd"))
     sessions = load_sessions()
     if tool == "Bash":
+        # Before anything can deny it: this is the last moment at which who is
+        # running an `agentbus` command is still known.
+        leave_party_hint(me, ti.get("command", ""))
         return guard_bash(me, ti.get("command", ""), sessions,
                           payload.get("tool_use_id"))
     if tool in ("Edit", "Write", "NotebookEdit"):
@@ -2526,11 +2871,16 @@ def release_autoclaim(me, tool_use_id):
     # Exactly this party: one subagent must not hand back what another took.
     if not rec or rec.get("party", rec.get("sid")) != party_key(me):
         return
+    spoken = []
     for name in rec.get("resources", []):
         lock = load_lock(me.get("repo_key"), name)
         if lock and lock.get("sid") == me.get("sid") \
                 and lock.get("mode") == "soft":
-            do_release(me, name, quiet=True)
+            if do_release(me, name, quiet=True) and lock.get("announced"):
+                spoken.append(name)
+    # One line for the batch, matching the one that took them. Four resources
+    # released one after another is how `agentbus run` filled the log.
+    announce_locks(me, "released", spoken)
 
 
 def hook_post_bash(payload):
@@ -2629,7 +2979,11 @@ def serving_check(me, hits):
 
 def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
     cfg = repo_config(me.get("repo_key", ""), me.get("root"))
-    hits = resources_for(cmd, cfg)
+    # `agentbus wait`, `agentbus release` and `agentbus claim --steal` are the
+    # three commands whose entire purpose is to act on a lock somebody else
+    # holds. Guarding them means refusing the way out of the block, which is
+    # what the block message itself tells the reader to do.
+    hits = [h for h in resources_for(cmd, cfg) if not h.get("_passthrough")]
     if not hits:
         return
     # A resource whose patterns stop matching — a port moved, a script was
@@ -2651,11 +3005,14 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         holder, stealable, _ = lock_state(lock, sessions)
         if holder and not stealable:
             blocked.append((res, lock, holder))
+    # A command that named its resources outright is a deliberate act and worth
+    # a line; a pattern match is one command's worth of housekeeping and is not.
+    explicit = any(h.get("_explicit") for h in hits)
     if not blocked:
         taken = []
         for res in hits:
             ok, lock, holder, _ = do_claim(me, lock_name(me, res), mode="soft",
-                                           sessions=sessions)
+                                           sessions=sessions, announced=explicit)
             if ok:
                 taken.append(lock_name(me, res))
                 continue
@@ -2669,6 +3026,8 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
             remember_autoclaim(me, payload_tool_use_id, taken)
             if taken:
                 bump_guarded(me)
+                if explicit:
+                    announce_locks(me, "took", taken, cmd.strip()[:90])
             verdict, text = serving_check(me, hits)
             if verdict == "deny":
                 for name in taken:
@@ -2708,7 +3067,30 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
                   % (res["_implied_by"], res["name"])]
     sibling = (lock.get("sid") == me.get("sid")
                and (lock.get("agent_id") or "") and (me.get("agent_id") or ""))
-    if sibling:
+    unidentified = (lock.get("sid") == me.get("sid")
+                    and not lock.get("party_known", True)
+                    and (me.get("agent_id") or ""))
+    if unidentified:
+        # Taken by somebody in this session through a path where the caller
+        # could not be identified — an `agentbus claim` inside a runner script,
+        # where the guard never sees the command line and a subagent's shell is
+        # indistinguishable from its parent's. Treating that as "the session
+        # itself" is what let three agents drive one simulator at once, so it
+        # blocks instead; this is how whoever took it says who they are.
+        lines += ["", "  One of this session's agents took this through a shell, "
+                      "where nothing can",
+                  "  tell one agent from another — so agent-bus cannot say "
+                  "whether it is yours.",
+                  "  If it is yours, name yourself and take it properly:",
+                  "    agentbus claim %s --as <your name>   (yours is in the "
+                  "message that named you)" % res["name"],
+                  "  If it is not, wait for it, or give it back if you know it "
+                  "is finished:",
+                  "    agentbus wait %s --why \"...\"" % res["name"],
+                  "    agentbus release --all   (from whichever agent took it)"]
+        if res.get("why"):
+            lines += ["", "  " + res["why"]]
+    elif sibling:
         # Two subagents of one session. Nothing here is about checkouts — they
         # share one — so the same-checkout wording below would be answering a
         # question nobody asked, while the resource's own `why` is exactly the
@@ -2956,10 +3338,11 @@ def positional(args):
 
 
 def cli_claim(args):
-    me = need_me()
+    me = acting(need_me(), args)
     pos = positional(args)
     if not pos:
-        print("usage: agentbus claim <resource> [--why \"...\"] [--steal]", file=sys.stderr)
+        print("usage: agentbus claim <resource> [--why \"...\"] [--steal] [--as <you>]",
+              file=sys.stderr)
         sys.exit(1)
     ok, lock, holder, reason = do_claim(me, pos[0], why=opt(args, "--why", ""),
                                         mode="hard", steal=flag(args, "--steal"))
@@ -2982,23 +3365,39 @@ def cli_claim(args):
 
 
 def cli_release(args):
-    me = need_me()
+    me = acting(need_me(), args)
     if flag(args, "--all"):
         print("released %d" % release_all(me["sid"]))
         return
     pos = positional(args)
     if not pos:
-        print("usage: agentbus release <resource> | --all", file=sys.stderr)
+        print("usage: agentbus release <resource> | --all [--as <you>]", file=sys.stderr)
         sys.exit(1)
-    print("released '%s'" % pos[0] if do_release(me, pos[0]) else "not yours")
+    if do_release(me, pos[0]):
+        print("released '%s'" % pos[0])
+        return
+    lock = load_lock(me.get("repo_key"), pos[0])
+    if lock and lock.get("sid") == me.get("sid") and lock.get("agent_id"):
+        # Somebody in this session holds it, and this caller cannot show it is
+        # them. Refusing beats guessing: a sibling handing back another agent's
+        # rig mid-run is the failure this is here to stop.
+        print("agent-bus: '%s' is held by %s, one of this session's agents, and "
+              "nothing in a shell can tell which agent is asking. Say so, or "
+              "give back everything you hold:\n"
+              "  agentbus release %s --as %s\n"
+              "  agentbus release --all"
+              % (pos[0], lock.get("agent"), pos[0], lock.get("agent")),
+              file=sys.stderr)
+        sys.exit(1)
+    print("not yours")
 
 
 def cli_wait(args):
-    me = need_me()
+    me = acting(need_me(), args)
     pos = positional(args)
     if not pos:
-        print("usage: agentbus wait <resource> [--timeout 300] [--why \"...\"]",
-              file=sys.stderr)
+        print("usage: agentbus wait <resource> [--timeout 300] [--why \"...\"] "
+              "[--as <you>]", file=sys.stderr)
         sys.exit(1)
     res, why = pos[0], opt(args, "--why", "")
     # Below the Bash tool's own default timeout, so the wait reports back rather
@@ -3046,6 +3445,43 @@ def speak_as(me, name):
         if a.get("name") == name:
             return name
     return None
+
+
+def act_as(me, name):
+    """`me`, acting as one of this session's own subagents.
+
+    The last resort for identity. A subagent's environment is its parent's, so
+    a `agentbus claim` buried in a runner script cannot be attributed — the
+    guard never saw the command line, so there is no hint to pick up either.
+    Saying the name outright is the only thing left, and it is better than a
+    lock that has to admit it does not know whose it is.
+
+    Only the identity is adopted. The worktree stays whatever the caller's own
+    shell says it is, because that is measured now and the agent's record was
+    written when it started."""
+    if not name or name == me.get("agent"):
+        return me
+    for a in load_agents(me.get("sid")):
+        if a.get("name") == name:
+            view = dict(me)
+            view["agent_id"] = a.get("agent_id")
+            view["agent"] = name
+            view["party_known"] = True
+            return view
+    return None
+
+
+def acting(me, args):
+    """`me`, after honouring a `--as <name>` on this command line."""
+    name = opt(args, "--as")
+    if not name:
+        return me
+    view = act_as(me, name)
+    if view is None:
+        print("agent-bus: '%s' is not you or one of your subagents. "
+              "`agentbus whois` lists who is who." % name, file=sys.stderr)
+        sys.exit(1)
+    return view
 
 
 def cli_post(args):
@@ -3140,10 +3576,10 @@ def find_resource(me, name):
 def cli_serve(args):
     """Point a declared service at this worktree, restarting it if it is serving
     another one. This is the half `sim-lock.sh` had and a lock alone cannot do."""
-    me = need_me()
+    me = acting(need_me(), args)
     pos = positional(args)
     if not pos:
-        print("usage: agentbus serve <resource>", file=sys.stderr)
+        print("usage: agentbus serve <resource> [--as <you>]", file=sys.stderr)
         sys.exit(1)
     res = find_resource(me, pos[0])
     if not res:
@@ -3214,6 +3650,7 @@ def cli_run(args):
         sys.exit(1)
     cut = args.index("--")
     head, cmd = args[:cut], args[cut + 1:]
+    me = acting(me, head)
     pos = positional(head)
     if not pos or not cmd:
         print("usage: agentbus run <res>[,<res>] [--why \"...\"] -- <command>",
@@ -3251,8 +3688,12 @@ def cli_run(args):
         rc = subprocess.call(cmd)
         sys.exit(rc)
     finally:
+        spoken = []
         for res in taken:
-            do_release(me, res)
+            lock = load_lock(me.get("repo_key"), res)
+            if do_release(me, res, quiet=True) and (lock or {}).get("announced"):
+                spoken.append(res)
+        announce_locks(me, "released", spoken)
 
 
 def cli_name(args):

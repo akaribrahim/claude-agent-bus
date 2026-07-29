@@ -134,6 +134,28 @@ fix it.
       agents showed the gap. `make test` → 11 files, 545 assertions; live acceptance verifies
       it against a real Claude Code subagent. Two new hook events, so `./install.sh` and
       `/reload-plugins` are needed.
+- [x] (1.2) What a day of four subagents in three worktrees found. Done 2026-07-29, from
+      reading `events.jsonl` rather than from any test. `make test` → 11 files, 632
+      assertions. Five defects, in the order they cost the most:
+      the block message advertised `agentbus wait` and `claim --steal` and the guard
+      refused both; a claim made from inside a runner script was transparent to every
+      sibling, so the 1.1 party work did not apply to the spelling the agents actually
+      used; a subagent was refused permission to use the service it had itself moved,
+      and used `AGENTBUS_OFF=1` for the rest of its turn; the day's log carried 219
+      releases and 7 takes; and one service changed checkouts three times in seventeen
+      seconds with nobody told.
+      `bin/agentbus`: `CLAIMING_VERBS`, `PASSTHROUGH_VERBS`, `HINTS`, `sibling_count`,
+      `may_release`, `hint_key`, `leave_party_hint`, `take_party_hint`, `sweep_hints`,
+      `act_as`, `acting`, `follow_agent_cwd`, `announce_locks`, `moves_path`,
+      `record_move`, `note_churn`; `same_party`, `do_claim`, `do_release`,
+      `explicit_resources`, `resources_for`, `guard_bash`, `party_view`,
+      `current_session`, `hook_pre_tool`, `release_autoclaim`, `ensure_serving`,
+      `cli_claim`/`cli_release`/`cli_wait`/`cli_run`/`cli_serve` all extended.
+      New assertions in `tests/test_locks.sh`, `tests/test_subagents.sh`,
+      `tests/test_serving.sh`; `agent_field` and `lock_lines` in `tests/lib.sh`.
+      No hook event added or removed, so no `./install.sh` and no `/reload-plugins`.
+      Each change falsified in a copy of the tree under `$TMPDIR`, never in the working
+      copy: two sessions were live and they execute `bin/agentbus` from disk.
 - [ ] (M8, 1.1) Per-worktree port allocation in the plugin — `agentbus port` / `agentbus env`.
 - [ ] (M9, 1.1) Wire the author's private product repository to per-worktree ports (separate pull request
       in that repository).
@@ -375,6 +397,69 @@ fix it.
   session — "rig tamamen sizde, ben SIFIR servise dokunuyorum" — which is the messaging half
   of this plugin covering for a hole in the locking half. `run` expands now; `claim` does
   not, because a claim is deliberate, but it says what it has left unheld.
+
+- Observation (1.2, from the day's log): **the block message advertised two commands the
+  guard refused.** Every denial ends in `agentbus wait <res> --why "..."` and, as a last
+  resort, `agentbus claim <res> --steal`. Both name a resource on an `agentbus` command
+  line, which is exactly what `explicit_resources` was taught to recognise in 1.1 — so
+  both were claimed like any other use and denied by the same lock they were meant to get
+  the reader past. A session in contention therefore had no move at all inside the tool.
+  Evidence: three subagents spent 11:38 to 13:05 negotiating turns by hand over `post`,
+  agreeing a round-robin, standing each other down, and finally asking a human to
+  arbitrate. One of them produced zero output for eighty-seven minutes.
+  `wait`, `release` and `--steal` now pass the guard untouched. A pattern match in a
+  *different* segment still wins, so `agentbus wait sim && maestro test` is guarded.
+
+- Observation (1.2): **the 1.1 party work did not cover the spelling the agents used.**
+  It is enforced in `PreToolUse`, which sees a command line; a claim inside a runner
+  script is invisible there and falls through to the CLI, where a subagent cannot be told
+  from its parent. The lock was then written with an empty `agent_id`, and `same_party`
+  read empty as "the session itself", which every subagent is entitled to walk past.
+  Reproduced exactly: three subagents, one script-borne claim, three allows.
+  The agent that hit it diagnosed it correctly and unaided — "*'agentbus claim' does NOT
+  separate the three of us … it is not a usable mutex between us. USE A FILESYSTEM LOCK
+  INSTEAD*" — and the three of them then rebuilt a `mkdir` mutex in a scratch directory.
+  Within forty minutes they had hit three of its classic failures in turn: an abandoned
+  lock nobody could distinguish from a held one (12:21), starvation of the agent that
+  waited politely (12:40), and a gate wedged for ever by hung processes (12:47). All
+  three are things `lock_state`, the lock's `queue` and `pid_alive` already handle. The
+  cost of not being trusted is having your own features rebuilt badly next to you.
+
+- Observation (1.2): the lesson from M3 arrived again from the other side. There, an
+  assertion passed because the fast path exited before the engine was consulted. Here,
+  three of the four falsifications for the party work were caught immediately and the
+  fourth — deleting the party hint entirely — left the suite green, because the case I
+  had written exercised a path where the guard had already claimed the lock itself and
+  the hint was never needed. What the hint actually carries is the *release* at the end
+  of `agentbus run`, which happens in the CLI where the name is gone. The assertion that
+  fails without it is "a subagent's `agentbus run` gives the resource back when the
+  command ends"; without the hint the run holds the rig for the full forty-five minute
+  hard TTL after it has finished.
+
+- Observation (1.2): a subagent was refused permission to use the service it had itself
+  moved. `agentbus serve` runs in the CLI, which reads the shell's real directory and so
+  points the service correctly; the guard runs in the hook and read the subagent's
+  *record*, whose root was derived from the parent's directory at SubagentStart. So the
+  plugin moved the API to the agent's worktree, said so, and then blocked the agent from
+  using it. It replied by turning the plugin off:
+  "*I am using AGENTBUS_OFF=1 for lsof/curl against :8082 only, after verifying the
+  serving checkout with lsof each time.*" This is the same defect as the 2026-07-27
+  worktree mis-detection, one level down, and it was reintroduced by the fix for that
+  one: `party_view` runs after `caller_view` and overwrote its answer.
+
+- Observation (1.2): the day's stream held 219 `released` lines and 7 `took`. Every one
+  of the 51 `agentbus run` invocations was silent going in and loud coming out — the
+  guard claims before the CLI exists, the CLI finds the lock already its own and the
+  "already yours" branch emits nothing, and only the release speaks, once per implied
+  resource. `agentbus watch`, which exists to answer "what is going on", showed a wall of
+  things being handed back and not one of them being taken.
+
+- Observation (1.2): `api` moved between two worktrees of one repository
+  and back inside seventeen seconds, and nothing said so, because from each session's own
+  point of view nothing was wrong: every `serve` took the lock, succeeded and reported
+  success. The agents found it an hour later with `lsof` and wrote it up as a warning to
+  each other. The lock that would have prevented it existed the whole time; what was
+  missing was any sign that they needed it.
 
 ## Decision Log
 
@@ -642,6 +727,73 @@ fix it.
   Rationale: a subagent that lives for two minutes does not want the last hour of the
   repository's chatter, and would spend its context on it.
   Date/Author: 2026-07-28, Claude.
+
+- Decision (1.2): a lock records whether its party was actually known, and an unknown one
+  blocks every party in the session instead of being transparent to all of them — but
+  only once the session has two or more subagents.
+  Rationale: the ambiguity is real and cannot be resolved after the fact, so the choice is
+  which way to be wrong. Blocking costs a turn and says why; allowing costs two agents
+  driving one simulator and says nothing, which is the failure this plugin exists to
+  prevent. The sibling count is what keeps the price proportionate: with one subagent the
+  ambiguity cannot hurt, because a parent and its only child never conflict in either
+  direction, so nothing is blocked there. There is a test for that specifically, because
+  the strict rule would otherwise block a session against itself.
+  Date/Author: 2026-07-29, Claude.
+
+- Decision (1.2): the guard leaves a party hint keyed by the argv of the `agentbus`
+  command it just saw, and the CLI picks it up, rather than the CLI trying to work out
+  who it is.
+  Rationale: the hook's tokeniser produces exactly the argv the shell hands the process,
+  so both halves of one command can compute the same key without sharing anything else.
+  It is recorded for the session's own calls as well as a subagent's, which is what keeps
+  a parent's ordinary `agentbus claim` from reading as unidentified and deadlocking its
+  own agents. Two subagents running the *identical* command line in the same instant can
+  swap hints; both are real parties of the same session and the window is one process
+  start wide, which is a far smaller error than the one it replaces. `--as` remains for
+  the case no hint can cover, a claim inside a script.
+  Date/Author: 2026-07-29, Claude.
+
+- Decision (1.2): releasing is stricter than guarding. `same_party` still lets a parent
+  past its own subagent's lock, but `may_release` refuses to hand back a lock that names
+  a specific subagent unless the caller can show it is that subagent.
+  Rationale: the two questions are different. Guarding asks "would running this collide",
+  and a parent must not collide with the agent it is waiting for. Releasing asks "is this
+  yours to give away", and the permissive answer let one agent hand back another's rig
+  mid-run — through a command, `agentbus release`, that the guard never even sees.
+  `release --all` is the deliberate way to give back everything you own without naming
+  yourself.
+  Date/Author: 2026-07-29, Claude.
+
+- Decision (1.2): a subagent's record follows its own working directory; the session's
+  still does not follow a subagent's.
+  Rationale: the objection that killed cwd-following for sessions was two subagents
+  dragging their parent's single root back and forth on every tool call, and it does not
+  apply one level down, where each subagent has a record of its own and is the only
+  writer of it. `party_view` now runs before `caller_view` — not for correctness, which
+  the record carries, but because with the agent's own directory already in hand
+  `caller_view` has nothing to do and does not shell out to git on every call a
+  fanned-out session makes.
+  Date/Author: 2026-07-29, Claude.
+
+- Decision (1.2): a release is announced only if the claim it answers was announced, and
+  a command that names its resources outright gets one line for the whole group rather
+  than one per implied resource.
+  Rationale: the alternative — announce everything — turns 51 runs into 408 events and
+  makes `watch` unreadable in a different way. What was wrong was not the volume but the
+  asymmetry: the stream recorded the giving back of things it had never recorded being
+  taken. Automatic per-command claims stay silent on both sides, which is what they were
+  always meant to be.
+  Date/Author: 2026-07-29, Claude.
+
+- Decision (1.2): the churn warning fires at three handovers between two or more
+  checkouts inside ten minutes, and then not again for ten minutes.
+  Rationale: two handovers is a normal exchange between two sessions; three with the tree
+  changing is two agents undoing each other. The cooldown is the point of the feature as
+  much as the threshold — a warning that repeats on every move is read as noise, and then
+  so is the next one that matters. The move history lives beside the serve record rather
+  than in it, because stopping a service deletes that record and a handover *is* a stop
+  followed by a start, so keeping it inside would erase the thing being counted.
+  Date/Author: 2026-07-29, Claude.
 
 ## Outcomes & Retrospective
 

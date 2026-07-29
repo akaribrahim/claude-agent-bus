@@ -53,6 +53,20 @@ sub_cmd() {     # <agent id> <command> <tool use id> → the hook's stdout
 parent_cmd() {  # <command> <tool use id> → the hook's stdout
   ab_hook pre-tool "$(payload bash "sid=sess-p" "cwd=$REPO" "cmd=$1" "id=$2")"
 }
+# A real `agentbus` command issued from inside a session reaches PreToolUse
+# before it reaches the CLI, and PreToolUse is the only place that knows which
+# party is running it. Driving the CLI on its own is a different path — the one
+# a runner script takes — and it is tested separately, below.
+sub_ab() {      # <agent id> <tool use id> <shell form> <argv…>
+  local aid="$1" tid="$2" line="$3"; shift 3
+  sub_cmd "$aid" "$line" "$tid" > /dev/null
+  ab sess-p "$@"
+}
+parent_ab() {   # <tool use id> <shell form> <argv…>
+  local tid="$1" line="$2"; shift 2
+  parent_cmd "$line" "$tid" > /dev/null
+  ab sess-p "$@"
+}
 reason_of() { json_field "$1" hookSpecificOutput permissionDecisionReason; }
 
 # ---- they exist, and they are visible --------------------------------------
@@ -103,10 +117,57 @@ ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" agent_id=sub-aaa \
 ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
   "cmd=maestro test" id=t-p1)" > /dev/null
 assert_equal 0 "$(locks_held)" "nothing is held before the parent claims"
-ab sess-p claim simulator --why "parent holds it" > /dev/null
+parent_ab t-px "agentbus claim simulator --why 'parent holds it'" \
+  claim simulator --why "parent holds it" > /dev/null
 out=$(sub_cmd sub-bbb "maestro test flows/x.yaml" t-b2)
 assert_allow "$out" "a hard claim by the parent does not block its subagent"
 ab sess-p release simulator > /dev/null
+
+# ---- a lock that cannot name its party does not pretend to ------------------
+#
+# `agentbus claim` inside a runner script never reaches the guard, so the CLI
+# records it with no agent id — and an empty agent id used to mean "the session
+# itself", which every subagent is entitled to walk past. On 2026-07-29 three
+# subagents of one session each took the simulator that way and each was told
+# it held it alone; they worked it out between themselves, declared the locks
+# unusable, and built a mkdir mutex in a scratch directory instead.
+#
+# So the lock now records whether its party was actually known. When it was
+# not, and the session has more than one agent that could have taken it, it
+# blocks rather than guessing — and says how to settle the question.
+
+assert_equal 0 "$(locks_held)" "nothing is held before the script claims"
+ab sess-p claim simulator --why "batch 1: 7 flows" > /dev/null   # no hook: a script
+out=$(sub_cmd sub-aaa "maestro test flows/one.yaml" t-a20)
+assert_deny "$out" "a claim the guard never saw does not read as the session's own"
+r=$(reason_of "$out")
+assert_contains "$r" "took this through a shell" "and says why it cannot tell"
+assert_contains "$r" "agentbus claim simulator --as" "and how to say who you are"
+out=$(sub_cmd sub-bbb "maestro test flows/two.yaml" t-b20)
+assert_deny "$out" "the sibling is stopped by it too — neither is guessed for"
+
+# Naming yourself settles it, and then the ordinary sibling rule applies again.
+ab sess-p release --all > /dev/null
+ab sess-p claim simulator --as "$P/1" --why "batch 1: 7 flows" > /dev/null
+out=$(sub_cmd sub-aaa "maestro test flows/three.yaml" t-a21)
+assert_allow "$out" "--as gives the lock back to the agent that took it"
+out=$(sub_cmd sub-bbb "maestro test flows/four.yaml" t-b21)
+assert_deny "$out" "and the sibling is refused, by name now"
+assert_contains "$(reason_of "$out")" "$P/1" "which names the agent, not the session"
+
+# ---- one agent cannot hand back another's -----------------------------------
+#
+# `agentbus release` from a script looks exactly like the parent's, and the
+# parent is allowed to be blocked by its own subagent — so the permissive rule
+# that is right for guarding let a sibling give away a rig mid-run.
+
+out=$(ab sess-p release simulator 2>&1)
+assert_contains "$out" "nothing in a shell can tell which agent is asking" \
+  "a release that cannot prove whose it is refuses"
+assert_equal 1 "$(locks_held)" "and the lock is still held"
+out=$(ab sess-p release simulator --as "$P/1" 2>&1)
+assert_contains "$out" "released" "saying who you are releases it"
+assert_equal 0 "$(locks_held)" "and it is really gone"
 
 # ---- another session is still blocked, as it always was ---------------------
 
@@ -130,6 +191,18 @@ out=$(sub_cmd sub-aaa "agentbus run simulator -- maestro test flows/a.yaml" t-a4
 assert_allow "$out" "one subagent's \`agentbus run\` takes the resource"
 out=$(sub_cmd sub-bbb "agentbus run simulator -- maestro test flows/b.yaml" t-b4)
 assert_deny "$out" "and the other's is refused"
+
+# Giving it back is the half that has no hook. The guard takes the lock in the
+# subagent's name; the release happens when `agentbus run` finishes, in the CLI,
+# where that name is no longer available and every sibling looks the same. So
+# the guard leaves the party under the argv of the command it just saw, and the
+# CLI picks it up. Without that the run holds the rig after it has ended, for
+# the whole forty-five minute hard TTL.
+ab sess-p release --all > /dev/null
+sub_ab sub-aaa t-a10 "agentbus run simulator -- true" run simulator -- true > /dev/null
+assert_equal 0 "$(locks_held)" \
+  "a subagent's \`agentbus run\` gives the resource back when the command ends"
+sub_cmd sub-aaa "maestro test flows/a2.yaml" t-a11 > /dev/null   # as it was before
 
 out=$(sub_cmd sub-bbb "agentbus claim db --why 'migration'" t-b5)
 assert_allow "$out" "a resource named on an agentbus command line is claimed"
@@ -201,6 +274,23 @@ assert_contains "$out" "not you or one of your subagents" \
 out=$(ab sess-other inbox)
 assert_not_contains "$out" "not me" "so the message is not sent at all"
 
+# ---- a session recovered mid-flight still owns its locks by name ------------
+#
+# A session that missed SessionStart — installed or reloaded while it was
+# already running — rebuilds its record from whatever hook runs next. That hook
+# knows who is acting, like every hook does, and the record has to carry that:
+# a session whose locks could not be attributed would block its own subagents,
+# which is the deadlock the party rules exist to forbid.
+
+ab sess-p release --all > /dev/null
+rm -f "$AGENTBUS_HOME/sessions/sess-p.json"
+parent_cmd "psql -c 'select 1'" t-reg > /dev/null
+assert_equal 1 "$(locks_held)" "the recovered session takes the lock"
+out=$(sub_cmd sub-aaa "psql -c 'select 2'" t-reg2)
+assert_allow "$out" "and its own subagent is not blocked by it"
+ab sess-p release --all > /dev/null
+sub_cmd sub-bbb "agentbus claim db --why 'migration'" t-b30 > /dev/null  # as it was
+
 # ---- when a subagent stops, it lets go --------------------------------------
 
 held_before=$(locks_held)
@@ -211,6 +301,24 @@ assert_not_contains "$(ab sess-other whois)" "$P/2" "and it is gone from the ros
 
 out=$(sub_cmd sub-aaa "agentbus claim db" t-a7)
 assert_allow "$out" "so the resource is free for the other one"
+
+# ---- with one agent there is nothing to be ambiguous about ------------------
+#
+# The strictness above costs something: a claim the guard never saw blocks the
+# whole session until somebody names themselves. That price is only worth
+# paying where the ambiguity can hurt, which is two agents reaching for one
+# thing. A session with a single subagent is never in that position — a parent
+# and its only child never conflict in either direction — so an unidentified
+# lock stays permissive there rather than blocking a session against itself.
+
+stop_sub sub-ccc
+ab sess-p release --all > /dev/null
+assert_equal 1 "$(ls "$AGENTBUS_HOME"/agents/*.json 2>/dev/null | wc -l | tr -d ' ')" \
+  "one subagent is left"
+ab sess-p claim simulator --why "from a script, party unknown" > /dev/null
+out=$(sub_cmd sub-aaa "maestro test flows/solo.yaml" t-a22)
+assert_allow "$out" "an unidentified claim does not block a session's only agent"
+ab sess-p release --all > /dev/null
 
 # ---- and when the session ends, they all go ---------------------------------
 
