@@ -4,8 +4,8 @@ This ExecPlan is a living document. The sections `Progress`, `Surprises & Discov
 `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
 Maintained in accordance with the exec-plan skill. Note that the skill file contains a
-section of conventions for a mobile/FastAPI private product repository; **none
-of that applies here**. This repository is a standalone Claude Code plugin written in
+section of conventions for a private mobile/FastAPI product repository the author works
+on; **none of that applies here**. This repository is a standalone Claude Code plugin written in
 Python and bash, with no database, no web framework and no mobile app.
 
 ## Purpose / Big Picture
@@ -157,8 +157,8 @@ fix it.
       Each change falsified in a copy of the tree under `$TMPDIR`, never in the working
       copy: two sessions were live and they execute `bin/agentbus` from disk.
 - [ ] (M8, 1.1) Per-worktree port allocation in the plugin — `agentbus port` / `agentbus env`.
-- [ ] (M9, 1.1) Wire the author's private product repository to per-worktree ports (separate pull request
-      in that repository).
+- [ ] (M9, 1.1) Wire the author's private product repository to per-worktree ports
+      (separate pull request in that repository).
 
 ## Surprises & Discoveries
 
@@ -454,8 +454,8 @@ fix it.
   resource. `agentbus watch`, which exists to answer "what is going on", showed a wall of
   things being handed back and not one of them being taken.
 
-- Observation (1.2): `api` moved between two worktrees of one repository
-  and back inside seventeen seconds, and nothing said so, because from each session's own
+- Observation (1.2): `api` moved between two worktrees of one repository and back inside
+  seventeen seconds, and nothing said so, because from each session's own
   point of view nothing was wrong: every `serve` took the lock, succeeded and reported
   success. The agents found it an hour later with `lsof` and wrote it up as a warning to
   each other. The lock that would have prevented it existed the whole time; what was
@@ -1234,8 +1234,8 @@ Not part of 1.0. `agentbus port <resource>` returns a deterministic port derived
 worktree path so two checkouts never collide; `agentbus env` prints shell exports for every
 declared resource; `serve`, `serving` and `serving_check` use the per-worktree port instead
 of the declared one when allocation is enabled. Then, in a separate pull request against a
-private product repository, its `Makefile`, `.env` handling and the mobile apps' API base URL are
-wired to those variables, which is the only way to prove the design end to end.
+private product repository, its `Makefile`, `.env` handling and the mobile apps' API base
+URL are wired to those variables, which is the only way to prove the design end to end.
 
 ## Concrete Steps
 
