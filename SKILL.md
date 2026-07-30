@@ -32,6 +32,10 @@ delivery run in hooks; you do not have to start anything.
     agentbus post --to <agent> "..."         ask them
     agentbus wait <res> --why "..."          queue; takes it the moment it frees
 
+If the human asks to *see* what is going on, `agentbus board` serves a live page
+on `127.0.0.1` — agents, locks, services and the message feed. It is for them to
+look at, not for you to poll; `agentbus status` is your form of the same thing.
+
 Automatic claims last one command, so "held" usually means seconds.
 
 **2. The service is answering for a different checkout.** This is the dangerous

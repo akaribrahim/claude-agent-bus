@@ -2,6 +2,28 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 1.3.0 — 2026-07-31
+
+A way to watch the bus.
+
+- **`agentbus board`** serves a live page on `127.0.0.1:8787`: the live agents
+  and their subagents, what each said it was doing, what is held and by whom,
+  which checkout each service is answering for, and the message feed — grouped
+  by repository, refreshing itself every couple of seconds. `status` is a
+  snapshot and `watch` is a stream; neither answers "what is going on", which is
+  a shape rather than a line.
+- It is **loopback-only**. The bus holds every branch name, worktree path and
+  message on the machine; there is a test that asserts a connection from this
+  machine's own LAN address is refused, rather than trusting the line of code
+  that binds it.
+- It is **read-only**. A window that refreshes by itself must not reap sessions,
+  advance cursors or rewrite the derived files, or watching the bus would change
+  it. There is a test that plants a genuinely reapable session and asserts the
+  board leaves it alone while `status` still clears it.
+- The page is **self-contained** — no CDN, no external font. A dashboard that
+  fetches a stylesheet tells that host when you are working and from which
+  repository, and stops rendering on a plane.
+
 ## 1.2.0 — 2026-07-29
 
 A day with four subagents working three worktrees, read back out of the event

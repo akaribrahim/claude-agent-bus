@@ -197,6 +197,8 @@ two cannot drift apart.
 
 ```
 agentbus status                       who is live, what is held, what serves whom
+agentbus watch [--repo]               follow every agent on this machine, live
+agentbus board [--port 8787]          the same thing as a page in your browser
 agentbus post [--to <agent>] "..."    leave a message for the others
 agentbus inbox                        everything addressed to this repo / to you
 agentbus run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
@@ -219,6 +221,27 @@ properties to know rather than discover: **`*` crosses directory separators**
 (`src/*` covers `src/a/b/c.ts`, and a glob with no wildcard at all means that
 directory and everything under it), and **quote the glob** or your shell expands
 it before agentbus sees it.
+
+## Watching it
+
+`agentbus status` is a snapshot and `agentbus inbox` is what was addressed to
+you. Neither answers the question somebody with four terminals open actually
+has, which is *what is going on right now*.
+
+```bash
+agentbus watch          # a live line per event, in the terminal
+agentbus board          # the same thing as a page: http://127.0.0.1:8787
+```
+
+The board shows the live agents and their subagents, what each said it was
+doing, what is held and by whom, which checkout each service is answering for,
+and the message feed — refreshing itself every couple of seconds.
+
+Two things it deliberately is not. It is **loopback-only**: the bus is every
+branch name, worktree path and message on your machine, and none of that should
+be one misconfigured bind away from your network. And it is **read-only** — it
+never reaps a session, advances a cursor or rewrites a derived file, because a
+window that refreshes by itself must not change what it is showing you.
 
 `agentbus doctor` reports what is installed, whether the command is on `PATH`,
 which config is in force, which services are running and for whom, and which

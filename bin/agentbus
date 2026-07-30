@@ -3555,6 +3555,325 @@ def cli_watch(args):
         print()
 
 
+BOARD_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agent-bus</title>
+<style>
+:root{--bg:#fbfbfa;--panel:#fff;--ink:#1a1a19;--dim:#6b6b68;--line:#e6e5e1;
+ --accent:#3b6ea5;--red:#b4453a;--amber:#a8712a;--green:#3f7a4d;--violet:#6b4f9e;}
+@media(prefers-color-scheme:dark){:root{--bg:#161614;--panel:#1e1e1c;--ink:#eceae5;
+ --dim:#98958d;--line:#302f2b;--accent:#7aa8d8;--red:#e0796c;--amber:#d9a05b;
+ --green:#7fb98c;--violet:#a98fd6;}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+ font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);
+ padding:12px 20px;display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
+h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
+.count{color:var(--dim)}
+.filters{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+.filters button{font:inherit;font-size:12px;padding:3px 10px;border-radius:99px;cursor:pointer;
+ border:1px solid var(--line);background:transparent;color:var(--dim)}
+.filters button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--green)}
+.dot.stale{background:var(--dim)}
+main{padding:20px;display:grid;gap:18px;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+section>h2{margin:0;padding:10px 14px;font-size:11px;font-weight:600;letter-spacing:.09em;
+ text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line)}
+.rows{padding:4px 0}
+.row{padding:9px 14px;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.row .top{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.name{font-weight:600}
+.meta{color:var(--dim);font-size:12px}
+.sub{padding-left:18px;border-left:2px solid var(--line);margin:6px 0 0 4px}
+.sub .row{padding:5px 0;border:0}
+.tag{font-size:11px;padding:1px 7px;border-radius:99px;border:1px solid var(--line);color:var(--dim)}
+.warn{color:var(--amber)} .bad{color:var(--red)} .ok{color:var(--green)}
+.feed{grid-column:1/-1}
+.ev{display:grid;grid-template-columns:62px 150px 1fr;gap:10px;padding:7px 14px;
+ border-bottom:1px solid var(--line);align-items:start}
+@media(max-width:640px){.ev{grid-template-columns:56px 1fr}.ev .who{grid-column:2}}
+.ev:last-child{border-bottom:0}
+.ev .t{color:var(--dim);font-size:12px}
+.ev .who{font-size:12px;font-weight:600;overflow-wrap:anywhere}
+.ev .txt{white-space:pre-wrap;overflow-wrap:anywhere;max-height:4.6em;overflow:hidden;
+ position:relative;cursor:pointer}
+.ev .txt.open{max-height:none}
+.ev .txt.clip::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.5em;
+ background:linear-gradient(transparent,var(--panel))}
+.k-block .who{color:var(--red)} .k-serve .who{color:var(--amber)}
+.k-handoff .who{color:var(--violet)} .k-note .who{color:var(--accent)}
+.k-lock .who,.k-join .who,.k-leave .who{color:var(--dim)}
+.empty{padding:14px;color:var(--dim)}
+#lost{display:none;background:var(--red);color:#fff;padding:6px 20px;font-size:13px}
+</style></head><body>
+<header><h1>agent-bus</h1><span class="count" id="count">…</span>
+<span class="filters" id="filters"></span></header>
+<div id="lost">bağlantı koptu — `agentbus board` durdu mu?</div>
+<main>
+ <section><h2>Live agents</h2><div class="rows" id="agents"></div></section>
+ <section><h2>Held</h2><div class="rows" id="locks"></div>
+  <h2 style="border-top:1px solid var(--line)">Services</h2>
+  <div class="rows" id="serves"></div></section>
+ <section class="feed"><h2>Feed</h2><div id="feed"></div></section>
+</main>
+<script>
+var repo = localStorage.getItem("ab-repo") || "";
+function ago(ts, now){var d = Math.max(0, now - ts);
+ if(d < 60) return d + "s"; if(d < 3600) return Math.floor(d/60) + "m";
+ if(d < 86400) return Math.floor(d/3600) + "h" + ("0"+Math.floor(d%3600/60)).slice(-2);
+ return Math.floor(d/86400) + "d";}
+function clock(ts){var d = new Date(ts*1000);
+ return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2);}
+function esc(s){var e = document.createElement("div"); e.textContent = s == null ? "" : s;
+ return e.innerHTML;}
+function keep(x){return !repo || x.repo === repo;}
+function render(d){
+ var now = d.now;
+ var ss = d.sessions.filter(keep), lk = d.locks.filter(keep),
+     sv = d.serves.filter(keep), ev = d.events.filter(keep);
+ document.getElementById("count").textContent =
+   ss.length + " session" + (ss.length==1?"":"s") + " · " +
+   ss.reduce(function(n,s){return n + s.agents.length;},0) + " subagents · " +
+   lk.length + " held";
+ var f = document.getElementById("filters");
+ if(f.dataset.n != String(d.repos.length)){
+   f.dataset.n = String(d.repos.length); f.innerHTML = "";
+   [{key:"",label:"all"}].concat(d.repos).forEach(function(r){
+     var b = document.createElement("button"); b.textContent = r.label;
+     if(r.key === repo) b.className = "on";
+     b.onclick = function(){repo = r.key; localStorage.setItem("ab-repo", repo);
+       f.dataset.n = ""; render(d);};
+     f.appendChild(b);});
+ } else {
+   Array.prototype.forEach.call(f.children, function(b, i){
+     var key = i === 0 ? "" : d.repos[i-1].key;
+     b.className = key === repo ? "on" : "";});
+ }
+ document.getElementById("agents").innerHTML = ss.length ? ss.map(function(s){
+  return '<div class="row"><div class="top"><span class="dot' + (s.idle?" stale":"") +
+   '"></span><span class="name">' + esc(s.agent) + '</span>' +
+   '<span class="meta mono">' + esc(s.branch || "-") + '</span>' +
+   '<span class="meta mono">' + esc(s.root) + '</span>' +
+   '<span class="meta">' + ago(s.beat, now) + (s.idle ? " idle" : "") + '</span>' +
+   (s.guarded ? '<span class="tag">' + s.guarded + ' guarded</span>' : '') + '</div>' +
+   (s.doing ? '<div class="meta">doing: ' + esc(s.doing) + '</div>' : '') +
+   (s.owns ? '<div class="meta">owns: <span class="mono">' + esc(s.owns) + '</span></div>' : '') +
+   (s.agents.length ? '<div class="sub">' + s.agents.map(function(a){
+      return '<div class="row"><span class="name">' + esc(a.name) + '</span> ' +
+        '<span class="meta">' + esc(a.type || "") + '</span> ' +
+        '<span class="meta mono">' + esc(a.root) + '</span></div>';}).join("") + '</div>' : '') +
+   '</div>';}).join("") : '<div class="empty">nobody is live</div>';
+ document.getElementById("locks").innerHTML = lk.length ? lk.map(function(l){
+  var flag = l.orphan ? '<span class="tag bad">holder gone</span>' :
+             l.expired ? '<span class="tag warn">' + esc(l.expired_why) + '</span>' : '';
+  return '<div class="row"><div class="top"><span class="name mono">' + esc(l.resource) +
+   '</span><span class="meta">' + esc(l.agent) + '</span>' +
+   '<span class="tag">' + esc(l.mode) + '</span>' +
+   '<span class="meta">' + ago(l.since, now) + '</span>' + flag +
+   (l.party_known ? '' : '<span class="tag warn">party unknown</span>') + '</div>' +
+   (l.why ? '<div class="meta">' + esc(l.why) + '</div>' : '') + '</div>';}).join("")
+  : '<div class="empty">nothing held</div>';
+ document.getElementById("serves").innerHTML = sv.length ? sv.map(function(s){
+  return '<div class="row"><div class="top"><span class="name mono">' + esc(s.resource) +
+   '</span>' + (s.port ? '<span class="meta mono">:' + s.port + '</span>' : '') +
+   '<span class="meta mono">→ ' + esc(s.root) + '</span>' +
+   (s.alive ? '' : '<span class="tag bad">not running</span>') +
+   (s.churn >= 3 ? '<span class="tag warn">moved ' + s.churn + '× recently</span>' : '') +
+   '</div>' + (s.churn >= 3 ? '<div class="meta">between ' +
+     s.churn_roots.map(esc).join(" and ") + '</div>' : '') + '</div>';}).join("")
+  : '<div class="empty">no service is being tracked</div>';
+ document.getElementById("feed").innerHTML = ev.length ? ev.map(function(e){
+  return '<div class="ev k-' + esc(e.kind) + '"><span class="t">' + clock(e.ts) +
+   '</span><span class="who">' + esc(e.agent) + (e.to ? " → " + esc(e.to) : "") +
+   '<br><span class="meta">' + esc(e.kind) + '</span></span>' +
+   '<span class="txt">' + esc(e.text) + '</span></div>';}).join("")
+  : '<div class="empty">nothing yet</div>';
+ Array.prototype.forEach.call(document.querySelectorAll(".txt"), function(t){
+   if(t.scrollHeight > t.clientHeight + 2) t.classList.add("clip");
+   t.onclick = function(){t.classList.toggle("open");};});
+}
+function tick(){fetch("/data").then(function(r){return r.json();}).then(function(d){
+  document.getElementById("lost").style.display = "none"; render(d);})
+ .catch(function(){document.getElementById("lost").style.display = "block";});}
+tick(); setInterval(tick, __INTERVAL__);
+</script></body></html>
+"""
+
+
+def board_state(limit=60):
+    """Everything the dashboard shows, as plain data.
+
+    Read-only on purpose. A viewer left open in a browser tab polls every couple
+    of seconds, and the usual engine housekeeping — reaping sessions, rewriting
+    the derived files, advancing a cursor — would mean that watching the bus
+    changed it. `status` may do those things because a person asked it a
+    question; a window that refreshes by itself may not."""
+    sessions = load_sessions()
+    live_sids = {s["sid"] for s in sessions}
+    out = {"now": now(), "sessions": [], "locks": [], "serves": [],
+           "events": [], "repos": []}
+
+    seen_repos = {}
+    for s in sessions:
+        subs = [{"name": a.get("name"), "type": a.get("agent_type"),
+                 "root": short_path(a.get("root", "")),
+                 "branch": a.get("branch") or "",
+                 "started": a.get("started", 0)}
+                for a in load_agents(s["sid"])]
+        out["sessions"].append({
+            "sid": s["sid"], "agent": s.get("agent"),
+            "root": short_path(s.get("root", "")),
+            "branch": s.get("branch") or "", "doing": s.get("doing") or "",
+            "beat": s.get("beat", 0), "idle": now() - s.get("beat", 0) > IDLE_SECS,
+            "guarded": int(s.get("guarded", 0) or 0),
+            "repo": s.get("repo_key", ""), "repo_label": s.get("repo_label", ""),
+            "owns": owns_summary(s["sid"], limit=6), "agents": subs})
+        seen_repos[s.get("repo_key", "")] = s.get("repo_label", "")
+
+    try:
+        names = sorted(os.listdir(LOCKS))
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        lock = read_json(os.path.join(LOCKS, name))
+        if not lock:
+            continue
+        _, stealable, why = lock_state(lock, sessions)
+        out["locks"].append({
+            "resource": lock.get("resource"), "agent": lock.get("agent"),
+            "mode": lock.get("mode"), "why": lock.get("why") or "",
+            "since": lock.get("acquired_at", 0), "repo": lock.get("repo", ""),
+            "party_known": bool(lock.get("party_known", True)),
+            "orphan": lock.get("sid") not in live_sids,
+            "expired": bool(stealable), "expired_why": why})
+
+    try:
+        names = sorted(os.listdir(SERVES))
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        rec = read_json(os.path.join(SERVES, name))
+        if not rec or not rec.get("resource"):
+            continue
+        moves = (read_json(moves_path(rec.get("repo", ""),
+                                      rec["resource"])) or {}).get("moves", [])
+        recent = [m for m in moves if now() - m.get("at", 0) < CHURN_WINDOW]
+        out["serves"].append({
+            "resource": rec["resource"], "root": short_path(rec.get("root", "")),
+            "by": rec.get("by"), "port": rec.get("port"),
+            "started": rec.get("started", 0), "repo": rec.get("repo", ""),
+            "alive": pid_alive(rec.get("pid")),
+            "churn": len(recent),
+            "churn_roots": sorted({short_path(m.get("root", "")) for m in recent})})
+
+    seq = read_int(SEQFILE, 0)
+    for r in read_events(after=max(0, seq - limit)):
+        out["events"].append({
+            "i": r.get("i"), "ts": r.get("ts"), "agent": r.get("agent"),
+            "to": r.get("to") or "", "kind": r.get("kind"),
+            "repo": r.get("repo", ""), "text": r.get("text", "")})
+        seen_repos.setdefault(r.get("repo", ""), (r.get("repo", "") or "").split(":")[0])
+    out["events"].reverse()   # newest first: that is what a watcher looks at
+    out["repos"] = [{"key": k, "label": v or k} for k, v in sorted(
+        seen_repos.items(), key=lambda kv: kv[1] or kv[0]) if k]
+    return out
+
+
+def cli_board(args):
+    """A window onto the bus, served to this machine only.
+
+    `watch` answers "what just happened" one line at a time. The question
+    somebody with five terminals open actually has is "what is going on" — who
+    is live, in which checkout, what is held, which tree each service is
+    answering for — and that is a shape, not a stream.
+
+    Bound to the loopback address and nowhere else: this data is every branch
+    name and worktree path on the machine, and it is nobody's business but the
+    person sitting at it."""
+    import http.server
+    import json as _json
+    import socketserver
+    import webbrowser
+
+    port = int(opt(args, "--port", "8787"))
+    every = max(1, int(opt(args, "--interval", "2")))
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _send(self, body, ctype):
+            raw = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                self.wfile.write(raw)
+            except OSError:
+                pass          # the tab was closed mid-write; not our problem
+
+        def do_GET(self):
+            if self.path.startswith("/data"):
+                try:
+                    self._send(_json.dumps(board_state()), "application/json")
+                except Exception as exc:
+                    self._send(_json.dumps({"error": str(exc)}),
+                               "application/json")
+                return
+            if self.path in ("/", "/index.html"):
+                self._send(BOARD_HTML.replace("__INTERVAL__", str(every * 1000)),
+                           "text/html; charset=utf-8")
+                return
+            self.send_error(404)
+
+        def log_message(self, *_a):
+            pass              # one line per poll would bury the terminal
+
+    class Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    httpd = None
+    for candidate in (port, 0):
+        try:
+            httpd = Server(("127.0.0.1", candidate), Handler)
+            break
+        except OSError as exc:
+            if candidate == 0:
+                print("agent-bus: could not open a port: %s" % exc,
+                      file=sys.stderr)
+                sys.exit(1)
+            print("agent-bus: port %d is taken, picking another." % candidate,
+                  file=sys.stderr)
+    url = "http://127.0.0.1:%d/" % httpd.server_address[1]
+    print("agent-bus board — %s" % url)
+    print("Local only, and read-only: it never changes what it is watching.")
+    print("Ctrl-C to stop.")
+    # Piped into a file or a pager, stdout is block-buffered and the URL — the
+    # one thing the caller needs — would sit unseen until the server stopped.
+    sys.stdout.flush()
+    if not flag(args, "--no-open"):
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        httpd.server_close()
+
+
 def cli_inbox(_args):
     me = need_me()
     seen = 0
@@ -4392,7 +4711,7 @@ COMMANDS = {
     "release": cli_release, "wait": cli_wait, "post": cli_post,
     "note": cli_post, "inbox": cli_inbox, "run": cli_run, "name": cli_name,
     "own": cli_own, "disown": cli_disown, "handoff": cli_handoff,
-    "watch": cli_watch,
+    "watch": cli_watch, "board": cli_board,
     "doing": cli_doing, "init-repo": cli_init_repo, "doctor": cli_doctor,
     "register": cli_register, "install": cli_install, "serve": cli_serve,
     "serves": cli_serves, "forget": cli_forget,
@@ -4412,12 +4731,13 @@ USAGE = """agentbus — coordination between parallel Claude Code sessions
   post [--to <agent>] [--as <you>] "..."   leave a message for the others
   inbox                        everything addressed to this repo / to you
   watch [--repo] [-n 20]       follow every agent on this machine, live
+  board [--port 8787]          the same thing as a page, in your browser
   run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
   serve <res>                  restart a service so it serves YOUR worktree
   serves                       which checkout each service is answering for
   own "<glob>" [--why ".."] [--strict]   declare part of the tree yours
   own --list | disown "<glob>" | disown --all
-  claim <res> [--why ".."] [--steal]
+  claim <res> [--why ".."] [--steal] [--as <you>]
   wait <res> [--timeout 90]    queue for a held resource
   release <res> | --all
   handoff [--note "..."]       summarise what you did, for the others
