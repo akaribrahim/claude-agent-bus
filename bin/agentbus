@@ -587,21 +587,33 @@ def sweep_locks(sessions):
 
 def rebuild_hot(sessions):
     """hot-for/<sid> is what the pre-tool fast path greps a tool payload against
-    before deciding whether to wake the engine, and it holds two kinds of thing:
+    before deciding whether to wake the engine, and it holds three kinds of
+    thing, all of them belonging to *other* live sessions:
 
-      - absolute paths other live sessions wrote recently, for the reactive
-        collision guard;
-      - the fixed leading text of anything they have declared they own.
+      - absolute paths they wrote recently, for the reactive collision guard;
+      - the fixed leading text of anything they have declared they own;
+      - the path of any file they have claimed outright.
 
-    The second is not an optimisation, it is what makes ownership work at all.
-    Without it the engine is woken only once the owner has already written the
-    file, so a declaration would be enforced one edit too late — which is
-    exactly the failure declaring scope up front is meant to prevent."""
+    None of these are optimisations; each is what makes its guard work at all.
+    Without the second, the engine is woken only once the owner has already
+    written the file, so a declaration is enforced one edit too late — the exact
+    failure declaring scope up front exists to prevent. Without the third, an
+    explicit `agentbus claim 'file:…'` is invisible to the shell path, so the
+    block it is supposed to produce never fires — which matters because taking
+    the file explicitly is precisely what every file-collision message tells the
+    reader to do once the two of them have agreed."""
     cutoff = now() - COLLIDE_WINDOW
-    per, owned = {}, {}
+    per, owned, claimed = {}, {}, {}
     for s in sessions:
         per[s["sid"]] = recent_writes(s["sid"], cutoff)
         owned[s["sid"]] = [glob_prefix(d.get("glob")) for d in load_owns(s["sid"])]
+        claimed[s["sid"]] = []
+    for lock in (read_json(os.path.join(LOCKS, n)) or {}
+                 for n in (os.listdir(LOCKS) if os.path.isdir(LOCKS) else [])
+                 if n.endswith(".json")):
+        res = lock.get("resource") or ""
+        if res.startswith("file:") and lock.get("sid") in claimed:
+            claimed[lock["sid"]].append(res[len("file:"):])
     for s in sessions:
         paths = set()
         for other in per:
@@ -609,8 +621,9 @@ def rebuild_hot(sessions):
                 continue
             paths.update(p for _, p in per[other])
             paths.update(owned[other])
+            paths.update(claimed[other])
         write_text(os.path.join(HOTFOR, s["sid"]),
-                   "".join(p + "\n" for p in sorted(paths)))
+                   "".join(p + "\n" for p in sorted(paths) if p))
 
 
 def recent_writes(sid, cutoff, compact=False):
@@ -747,7 +760,7 @@ def current_session(payload=None):
                     # every hook payload agrees with that record — so this is
                     # the only chance anything has to correct it.
                     follow_agent_cwd(read_json(agent_path(sid, hint["agent_id"])),
-                                     os.getcwd())
+                                     os.getcwd(), trusted=False)
     return sid, rec
 
 
@@ -911,7 +924,7 @@ def leave_party_hint(me, cmd):
             toks = toks[1:]
         if len(toks) < 2 or os.path.basename(toks[0]) != "agentbus":
             continue
-        if toks[1] not in CLAIMING_VERBS and toks[1] not in PASSTHROUGH_VERBS:
+        if toks[1] not in (CLAIMING_VERBS + PASSTHROUGH_VERBS + PARTY_VERBS):
             continue
         key = hint_key(toks)
         if not key:
@@ -1044,23 +1057,39 @@ def name_hint_once(me):
             "  agentbus post --as %s \"...\"" % (rec["name"], rec["name"]))
 
 
-def follow_agent_cwd(rec, cwd):
+def follow_agent_cwd(rec, cwd, trusted=True):
     """Keep a subagent's recorded worktree in step with where it is working.
 
     Its record is written at SubagentStart from whatever directory it was
-    launched in, which for a subagent is usually its parent's rather than the
-    tree it was told to work in. Everything then read that. On 2026-07-29 an
-    agent that had itself pointed the API at its own worktree was refused
-    permission to use it — the guard compared against the root it was born with
-    — and it carried on with AGENTBUS_OFF=1 rather than argue, which is the one
-    outcome this plugin cannot afford.
+    launched in, which for a subagent is its parent's rather than the tree it
+    was told to work in. Everything then read that. On 2026-07-29 an agent that
+    had itself pointed the API at its own worktree was refused permission to use
+    it — the guard compared against the root it was born with — and it carried
+    on with AGENTBUS_OFF=1 rather than argue, which is the one outcome this
+    plugin cannot afford.
 
     The objection that stopped sessions following their cwd does not apply one
-    level down: it was two subagents dragging their *parent's* single root back
-    and forth, and here each subagent has a record of its own."""
+    level down: that was two subagents dragging their *parent's* single root
+    between them, and here each subagent has a record of its own.
+
+    A cwd equal to the parent's is not evidence. It is what a subagent's payload
+    says when it has never changed directory, whatever tree it was told to work
+    in — so treating it as an observation would overwrite what the agent
+    declared with `agentbus here` on its very next tool call, every time."""
     if not rec or not cwd or cwd == rec.get("cwd"):
         return rec
+    parent = read_json(os.path.join(SESSIONS, "%s.json" % rec.get("sid"))) or {}
+    if cwd == parent.get("cwd"):
+        return rec
     root, repo_key, label, branch = git_facts(cwd)
+    # A hook payload's cwd is the agent's own and is taken as given. A shell's
+    # is only wherever the command happened to be run from — `agentbus run` from
+    # a scratch directory, or from $HOME — so from there a move is followed only
+    # within the same repository. Without this an agent could be relocated out
+    # of its own project by a single command, and every guard would then read
+    # its config from somewhere that declares nothing.
+    if not trusted and repo_key != rec.get("repo_key"):
+        return rec
     rec.update({"cwd": cwd, "root": root, "repo_key": repo_key,
                 "repo_label": label, "branch": branch})
     write_json(agent_path(rec.get("sid"), rec.get("agent_id")), rec)
@@ -1243,6 +1272,14 @@ def lock_state(lock, sessions):
     return holder, False, ""
 
 
+def plain_name(key):
+    """The resource as a person calls it, from the key it is locked under.
+
+    `worktree@3f9c1a` is how a per-checkout lock is filed; nobody typed that and
+    nothing takes it as an argument, so it must not appear in the log either."""
+    return (key or "").split("@")[0]
+
+
 def announce_locks(me, verb, names, why=""):
     """One line for a deliberate claim, and its matching one when it ends.
 
@@ -1254,9 +1291,10 @@ def announce_locks(me, verb, names, why=""):
     not see a single one being taken."""
     if not names:
         return
-    tail = (" +%s" % ", ".join(names[1:])) if len(names) > 1 else ""
+    shown = [plain_name(n) for n in names]
+    tail = (" +%s" % ", ".join(shown[1:])) if len(shown) > 1 else ""
     emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "lock",
-         "%s '%s'%s%s" % (verb, names[0], tail, (" — " + why) if why else ""))
+         "%s '%s'%s%s" % (verb, shown[0], tail, (" — " + why) if why else ""))
 
 
 def do_claim(me, res, why="", mode="soft", steal=False, sessions=None,
@@ -1300,12 +1338,12 @@ def do_claim(me, res, why="", mode="soft", steal=False, sessions=None,
             return False, lock, holder, "could not write the lock file"
     if holder:
         emit(me.get("sid"), me.get("agent"), repo_key, "lock",
-             "took '%s' from %s (%s)%s" % (res, holder.get("agent"),
+             "took '%s' from %s (%s)%s" % (plain_name(res), holder.get("agent"),
                                            "forced" if steal else reason,
                                            (' — ' + why) if why else ""))
     elif mode == "hard" or why:
         emit(me.get("sid"), me.get("agent"), repo_key, "lock",
-             "took '%s'%s" % (res, (' — ' + why) if why else ""))
+             "took '%s'%s" % (plain_name(res), (' — ' + why) if why else ""))
     return True, new, holder, ""
 
 
@@ -1331,7 +1369,7 @@ def do_release(me, res, quiet=False):
         if waiting:
             tail = " — waiting: %s" % ", ".join(q.get("agent", "?") for q in waiting)
         emit(me.get("sid"), lock.get("agent") or me.get("agent"), repo_key,
-             "lock", "released '%s'%s" % (res, tail))
+             "lock", "released '%s'%s" % (plain_name(res), tail))
     return True
 
 
@@ -2275,6 +2313,9 @@ def command_targets(cmd, depth=0):
 # which is why three agents spent an afternoon negotiating turns by hand instead.
 CLAIMING_VERBS = ("run", "claim", "serve")
 PASSTHROUGH_VERBS = ("wait", "release")
+# Verbs that take no resource but still need to know which party ran them, so
+# the guard has to leave a hint for these too.
+PARTY_VERBS = ("here",)
 
 
 def explicit_resources(cmd, cfg):
@@ -2855,13 +2896,16 @@ def hook_pre_tool(payload):
             return
     tool = payload.get("tool_name")
     ti = payload.get("tool_input") or {}
-    # party_view first, and not for correctness — `follow_agent_cwd` inside it
-    # already keeps a subagent rooted where it runs. It is for cost: with the
-    # agent's own cwd in hand, caller_view finds nothing to do and returns
-    # without asking git. The other order asks git on every single tool call a
-    # subagent working outside its parent's tree makes, which is the whole of
-    # what a fanned-out session does.
-    me = caller_view(party_view(me, payload), payload.get("cwd"))
+    # A subagent is rooted by its own record, which `party_view` keeps in step
+    # with wherever it demonstrably is. `caller_view` must not run on top of
+    # that: it would take the payload's cwd as the answer, and for a subagent
+    # that has never changed directory the payload says its parent's tree —
+    # overwriting, on the very next tool call, whatever the agent declared with
+    # `agentbus here`. The session's own calls have no such ambiguity.
+    if payload.get("agent_id"):
+        me = party_view(me, payload)
+    else:
+        me = caller_view(me, payload.get("cwd"))
     sessions = load_sessions()
     if tool == "Bash":
         # Before anything can deny it: this is the last moment at which who is
@@ -3478,9 +3522,17 @@ def cli_claim(args):
         print("usage: agentbus claim <resource> [--why \"...\"] [--steal] [--as <you>]",
               file=sys.stderr)
         sys.exit(1)
-    ok, lock, holder, reason = do_claim(me, pos[0], why=opt(args, "--why", ""),
+    key = resolve_lock(me, pos[0])
+    ok, lock, holder, reason = do_claim(me, key, why=opt(args, "--why", ""),
                                         mode="hard", steal=flag(args, "--steal"))
     if ok:
+        # The shell fast path filters an Edit against hot-for, and a file claim
+        # is neither a recent write nor a declared glob — so without this the
+        # block it exists to produce does not start until somebody's next turn.
+        # Same argument as `own`: a claim the others learn about later is not a
+        # claim. See rebuild_hot.
+        if key.startswith("file:"):
+            refresh_derived()
         print("claimed '%s'" % pos[0])
         _, implied = expand_implied([pos[0]], me)
         if implied:
@@ -3507,10 +3559,13 @@ def cli_release(args):
     if not pos:
         print("usage: agentbus release <resource> | --all [--as <you>]", file=sys.stderr)
         sys.exit(1)
-    if do_release(me, pos[0]):
+    key = resolve_lock(me, pos[0])
+    if do_release(me, key):
+        if key.startswith("file:"):
+            refresh_derived()      # and the block lifts in the same second
         print("released '%s'" % pos[0])
         return
-    lock = load_lock(me.get("repo_key"), pos[0])
+    lock = load_lock(me.get("repo_key"), key)
     if lock and lock.get("sid") == me.get("sid") and lock.get("agent_id"):
         # Somebody in this session holds it, and this caller cannot show it is
         # them. Refusing beats guessing: a sibling handing back another agent's
@@ -3533,7 +3588,12 @@ def cli_wait(args):
         print("usage: agentbus wait <resource> [--timeout 300] [--why \"...\"] "
               "[--as <you>]", file=sys.stderr)
         sys.exit(1)
-    res, why = pos[0], opt(args, "--why", "")
+    # The key is what the lock lives under; the name is what a person typed and
+    # what every message says back to them. For a worktree-scoped resource these
+    # differ, and showing the key would be answering in the plugin's private
+    # vocabulary.
+    name, why = pos[0], opt(args, "--why", "")
+    res = resolve_lock(me, name)
     # Below the Bash tool's own default timeout, so the wait reports back rather
     # than being killed with its queue entry left behind.
     timeout = int(opt(args, "--timeout", "90"))
@@ -3542,18 +3602,18 @@ def cli_wait(args):
     while True:
         ok, lock, holder, _ = do_claim(me, res, why=why, mode="hard")
         if ok:
-            print("claimed '%s'" % res)
+            print("claimed '%s'" % name)
             return
         if not announced:
             enqueue(me, res)
             emit(me["sid"], me["agent"], me["repo_key"], "note",
-                 "waiting for '%s'%s" % (res, (' — ' + why) if why else ""),
+                 "waiting for '%s'%s" % (name, (' — ' + why) if why else ""),
                  to=holder.get("agent"))
             announced = True
-            print("'%s' is held by %s; queued." % (res, holder.get("agent")),
+            print("'%s' is held by %s; queued." % (name, holder.get("agent")),
                   file=sys.stderr)
         if time.time() > deadline:
-            print("timed out waiting for '%s'" % res, file=sys.stderr)
+            print("timed out waiting for '%s'" % name, file=sys.stderr)
             sys.exit(1)
         time.sleep(3)
 
@@ -4071,6 +4131,59 @@ def cli_board(args):
         httpd.server_close()
 
 
+def cli_here(args):
+    """Record which worktree the caller is actually working in.
+
+    Everything else infers this, and for a subagent the inference can be wrong
+    in a way nothing can detect. A subagent's hook payloads carry its *parent's*
+    cwd unless it has changed directory, so an agent told to work in one
+    checkout while its parent sits in another looks, to every guard, like it is
+    in its parent's tree. On 2026-07-29 one of them was refused permission to
+    use the very service it had itself pointed at its own worktree, and turned
+    the plugin off for the rest of its turn rather than argue with it.
+
+    A shell knows where it is. This is the one place that answer can be handed
+    over, so it is stated rather than guessed:
+
+        cd <your worktree> && agentbus here
+
+    Which party is speaking is settled by the hint the guard leaves, the same
+    way `agentbus claim` is — so it must be run as its own command, not buried
+    in a script, and `--as <your name>` is the fallback when it cannot be."""
+    me = acting(need_me(), args)
+    pos = positional(args)
+    where = os.path.realpath(pos[0]) if pos else os.getcwd()
+    if not os.path.isdir(where):
+        print("agent-bus: no such directory: %s" % where, file=sys.stderr)
+        sys.exit(1)
+    root, repo_key, label, branch = git_facts(where)
+    aid = me.get("agent_id")
+    if aid:
+        rec = read_json(agent_path(me["sid"], aid))
+        if not rec:
+            print("agent-bus: no record of that agent — `agentbus whois` lists "
+                  "who is who.", file=sys.stderr)
+            sys.exit(1)
+        rec.update({"cwd": where, "root": root, "repo_key": repo_key,
+                    "repo_label": label, "branch": branch})
+        write_json(agent_path(me["sid"], aid), rec)
+        who = rec.get("name")
+    else:
+        rec = read_json(os.path.join(SESSIONS, "%s.json" % me["sid"])) or me
+        rec["sid"] = me["sid"]
+        rec.update({"cwd": where, "root": root, "repo_key": repo_key,
+                    "repo_label": label, "branch": branch})
+        write_json(os.path.join(SESSIONS, "%s.json" % me["sid"]), rec)
+        who = rec.get("agent")
+    refresh_derived()
+    print("%s is working in %s (%s)" % (who, short_path(root), branch or "-"))
+    if aid:
+        return
+    print("(that was recorded for the session. If you are a subagent, run this "
+          "as its own\n command so the guard can see who you are, or add "
+          "--as <your name>.)")
+
+
 def cli_inbox(_args):
     me = need_me()
     seen = 0
@@ -4089,6 +4202,24 @@ def find_resource(me, name):
     return next((r for r in cfg.get("resources", []) if r["name"] == name), None)
 
 
+def resolve_lock(me, name):
+    """The key a resource is really locked under, from the name a person typed.
+
+    A `scope: "worktree"` resource is one lock per checkout, so the guard takes
+    it as `worktree@<digest of the root>`. Every CLI verb used the bare name
+    instead, and the two therefore never met: `agentbus claim worktree` wrote a
+    lock nothing consulted, a `git add` in the same checkout sailed past it, and
+    `agentbus wait worktree` returned "claimed" instantly while the block it was
+    queueing for stayed exactly where it was. The deny message's own last-resort
+    advice — `agentbus claim <res> --steal` — was a no-op for these.
+
+    A name that is not a declared resource is passed through untouched, because
+    `agentbus claim 'file:/abs/path.py'` is how somebody takes a single file and
+    that key is deliberately literal."""
+    res = find_resource(me, name)
+    return lock_name(me, res) if res else name
+
+
 def cli_serve(args):
     """Point a declared service at this worktree, restarting it if it is serving
     another one. This is the half `sim-lock.sh` had and a lock alone cannot do."""
@@ -4105,7 +4236,8 @@ def cli_serve(args):
         print("'%s' declares no `start` command, so agent-bus cannot move it. "
               "Add one to .claude/agent-bus.json." % pos[0], file=sys.stderr)
         sys.exit(1)
-    ok, lock, holder, _ = do_claim(me, res["name"], why="handover", mode="hard")
+    ok, lock, holder, _ = do_claim(me, lock_name(me, res), why="handover",
+                                   mode="hard")
     if not ok:
         print("'%s' is held by %s (%s) — ask before moving it out from under them:"
               "\n  agentbus post --to %s \"I need %s pointed at my worktree\""
@@ -4114,7 +4246,7 @@ def cli_serve(args):
                  res["name"]), file=sys.stderr)
         sys.exit(1)
     good, detail = ensure_serving(me, res)
-    do_release(me, res["name"], quiet=True)
+    do_release(me, lock_name(me, res), quiet=True)
     if not good:
         print("agent-bus: %s" % detail, file=sys.stderr)
         sys.exit(1)
@@ -4180,13 +4312,17 @@ def cli_run(args):
     taken = []
     try:
         for res in names:
-            ok, lock, holder, reason = do_claim(me, res, why=why, mode="hard")
+            # Under the key the guard uses, not the name typed: a worktree-scoped
+            # resource is one lock per checkout, and taking the bare name would
+            # write a lock that nothing consults.
+            key = resolve_lock(me, res)
+            ok, lock, holder, reason = do_claim(me, key, why=why, mode="hard")
             if not ok:
                 print("agent-bus: '%s' is held by %s (%s). Not running."
                       % (res, holder.get("agent"), held_for(lock.get("acquired_at"))),
                       file=sys.stderr)
                 sys.exit(75)
-            taken.append(res)
+            taken.append((res, key))
         # Holding the lock is not enough: make the services actually answer with
         # this worktree's code before the command runs.
         for res in names:
@@ -4205,9 +4341,9 @@ def cli_run(args):
         sys.exit(rc)
     finally:
         spoken = []
-        for res in taken:
-            lock = load_lock(me.get("repo_key"), res)
-            if do_release(me, res, quiet=True) and (lock or {}).get("announced"):
+        for res, key in taken:
+            lock = load_lock(me.get("repo_key"), key)
+            if do_release(me, key, quiet=True) and (lock or {}).get("announced"):
                 spoken.append(res)
         announce_locks(me, "released", spoken)
 
@@ -4908,7 +5044,7 @@ COMMANDS = {
     "release": cli_release, "wait": cli_wait, "post": cli_post,
     "note": cli_post, "inbox": cli_inbox, "run": cli_run, "name": cli_name,
     "own": cli_own, "disown": cli_disown, "handoff": cli_handoff,
-    "watch": cli_watch, "board": cli_board,
+    "watch": cli_watch, "board": cli_board, "here": cli_here,
     "doing": cli_doing, "init-repo": cli_init_repo, "doctor": cli_doctor,
     "register": cli_register, "install": cli_install, "serve": cli_serve,
     "serves": cli_serves, "forget": cli_forget,
@@ -4929,6 +5065,7 @@ USAGE = """agentbus — coordination between parallel Claude Code sessions
   inbox                        everything addressed to this repo / to you
   watch [--repo] [-n 20]       follow every agent on this machine, live
   board [--port 8787]          the same thing as a page, in your browser
+  here [<path>] [--as <you>]   record which worktree you are working in
   run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
   serve <res>                  restart a service so it serves YOUR worktree
   serves                       which checkout each service is answering for

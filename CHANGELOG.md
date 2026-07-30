@@ -2,6 +2,30 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 1.5.0 — 2026-07-31
+
+The two gaps left open, and a third found while closing them.
+
+- **`agentbus claim worktree` protected nothing.** A `scope: "worktree"`
+  resource is one lock per checkout, so the guard files it under
+  `<name>@<digest>` — and every CLI verb used the bare name, so the two never
+  met. `git add` in the same checkout sailed past an explicit claim,
+  `agentbus wait` answered "claimed" while the block it was queueing for stood,
+  and the deny message's own `--steal` advice was a no-op. `worktree` is the
+  resource `init-repo` writes into every repository there is.
+- **`agentbus claim 'file:…'` never reached the shell path.** The fast path
+  greps an edit against `hot-for`, which held recent writes and declared globs
+  but not claimed files — so the block that every file-collision message tells
+  you to take was invisible outside Windows. Found by the test written for the
+  first fix.
+- **`agentbus here`** — a subagent can now say which worktree it is working in.
+  Its payloads carry its parent's directory until it changes into its own, and
+  no inference can tell that from the truth; one of them turned the plugin off
+  with `AGENTBUS_OFF=1` rather than argue with a guard placing it in the wrong
+  tree. A cwd equal to the parent's is now treated as the absence of evidence
+  rather than as evidence.
+- Lock events say `worktree`, not `worktree@3f9c1a`. Nobody typed that.
+
 ## 1.4.0 — 2026-07-31
 
 Sessions are called what their humans call them.

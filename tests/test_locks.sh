@@ -198,6 +198,76 @@ ab sess-b release db > /dev/null
 assert_equal "$before" "$(lock_lines | wc -l | tr -d ' ')" \
   "and handing that one back by hand does not invent a line to answer"
 
+# ---- the CLI locks the same key the guard does ------------------------------
+#
+# A `scope: "worktree"` resource is one lock per checkout, so the guard files it
+# as `<name>@<digest of the root>`. Every CLI verb used the bare name, and the
+# two therefore never met: `agentbus claim worktree` wrote a lock nothing
+# consulted, a `git add` in the same checkout sailed straight past it, and
+# `agentbus wait worktree` answered "claimed" while the block it was queueing
+# for stood exactly where it was. The deny message's own last-resort advice,
+# `agentbus claim <res> --steal`, was a no-op for these — and `worktree` is the
+# one resource `agentbus init-repo` writes into every repository there is.
+
+WT_CFG='{"resources":[
+    {"name":"db","desc":"the shared development database","patterns":["\\bpsql\\b"]},
+    {"name":"worktree","desc":"this checkout tree and index","scope":"worktree",
+     "patterns":["\\bgit\\s+(add|commit|stash|reset)\\b"]}]}'
+printf '%s' "$WT_CFG" > "$REPO/.claude/agent-bus.json"
+mkdir -p "$WT2/.claude" && printf '%s' "$WT_CFG" > "$WT2/.claude/agent-bus.json"
+ab sess-a doctor > /dev/null
+
+# A worktree-scoped lock is per checkout, so the session contending for it has
+# to be IN that checkout — the CLI decides from the session's own root, not from
+# a cwd handed to it on a payload.
+new_session sess-c "$REPO"
+
+ab sess-a claim worktree --why "long rebase" > /dev/null
+out=$(ab_hook pre-tool "$(payload bash "sid=sess-a" "cwd=$REPO" "cmd=git add -A" id=wt-1)")
+assert_allow "$out" "the session that claimed it may still use it"
+out=$(ab_hook pre-tool "$(payload bash "sid=sess-c" "cwd=$REPO" "cmd=git add -A" id=wt-2)")
+assert_deny "$out" "and a session in the SAME checkout is now actually blocked"
+assert_contains "$(json_field "$out" hookSpecificOutput permissionDecisionReason)" \
+  "long rebase" "with the reason the claim was made for"
+
+# Per checkout, so the other worktree is untouched — that is the whole point of
+# the scope, and the fix must not have quietly made it global.
+out=$(ab_hook pre-tool "$(payload bash "sid=sess-b" "cwd=$WT2" "cmd=git add -A" id=wt-3)")
+assert_allow "$out" "while the same command in another checkout is not"
+ab_hook post-bash "$(payload post-bash "sid=sess-b" "cwd=$WT2" id=wt-3)" > /dev/null
+
+# The advice a block gives has to work, and `wait` must not report success
+# against a lock it never looked at.
+out=$(ab sess-c wait worktree --timeout 1 2>&1)
+assert_contains "$out" "is held by" "wait queues against the real lock"
+assert_not_contains "$out" "claimed 'worktree'" "rather than claiming instantly"
+out=$(ab sess-c claim worktree --steal --why "they said they were done" 2>&1)
+assert_contains "$out" "claimed" "and the steal the deny message advertises works"
+out=$(ab_hook pre-tool "$(payload bash "sid=sess-a" "cwd=$REPO" "cmd=git add -A" id=wt-4)")
+assert_deny "$out" "so the block really did change hands"
+
+# Said in the vocabulary a person typed, not the key it is filed under.
+assert_contains "$(lock_lines)" "took 'worktree'" "the log names the resource"
+assert_not_contains "$(lock_lines)" "worktree@" "and never its internal key"
+
+ab sess-c release worktree > /dev/null
+assert_equal 0 "$(locks_held)" "releasing by name releases the scoped lock"
+
+# A name that is not a declared resource stays literal: this is how a single
+# file is taken, and that key is deliberately verbatim. It also has to reach the
+# shell fast path — an explicit file claim is not a recent write and not a
+# declared glob, so before this it was absent from hot-for and the block it is
+# supposed to produce never fired at all outside Windows. Taking the file
+# explicitly is exactly what every file-collision message tells the reader to do.
+ab sess-a claim "file:$REPO/one.py" --why "mine" > /dev/null
+out=$(ab_hook pre-tool "$(payload file "sid=sess-b" "cwd=$REPO" "path=$REPO/one.py")")
+assert_deny "$out" "an explicit file claim still blocks the other session"
+ab sess-a release "file:$REPO/one.py" > /dev/null
+
+printf '%s' "$IMPLIES_CFG" > "$REPO/.claude/agent-bus.json"
+printf '%s' "$IMPLIES_CFG" > "$WT2/.claude/agent-bus.json"
+ab sess-a doctor > /dev/null
+
 # ---- claim records that nothing will release are swept ---------------------
 #
 # The shell fast path decides whether PostToolUse is worth an engine start by
@@ -229,6 +299,6 @@ ab sess-a claim db --why "held across the end of the session" > /dev/null
 assert_equal 1 "$(locks_held)" "the claim is held"
 end_session sess-a
 assert_equal 0 "$(locks_held)" "ending the session released it"
-assert_equal 1 "$(cat "$AGENTBUS_HOME/live-count")" "and it is no longer counted live"
+assert_equal 2 "$(cat "$AGENTBUS_HOME/live-count")" "and it is no longer counted live"
 
 finish

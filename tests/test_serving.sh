@@ -209,13 +209,59 @@ assert_allow "$out" \
   "a subagent working in the tree the service serves is not blocked from it"
 assert_equal "$WT2" "$(agent_field sess-move sub-wt root)" \
   "and its record has followed it there"
-ab_hook post-bash "$(payload post-bash sid=sess-move "cwd=$WT2" id=sv-sub)" > /dev/null
+ab_hook post-bash "$(payload post-bash sid=sess-move "cwd=$WT2" id=sv-sub \
+  agent_id=sub-wt agent_type=general-purpose)" > /dev/null
 
-# The other direction still holds: the same subagent, back in its parent's tree,
-# is refused — this is not a blanket exemption for subagents.
-out=$(ab_hook pre-tool "$(payload bash sid=sess-move "cwd=$INNER" "cmd=$CMD" \
+# The other direction still holds — this is not a blanket exemption for
+# subagents. The tree here is the main checkout rather than the parent's, on
+# purpose: a cwd equal to the parent's is what a subagent's payload says when it
+# has never changed directory, so it carries no information and is deliberately
+# ignored. A subagent that really does return to its parent's tree has to say so
+# (`agentbus here`), which is the price of the declaration sticking at all.
+out=$(ab_hook pre-tool "$(payload bash sid=sess-move "cwd=$REPO" "cmd=$CMD" \
   id=sv-sub2 agent_id=sub-wt agent_type=general-purpose)")
 assert_deny "$out" "and in a tree the service does not serve it is still refused"
+
+# ---- a subagent that never changes directory can say where it is ------------
+#
+# Everything above works because the subagent's tool calls carried its own cwd.
+# One that works by absolute path never changes directory, so every payload it
+# causes carries its PARENT's — and no amount of inference can tell that from
+# the truth. On 2026-07-29 an agent in that position was refused the service it
+# had itself pointed at its own worktree, and used AGENTBUS_OFF=1 for the rest
+# of its turn rather than argue with the guard.
+
+ab_hook subagent-start "$(payload subagent-start sid=sess-move "cwd=$INNER" \
+  agent_id=sub-still agent_type=general-purpose)" > /dev/null
+assert_equal "$INNER" "$(agent_field sess-move sub-still root)" \
+  "a subagent starts wherever its parent was standing"
+
+# Its own hook payloads agree with that record, so they cannot correct it.
+out=$(ab_hook pre-tool "$(payload bash sid=sess-move "cwd=$INNER" "cmd=$CMD" \
+  id=sv-st1 agent_id=sub-still agent_type=general-purpose)")
+assert_deny "$out" "so it is judged in its parent's tree, and refused"
+
+# A shell knows where it is. This is where that answer gets handed over.
+NAME=$(python3 -c "
+import glob, json
+for p in glob.glob('$AGENTBUS_HOME/agents/*.json'):
+    r = json.load(open(p))
+    if r.get('agent_id') == 'sub-still':
+        print(r['name'])")
+( cd "$WT2" && ab sess-move here --as "$NAME" > /dev/null )
+assert_equal "$WT2" "$(agent_field sess-move sub-still root)" \
+  "\`agentbus here\` records the tree it was actually run in"
+
+out=$(ab_hook pre-tool "$(payload bash sid=sess-move "cwd=$INNER" "cmd=$CMD" \
+  id=sv-st2 agent_id=sub-still agent_type=general-purpose)")
+assert_allow "$out" \
+  "and the guard now judges it there, even though the payload still says otherwise"
+ab_hook post-bash "$(payload post-bash sid=sess-move "cwd=$INNER" id=sv-st2 \
+  agent_id=sub-still agent_type=general-purpose)" > /dev/null
+
+# It is the agent's own record that moved, not its parent's.
+assert_equal "$INNER" "$(session_field sess-move root)" \
+  "without dragging the session out of its own checkout"
 
 # The CLI decides from where it was run — a moved session, or a subagent in its
 # own worktree — and does not write that back, because the caller may be one of

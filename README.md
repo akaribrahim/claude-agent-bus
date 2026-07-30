@@ -212,6 +212,7 @@ agentbus wait <res> [--timeout 90]    queue for a held resource
 agentbus release <res> | --all
 agentbus doing "..."                  one line others see in their roster
 agentbus init-repo [--dry-run|--force|--local]
+agentbus here [<path>]                record which worktree you are working in
 agentbus doctor | whois | forget <agent|--stale> | install
 ```
 

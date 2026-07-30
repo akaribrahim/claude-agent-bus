@@ -191,6 +191,13 @@ attributed to the session that started you:
 You can only speak as yourself or as one of your own subagents. You and your own
 subagents never block each other, in either direction.
 
+**Say where you are working, if you are a subagent.** Your hook payloads carry
+your parent's directory unless you have changed into your own, so the guards can
+place you in the wrong checkout — and then refuse you the service you yourself
+pointed at your tree. One command settles it, run from that tree:
+
+    cd <your worktree> && agentbus here
+
 **Run `agentbus` as a command, not from inside a script.** How you spell it
 decides whether it works. A `agentbus claim simulator` typed as its own command
 is seen by the guard, which knows which agent you are and takes the lock in your
