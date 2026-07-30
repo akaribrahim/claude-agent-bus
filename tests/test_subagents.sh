@@ -83,7 +83,7 @@ assert_contains "$out" "general-purpose" "with what kind of agent it is"
 
 out=$(ab sess-other status)
 assert_contains "$out" "$P/1" "status lists them too"
-out=$(ab_hook session-start "$(payload session sid=sess-other "cwd=$REPO" title=x)")
+out=$(ab_hook session-start "$(payload session sid=sess-other "cwd=$REPO")")
 assert_contains "$(json_field "$out" hookSpecificOutput additionalContext)" "$P/1" \
   "and a session opening now is told they are there"
 

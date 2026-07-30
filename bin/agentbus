@@ -2538,10 +2538,135 @@ def install_hint_once():
             % os.path.realpath(__file__))
 
 
+def transcript_title(path, tail=65536):
+    """The title this chat is showing, read from the tail of its transcript.
+
+    Claude Code appends `{"type": "custom-title", "customTitle": …}` whenever
+    the title is set — by `/rename`, or by a plugin answering SessionStart —
+    and the last one wins.
+
+    The transcript is the only place to read it. Measured against 2.1.220 with a
+    settings-file hook that logged every payload: SessionStart and
+    UserPromptSubmit both carry `transcript_path` and **neither carries the
+    title**, so the `session_title` this code used to look for was never there
+    and the branch that tested for it always took the same path.
+
+    Only the tail is read. A long session's transcript is megabytes and this is
+    consulted once per user turn; a rename lands within a few kilobytes of the
+    end and stays readable for many turns after."""
+    if not path:
+        return ""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > tail:
+                fh.seek(size - tail)
+                fh.readline()      # drop the half line the seek landed in
+            chunk = fh.read()
+    except OSError:
+        return ""
+    title = ""
+    for line in chunk.decode("utf-8", "replace").splitlines():
+        if '"custom-title"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("type") == "custom-title" and rec.get("customTitle"):
+            title = rec["customTitle"]   # keep going: the last one is the one
+    return title
+
+
+def name_from_title(title, taken, limit=24):
+    """A bus name from a chat title: typeable, unique, and short enough to be
+    used as an address in `agentbus post --to <name>`.
+
+    Accents are folded rather than deleted. A chat named in Turkish — or any
+    language with a diacritic — would otherwise come out as the consonants that
+    happened to be ASCII: `çöp ünlü ışık` became `p-nl-k`, which is not a name
+    anybody would recognise as theirs. `ı` and `İ` need saying explicitly
+    because they are base letters with no decomposition to strip."""
+    import unicodedata
+    s = (title or "").strip()
+    for pair in (("ı", "i"), ("İ", "i"), ("ł", "l"), ("ø", "o"), ("đ", "d")):
+        s = s.replace(pair[0], pair[1]).replace(pair[0].upper(), pair[1])
+    s = "".join(c for c in unicodedata.normalize("NFKD", s)
+                if not unicodedata.combining(c))
+    s = re.sub(r"-{2,}", "-",
+               re.sub(r"[^A-Za-z0-9_.#-]+", "-", s)).strip("-.").lower()
+    # Cut on a word boundary. A name is read as much as it is typed, and
+    # `fix-the-login-bug-for-ac` is worse than one word shorter.
+    name = ""
+    for word in s.split("-"):
+        if name and len(name) + 1 + len(word) > limit:
+            break
+        name = word if not name else "%s-%s" % (name, word)
+    name = (name or s)[:limit].strip("-.")
+    if not name:
+        return ""
+    if name not in taken:
+        return name
+    for n in range(2, 40):
+        cand = "%s#%d" % (name[:20], n)
+        if cand not in taken:
+            return cand
+    return ""
+
+
+def rename_session(rec, new_name, sessions=None, why="renamed"):
+    """Take a new name, and take the subagents with it.
+
+    A subagent is called `<parent>/1`, so a parent that renames and leaves them
+    behind produces a roster where nothing looks related to anything — and the
+    names are addresses, so the stale ones stop working."""
+    old = rec.get("agent")
+    if not new_name or new_name == old:
+        return False
+    rec["agent"] = new_name
+    write_json(os.path.join(SESSIONS, "%s.json" % rec["sid"]), rec)
+    for a in load_agents(rec["sid"]):
+        tail = (a.get("name") or "").split("/", 1)
+        if len(tail) == 2 and tail[0] == old:
+            a["name"] = "%s/%s" % (new_name, tail[1])
+            a["parent"] = new_name
+            write_json(agent_path(rec["sid"], a.get("agent_id")), a)
+    emit(rec["sid"], new_name, rec.get("repo_key"), "note",
+         "%s — was %s" % (why, old))
+    return True
+
+
+def follow_chat_title(rec, payload):
+    """Let the name the human gave the chat be the name on the bus.
+
+    A session registers the moment it opens, when its only distinguishing
+    feature is its branch — so it is called `feat-login` or, on the trunk,
+    `repo-main`, and two sessions on one branch differ by a `#2`. The human then
+    names the chat something meaningful, and until now the bus never heard about
+    it. It cannot be done at SessionStart alone either: the rename happens after
+    the session has registered, which is the whole reason this runs every turn.
+
+    Only a title the human set is adopted. The plugin writes one itself when a
+    chat has none, and adopting that would mean renaming a session after its own
+    name — so what we wrote is remembered and skipped."""
+    title = transcript_title(payload.get("transcript_path"))
+    if not title or title == rec.get("title_set"):
+        return False
+    taken = {s.get("agent") for s in load_sessions() if s["sid"] != rec["sid"]}
+    new_name = name_from_title(title, taken)
+    rec["title_set"] = title      # theirs now; never adopt or overwrite it again
+    write_json(os.path.join(SESSIONS, "%s.json" % rec["sid"]), rec)
+    if not new_name or new_name == rec.get("agent"):
+        return False
+    return rename_session(rec, new_name, why="took the name of its chat")
+
+
 def hook_session_start(payload):
     rec, first_time = register(payload)
     if not rec:
         return
+    # A resumed chat already has the name its human gave it.
+    follow_chat_title(rec, payload)
     sid, repo_key = rec["sid"], rec["repo_key"]
     root, branch, label = rec["root"], rec["branch"], rec["repo_label"]
     sessions = load_sessions()
@@ -2580,9 +2705,15 @@ def hook_session_start(payload):
     out = {"hookSpecificOutput": {
         "hookEventName": "SessionStart",
         "additionalContext": "\n\n".join(blocks)}}
-    if not payload.get("session_title"):
-        out["hookSpecificOutput"]["sessionTitle"] = "%s · %s" % (
-            rec["agent"], branch or label)
+    # Name the tab, but never over the human. `session_title` is not on the
+    # payload — measured, not assumed — so testing for it meant this always
+    # fired, and resuming a chat somebody had renamed put the generated title
+    # back. The transcript is what actually knows.
+    if not transcript_title(payload.get("transcript_path")):
+        title = "%s · %s" % (rec["agent"], branch or label)
+        out["hookSpecificOutput"]["sessionTitle"] = title
+        rec["title_set"] = title
+        write_json(os.path.join(SESSIONS, "%s.json" % sid), rec)
     print(json.dumps(out))
 
 
@@ -2596,6 +2727,9 @@ def hook_prompt_submit(payload):
             return
         sid = me["sid"]
     touch_beat(sid)
+    # Every turn, because a chat is renamed after it has already registered —
+    # which is when its human has seen enough of it to know what to call it.
+    follow_chat_title(me, payload)
     sessions = load_sessions(reap=True)
     refresh_derived(sessions)
     rotate_events()
@@ -3573,14 +3707,28 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px so
  padding:12px 20px;display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
 h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .count{color:var(--dim)}
-.filters{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
-.filters button{font:inherit;font-size:12px;padding:3px 10px;border-radius:99px;cursor:pointer;
- border:1px solid var(--line);background:transparent;color:var(--dim)}
-.filters button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 .dot{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--green)}
 .dot.stale{background:var(--dim)}
-main{padding:20px;display:grid;gap:18px;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
-@media(max-width:900px){main{grid-template-columns:1fr}}
+main{padding:20px;display:grid;gap:18px;grid-template-columns:minmax(0,3fr) minmax(0,7fr)}
+.full{grid-column:1/-1}
+@media(max-width:900px){main{grid-template-columns:1fr}.full{grid-column:auto}}
+/* projects, down the left */
+.proj{display:block;width:100%;text-align:left;font:inherit;cursor:pointer;
+ background:transparent;border:0;border-bottom:1px solid var(--line);
+ padding:9px 14px;color:inherit}
+.proj:last-child{border-bottom:0}
+.proj.on{background:var(--ink);color:var(--bg)}
+.proj.on .meta{color:var(--bg);opacity:.72}
+.proj .nm{font-weight:600}
+/* tables */
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+ color:var(--dim);padding:7px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td.mono{font-size:.86em}
+.kid td:first-child{padding-left:30px}
+.kid td{color:var(--dim)}
 section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
 section>h2{margin:0;padding:10px 14px;font-size:11px;font-weight:600;letter-spacing:.09em;
  text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line)}
@@ -3612,15 +3760,13 @@ section>h2{margin:0;padding:10px 14px;font-size:11px;font-weight:600;letter-spac
 .empty{padding:14px;color:var(--dim)}
 #lost{display:none;background:var(--red);color:#fff;padding:6px 20px;font-size:13px}
 </style></head><body>
-<header><h1>agent-bus</h1><span class="count" id="count">…</span>
-<span class="filters" id="filters"></span></header>
-<div id="lost">bağlantı koptu — `agentbus board` durdu mu?</div>
+<header><h1>agent-bus</h1><span class="count" id="count">…</span></header>
+<div id="lost">connection lost — did `agentbus board` stop?</div>
 <main>
- <section><h2>Live agents</h2><div class="rows" id="agents"></div></section>
- <section><h2>Held</h2><div class="rows" id="locks"></div>
-  <h2 style="border-top:1px solid var(--line)">Services</h2>
-  <div class="rows" id="serves"></div></section>
- <section class="feed"><h2>Feed</h2><div id="feed"></div></section>
+ <section><h2>Projects</h2><div id="filters"></div></section>
+ <section><h2>Live agents</h2><div id="agents"></div></section>
+ <section class="full"><h2>Services</h2><div id="serves"></div></section>
+ <section class="full"><h2>Feed</h2><div id="feed"></div></section>
 </main>
 <script>
 var repo = localStorage.getItem("ab-repo") || "";
@@ -3642,52 +3788,59 @@ function render(d){
    ss.reduce(function(n,s){return n + s.agents.length;},0) + " subagents · " +
    lk.length + " held";
  var f = document.getElementById("filters");
- if(f.dataset.n != String(d.repos.length)){
-   f.dataset.n = String(d.repos.length); f.innerHTML = "";
-   [{key:"",label:"all"}].concat(d.repos).forEach(function(r){
-     var b = document.createElement("button"); b.textContent = r.label;
-     if(r.key === repo) b.className = "on";
-     b.onclick = function(){repo = r.key; localStorage.setItem("ab-repo", repo);
-       f.dataset.n = ""; render(d);};
-     f.appendChild(b);});
- } else {
-   Array.prototype.forEach.call(f.children, function(b, i){
-     var key = i === 0 ? "" : d.repos[i-1].key;
-     b.className = key === repo ? "on" : "";});
- }
- document.getElementById("agents").innerHTML = ss.length ? ss.map(function(s){
-  return '<div class="row"><div class="top"><span class="dot' + (s.idle?" stale":"") +
-   '"></span><span class="name">' + esc(s.agent) + '</span>' +
-   '<span class="meta mono">' + esc(s.branch || "-") + '</span>' +
-   '<span class="meta mono">' + esc(s.root) + '</span>' +
-   '<span class="meta">' + ago(s.beat, now) + (s.idle ? " idle" : "") + '</span>' +
-   (s.guarded ? '<span class="tag">' + s.guarded + ' guarded</span>' : '') + '</div>' +
-   (s.doing ? '<div class="meta">doing: ' + esc(s.doing) + '</div>' : '') +
-   (s.owns ? '<div class="meta">owns: <span class="mono">' + esc(s.owns) + '</span></div>' : '') +
-   (s.agents.length ? '<div class="sub">' + s.agents.map(function(a){
-      return '<div class="row"><span class="name">' + esc(a.name) + '</span> ' +
-        '<span class="meta">' + esc(a.type || "") + '</span> ' +
-        '<span class="meta mono">' + esc(a.root) + '</span></div>';}).join("") + '</div>' : '') +
-   '</div>';}).join("") : '<div class="empty">nobody is live</div>';
- document.getElementById("locks").innerHTML = lk.length ? lk.map(function(l){
-  var flag = l.orphan ? '<span class="tag bad">holder gone</span>' :
-             l.expired ? '<span class="tag warn">' + esc(l.expired_why) + '</span>' : '';
-  return '<div class="row"><div class="top"><span class="name mono">' + esc(l.resource) +
-   '</span><span class="meta">' + esc(l.agent) + '</span>' +
-   '<span class="tag">' + esc(l.mode) + '</span>' +
-   '<span class="meta">' + ago(l.since, now) + '</span>' + flag +
-   (l.party_known ? '' : '<span class="tag warn">party unknown</span>') + '</div>' +
-   (l.why ? '<div class="meta">' + esc(l.why) + '</div>' : '') + '</div>';}).join("")
-  : '<div class="empty">nothing held</div>';
- document.getElementById("serves").innerHTML = sv.length ? sv.map(function(s){
-  return '<div class="row"><div class="top"><span class="name mono">' + esc(s.resource) +
-   '</span>' + (s.port ? '<span class="meta mono">:' + s.port + '</span>' : '') +
-   '<span class="meta mono">→ ' + esc(s.root) + '</span>' +
-   (s.alive ? '' : '<span class="tag bad">not running</span>') +
-   (s.churn >= 3 ? '<span class="tag warn">moved ' + s.churn + '× recently</span>' : '') +
-   '</div>' + (s.churn >= 3 ? '<div class="meta">between ' +
-     s.churn_roots.map(esc).join(" and ") + '</div>' : '') + '</div>';}).join("")
-  : '<div class="empty">no service is being tracked</div>';
+ var rows = [{key:"", label:"all projects"}].concat(d.repos);
+ f.innerHTML = rows.map(function(r){
+   var n = d.sessions.filter(function(s){return !r.key || s.repo === r.key;}).length;
+   var h = d.locks.filter(function(l){return !r.key || l.repo === r.key;}).length;
+   return '<button class="proj' + (r.key === repo ? " on" : "") +
+     '" data-k="' + esc(r.key) + '"><span class="nm">' + esc(r.label) + '</span>' +
+     '<br><span class="meta">' + n + " live" + (h ? " · " + h + " held" : "") +
+     '</span></button>';}).join("");
+ Array.prototype.forEach.call(f.children, function(b){
+   b.onclick = function(){repo = b.dataset.k;
+     localStorage.setItem("ab-repo", repo); render(d);};});
+
+ document.getElementById("agents").innerHTML = ss.length ?
+  '<table><thead><tr><th>Agent</th><th>Branch</th><th>Worktree</th>' +
+  '<th>Doing</th><th>Seen</th></tr></thead><tbody>' +
+  ss.map(function(s){
+   var r = '<tr><td><span class="dot' + (s.idle?" stale":"") + '"></span> ' +
+    '<span class="name">' + esc(s.agent) + '</span></td>' +
+    '<td class="mono">' + esc(s.branch || "-") + '</td>' +
+    '<td class="mono">' + esc(s.root) + '</td>' +
+    '<td>' + (esc(s.doing) || '<span class="meta">—</span>') +
+    (s.owns ? '<br><span class="meta">owns ' + esc(s.owns) + '</span>' : '') + '</td>' +
+    '<td class="meta">' + ago(s.beat, now) + (s.idle ? " idle" : "") + '</td></tr>';
+   return r + s.agents.map(function(a){
+    return '<tr class="kid"><td>' + esc(a.name) + '</td><td class="mono">' +
+     esc(a.branch || "-") + '</td><td class="mono">' + esc(a.root) +
+     '</td><td>' + esc(a.type || "") + '</td><td></td></tr>';}).join("");
+  }).join("") + '</tbody></table>'
+  : '<div class="empty">nobody is live</div>';
+
+ document.getElementById("serves").innerHTML = sv.length ?
+  '<table><thead><tr><th>Service</th><th>Serving</th><th>Started by</th>' +
+  '<th>Held by</th><th>State</th></tr></thead><tbody>' +
+  sv.map(function(s){
+   var state = s.alive ? '<span class="ok">running</span>'
+     : (s.movable ? '<span class="meta">not started</span>'
+                  : '<span class="meta">not a service</span>');
+   if(s.churn >= 3) state += '<br><span class="warn">moved ' + s.churn +
+     '× between ' + s.churn_roots.map(esc).join(" and ") + '</span>';
+   var holder = s.held_by
+     ? '<span class="name">' + esc(s.held_by) + '</span> <span class="meta">' +
+       ago(s.held_since, now) + (s.held_mode === "hard" ? " hard" : "") + '</span>' +
+       (s.held_why ? '<br><span class="meta">' + esc(s.held_why) + '</span>' : '')
+     : '<span class="ok">free</span>';
+   return '<tr><td><span class="name mono">' + esc(s.resource) + '</span>' +
+    (s.port ? ' <span class="meta mono">:' + s.port + '</span>' : '') +
+    (s.desc ? '<br><span class="meta">' + esc(s.desc) + '</span>' : '') + '</td>' +
+    '<td class="mono">' + (esc(s.root) || '<span class="meta">—</span>') + '</td>' +
+    '<td class="meta">' + (esc(s.by) || "—") + '</td>' +
+    '<td>' + holder + '</td><td>' + state + '</td></tr>';}).join("") +
+  '</tbody></table>'
+  : '<div class="empty">this repository declares no shared resources ' +
+    '(<span class="mono">agentbus init-repo</span>)</div>';
  document.getElementById("feed").innerHTML = ev.length ? ev.map(function(e){
   return '<div class="ev k-' + esc(e.kind) + '"><span class="t">' + clock(e.ts) +
    '</span><span class="who">' + esc(e.agent) + (e.to ? " → " + esc(e.to) : "") +
@@ -3755,6 +3908,14 @@ def board_state(limit=60):
             "orphan": lock.get("sid") not in live_sids,
             "expired": bool(stealable), "expired_why": why})
 
+    # Every resource the repository declares, not only the ones somebody has
+    # started. "Nobody is holding the simulator" is as much of an answer as
+    # "she is", and a service that has never been started at all is the state a
+    # reader most needs to be able to see.
+    held = {}
+    for lock in out["locks"]:
+        held[(lock["repo"], (lock["resource"] or "").split("@")[0])] = lock
+    served = {}
     try:
         names = sorted(os.listdir(SERVES))
     except OSError:
@@ -3763,18 +3924,50 @@ def board_state(limit=60):
         if not name.endswith(".json"):
             continue
         rec = read_json(os.path.join(SERVES, name))
-        if not rec or not rec.get("resource"):
-            continue
-        moves = (read_json(moves_path(rec.get("repo", ""),
-                                      rec["resource"])) or {}).get("moves", [])
-        recent = [m for m in moves if now() - m.get("at", 0) < CHURN_WINDOW]
-        out["serves"].append({
-            "resource": rec["resource"], "root": short_path(rec.get("root", "")),
-            "by": rec.get("by"), "port": rec.get("port"),
-            "started": rec.get("started", 0), "repo": rec.get("repo", ""),
-            "alive": pid_alive(rec.get("pid")),
-            "churn": len(recent),
-            "churn_roots": sorted({short_path(m.get("root", "")) for m in recent})})
+        if rec and rec.get("resource"):
+            served[(rec.get("repo", ""), rec["resource"])] = rec
+
+    # Only repositories somebody is actually working in. A serve record whose
+    # process is gone, under a repo key nobody is live in, is cruft from an
+    # earlier shape of the tree — this machine carries three such — and listing
+    # its resources beside the real ones would put the same service on the page
+    # twice, once truthfully and once as a ghost.
+    roots = {}
+    for s in sessions:
+        roots.setdefault(s.get("repo_key", ""), s.get("root"))
+    for key, rec in served.items():
+        if key[0] not in roots and pid_alive(rec.get("pid")):
+            roots.setdefault(key[0], rec.get("root"))
+
+    for repo_key, root in sorted(roots.items()):
+        cfg = repo_config(repo_key, root)
+        declared = [r["name"] for r in cfg.get("resources", []) if r.get("name")]
+        for extra in sorted(k[1] for k in served if k[0] == repo_key):
+            if extra not in declared:
+                declared.append(extra)      # started, then removed from config
+        by_name = {r["name"]: r for r in cfg.get("resources", [])}
+        for name in declared:
+            res = by_name.get(name, {})
+            rec = served.get((repo_key, name)) or {}
+            lock = held.get((repo_key, name))
+            moves = (read_json(moves_path(repo_key, name)) or {}).get("moves", [])
+            recent = [m for m in moves if now() - m.get("at", 0) < CHURN_WINDOW]
+            alive = bool(rec) and pid_alive(rec.get("pid"))
+            out["serves"].append({
+                "resource": name, "repo": repo_key,
+                "desc": res.get("desc", ""), "port": res.get("port") or rec.get("port"),
+                "movable": bool(res.get("start")),
+                "root": short_path(rec.get("root", "")) if alive else "",
+                "by": rec.get("by") if alive else "",
+                "started": rec.get("started", 0) if alive else 0,
+                "alive": alive,
+                "held_by": (lock or {}).get("agent", ""),
+                "held_since": (lock or {}).get("since", 0),
+                "held_mode": (lock or {}).get("mode", ""),
+                "held_why": (lock or {}).get("why", ""),
+                "churn": len(recent),
+                "churn_roots": sorted({short_path(m.get("root", ""))
+                                       for m in recent})})
 
     seq = read_int(SEQFILE, 0)
     for r in read_events(after=max(0, seq - limit)):
@@ -3782,8 +3975,12 @@ def board_state(limit=60):
             "i": r.get("i"), "ts": r.get("ts"), "agent": r.get("agent"),
             "to": r.get("to") or "", "kind": r.get("kind"),
             "repo": r.get("repo", ""), "text": r.get("text", "")})
-        seen_repos.setdefault(r.get("repo", ""), (r.get("repo", "") or "").split(":")[0])
     out["events"].reverse()   # newest first: that is what a watcher looks at
+    # The filter lists places there is something to watch. A repository that
+    # only appears in the log is history, and offering it as a filter would be
+    # offering an empty page.
+    for key in roots:
+        seen_repos.setdefault(key, key.split(":")[0])
     out["repos"] = [{"key": k, "label": v or k} for k, v in sorted(
         seen_repos.items(), key=lambda kv: kv[1] or kv[0]) if k]
     return out

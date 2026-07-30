@@ -10,7 +10,7 @@ same JSON encoder that will read it back.
 
 Kinds mirror the events in hooks/hooks.posix.json:
 
-    session     SessionStart      sid, cwd, title
+    session     SessionStart      sid, cwd, transcript_path
     batch       PostToolBatch     sid, cwd
     bash        PreToolUse/Bash   sid, cwd, cmd, id
     file        PreToolUse/Edit   sid, cwd, path, tool
@@ -34,10 +34,17 @@ def main():
 
     d = {"session_id": kv.get("sid", ""), "cwd": kv.get("cwd", "")}
 
+    # Every real payload carries it — SessionStart, UserPromptSubmit and the
+    # tool events alike, measured against Claude Code 2.1.220. It is how the
+    # title a human gave the chat is found, since no payload carries the title
+    # itself: `session_title` was a field this builder used to invent, and a
+    # fixture that invents a field tests the code against an assumption rather
+    # than against Claude Code.
+    if kv.get("transcript_path"):
+        d["transcript_path"] = kv["transcript_path"]
+
     if kind == "session":
         d["hook_event_name"] = "SessionStart"
-        if kv.get("title"):
-            d["session_title"] = kv["title"]
     elif kind == "session-end":
         d["hook_event_name"] = "SessionEnd"
         d["reason"] = kv.get("reason", "exit")

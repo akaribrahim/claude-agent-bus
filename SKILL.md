@@ -14,6 +14,11 @@ can pass against someone else's code and look like proof of yours.
 You are already registered. Presence, locking, service ownership and message
 delivery run in hooks; you do not have to start anything.
 
+Your name on the bus is the name of this chat, once its human has given it one;
+until then it is your branch. It changes when they rename the chat, and your
+subagents are renamed with you — so quote the name you were last told rather
+than one you remember, and use `agentbus whois` if you are unsure.
+
 ## What happens without you doing anything
 
 - At session start you were told who else is live, where, what is held, and which

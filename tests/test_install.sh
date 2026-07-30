@@ -96,7 +96,7 @@ commit_all "$REPO"
 
 start_with_path() {   # <session id> <PATH> → the hook's stdout
   local sid="$1" p="$2"
-  printf '%s' "$(payload session "sid=$sid" "cwd=$REPO" title=x)" \
+  printf '%s' "$(payload session "sid=$sid" "cwd=$REPO")" \
     | env PATH="$p" AGENTBUS_HOME="$AGENTBUS_HOME" HOME="$FAKE_HOME" \
         bash "$AB_ROOT/bin/ab-hook" session-start
 }

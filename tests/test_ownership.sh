@@ -161,7 +161,7 @@ out=$(ab sess-b status)
 assert_contains "$out" "Declared ownership:" "status has an ownership section"
 assert_contains "$out" "api/**" "listing the scope"
 
-out=$(ab_hook session-start "$(payload session sid=sess-b "cwd=$REPO" title=x)")
+out=$(ab_hook session-start "$(payload session sid=sess-b "cwd=$REPO")")
 assert_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
   "owns: api/**" "a session starting up is told what is spoken for"
 

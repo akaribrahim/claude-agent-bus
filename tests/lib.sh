@@ -190,7 +190,7 @@ payload() {   # <kind> <k=v…> → a hook payload on stdout
 # --------------------------------------------------------------- fixtures ----
 
 new_session() {   # <session id> <cwd>
-  ab_hook session-start "$(payload session "sid=$1" "cwd=$2" title=x)" > /dev/null
+  ab_hook session-start "$(payload session "sid=$1" "cwd=$2")" > /dev/null
 }
 
 end_session() {   # <session id>

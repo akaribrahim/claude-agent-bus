@@ -233,9 +233,15 @@ agentbus watch          # a live line per event, in the terminal
 agentbus board          # the same thing as a page: http://127.0.0.1:8787
 ```
 
-The board shows the live agents and their subagents, what each said it was
-doing, what is held and by whom, which checkout each service is answering for,
-and the message feed — refreshing itself every couple of seconds.
+Projects down the left, the live agents beside them, then every declared
+service — which worktree it is serving, who started it, and who is holding it
+or that it is free — and the message feed, refreshing itself every couple of
+seconds.
+
+Sessions are named after their chats. A session registers the moment it opens,
+when its branch is the only thing to go on, so it starts as `feat-login` or
+`repo-main`; rename the chat and the bus follows at the next turn, subagents
+included (`agentbus/1`, `agentbus/2`). `agentbus name <x>` overrides it.
 
 Two things it deliberately is not. It is **loopback-only**: the bus is every
 branch name, worktree path and message on your machine, and none of that should

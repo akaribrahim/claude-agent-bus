@@ -2,9 +2,32 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 1.4.0 — 2026-07-31
+
+Sessions are called what their humans call them.
+
+- **A session takes the name of its chat.** It used to be named after its
+  branch — `feat-login`, or `repo-main` on the trunk, with a `#2` when two
+  sessions shared one — because that is all there is to go on at the moment it
+  registers. Rename the chat and the bus follows, at the next turn.
+- Its **subagents follow with it**: `agentbus/1`, `agentbus/2`. Their names are
+  addresses, so leaving them behind would break `agentbus post --to`.
+- **A resumed chat keeps the name you gave it.** SessionStart used to put the
+  generated title back over yours, because it tested a payload field that is
+  never sent: measured against Claude Code 2.1.220 with a hook that logged every
+  event, neither SessionStart nor UserPromptSubmit carries a title — they carry
+  `transcript_path`, which is where the title actually lives.
+- Accents fold rather than drop, so a chat named in Turkish comes out as
+  `odeme-akisi-duzeltmesi` and not as whichever letters happened to be ASCII.
+- `agentbus name <x>` still overrides all of this.
+
 ## 1.3.0 — 2026-07-31
 
-A way to watch the bus.
+A way to watch the bus. (Relaid out the same day: projects down the left, live
+agents as a table beside them, then services and the feed full width. The
+services table lists every declared resource — which worktree it is serving,
+who started it, and who is holding it or that it is free — rather than only the
+ones somebody has started.)
 
 - **`agentbus board`** serves a live page on `127.0.0.1:8787`: the live agents
   and their subagents, what each said it was doing, what is held and by whom,

@@ -164,7 +164,7 @@ assert_equal "$REPO" "$(session_field sess-move root)" \
 # turn whatever else is going on. (A `pre-tool` for an unguarded command would
 # not: the fast path filters it out before the engine is ever woken, which is
 # exactly why the first version of this test passed against the broken build.)
-ab_hook prompt-submit "$(payload session sid=sess-move "cwd=$INNER" title=x)" > /dev/null
+ab_hook prompt-submit "$(payload session sid=sess-move "cwd=$INNER")" > /dev/null
 assert_equal "$INNER" "$(session_field sess-move root)" \
   "and follows the agent into a worktree under .claude/worktrees/"
 assert_equal "feat/inner" "$(session_field sess-move branch)" "branch and all"

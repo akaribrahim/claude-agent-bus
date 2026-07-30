@@ -32,7 +32,7 @@ assert_equal 1 "$(cat "$AGENTBUS_HOME/live-count")" "one live session"
 
 # A session that is alone is told nothing at all — no roster, no rules, no
 # banner. There is nobody to coordinate with, so there is nothing to say.
-out=$(ab_hook session-start "$(payload session sid=sess-solo "cwd=$REPO" title=x)")
+out=$(ab_hook session-start "$(payload session sid=sess-solo "cwd=$REPO")")
 assert_empty "$out" "starting alone injects nothing into the session"
 
 GUARDED='curl -sf http://localhost:8099/health'

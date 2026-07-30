@@ -56,6 +56,33 @@ assert_equal "wiring the board" "$(state 'd["sessions"][0]["doing"] or d["sessio
   "with what a session said it was doing"
 assert_equal 1 "$(state 'len(d["locks"])')" "the held resource is there"
 assert_equal db "$(state 'd["locks"][0]["resource"]')" "named"
+
+# ---- services: every declared one, held or free -----------------------------
+#
+# Not only the ones somebody has started. "Nobody is holding the simulator" is
+# as much of an answer as "she is", and a service that has never been started
+# is the state a reader most needs to be able to see.
+
+assert_equal 1 "$(state 'len(d["serves"])')" "the declared resource is listed"
+assert_equal db "$(state 'd["serves"][0]["resource"]')" "by name"
+assert_contains "$(state 'd["serves"][0]["held_by"]')" "$(ab sess-b name)" \
+  "with the agent that is holding it"
+ab_hook post-bash "$(payload post-bash sid=sess-b "cwd=$WT2" id=bd-1)" > /dev/null
+assert_equal "" "$(state 'd["serves"][0]["held_by"]')" \
+  "and nothing there once it is given back, so free reads as free"
+
+# A serve record whose process is gone, in a repo nobody is live in, is cruft
+# from an earlier shape of the tree — this machine carries three — and listing
+# its resources beside the real ones puts the same service on the page twice.
+python3 -c "
+import json, os
+json.dump({'resource': 'db', 'repo': 'ghostrepo:0000', 'root': '/nowhere',
+           'by': 'gone', 'pid': 999999, 'port': 1},
+          open(os.path.join('$AGENTBUS_HOME', 'serves', 'ghost__db.json'), 'w'))"
+assert_equal 1 "$(state 'len(d["serves"])')" \
+  "a dead service in a repo nobody is in is not listed"
+assert_not_contains "$(state 'json.dumps(d["repos"])')" "ghostrepo" \
+  "and its repository is not offered as a filter"
 assert_contains "$(state 'json.dumps(d["events"])')" "something worth reading" \
   "and the messages, newest first"
 assert_equal "$(state 'd["events"][0]["i"]')" "$(read_seq)" \
