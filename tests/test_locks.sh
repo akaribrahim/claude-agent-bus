@@ -350,6 +350,55 @@ printf '%s' "$IMPLIES_CFG" > "$REPO/.claude/agent-bus.json"
 printf '%s' "$IMPLIES_CFG" > "$WT2/.claude/agent-bus.json"
 ab sess-a doctor > /dev/null
 
+
+# ---- one resource, several of the thing --------------------------------------
+#
+# A resource is one thing per machine, and sometimes the machine has three of
+# them. On 2026-07-31 three agents shot a screen tour on three simulators, each
+# with its own device, and the bus — holding one `simulator` lock — serialised
+# work that did not contend at all. All three ran their Maestro commands with
+# AGENTBUS_OFF=1 and said so on the bus: the tool right in principle, wrong in
+# fact, and switched off by the people it was for.
+
+KEY_CFG='{"resources":[
+    {"name":"simulator","desc":"an iOS simulator","patterns":["\\bmaestro\\b"],
+     "key":"--udid\\s+(\\S+)"}]}'
+printf '%s' "$KEY_CFG" > "$REPO/.claude/agent-bus.json"
+printf '%s' "$KEY_CFG" > "$WT2/.claude/agent-bus.json"
+ab sess-a doctor > /dev/null
+
+out=$(ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" \
+  "cmd=maestro --udid 9E75406B test a.yaml" id=k-1)")
+assert_allow "$out" "one agent takes one device"
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=maestro --udid 120A9276 test b.yaml" id=k-2)")
+assert_allow "$out" "and another takes a different one, without waiting"
+assert_equal 2 "$(locks_held)" "so both are held at once"
+
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=maestro --udid 9E75406B test c.yaml" id=k-3)")
+assert_deny "$out" "reaching for a device somebody else has is still refused"
+
+# Not naming a device is not a way past: it means you do not know which one you
+# are about to drive, which is a reason to wait rather than to proceed.
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=maestro test d.yaml" id=k-4)")
+assert_deny "$out" "and a command naming no device contends with all of them"
+
+# The whole resource can still be taken, and then it covers every instance.
+ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=k-1)" > /dev/null
+ab_hook post-bash "$(payload post-bash sid=sess-b "cwd=$WT2" id=k-2)" > /dev/null
+assert_equal 0 "$(locks_held)" "the rig is free again"
+ab sess-a claim simulator --why "all of them, for a long run" > /dev/null
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=maestro --udid FD8DA3E4 test e.yaml" id=k-5)")
+assert_deny "$out" "claiming the resource itself covers every device"
+ab sess-a release simulator > /dev/null
+
+printf '%s' "$IMPLIES_CFG" > "$REPO/.claude/agent-bus.json"
+printf '%s' "$IMPLIES_CFG" > "$WT2/.claude/agent-bus.json"
+ab sess-a doctor > /dev/null
+
 # ---- a session that ends drops what it was holding --------------------------
 
 ab sess-a claim db --why "held across the end of the session" > /dev/null

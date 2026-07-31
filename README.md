@@ -189,6 +189,7 @@ machine and collaborator gets the same guards.
 | `implies` | Resources a command needs indirectly (an e2e run needs the server). |
 | `unless` | Regexes that mean this use is **not** the guarded thing. `patterns` recognise the tool; a `db` resource describing your local Postgres matches every `psql` there is, including one aimed at staging. |
 | `scope: "worktree"` | Contended only by sessions in the *same* checkout. |
+| `key` | A regex whose first group names *which one*: `"key": "--udid\\s+(\\S+)"` turns one simulator lock into one per device. A command naming no instance contends with all of them. |
 | `why` / `hint` | Shown verbatim when blocking. `init-repo` leaves these empty on purpose: this is the part only you can write, and it is the part that stops an agent working around the block. |
 
 The cheap pre-filter the shell hook uses is **derived from the patterns**, so the

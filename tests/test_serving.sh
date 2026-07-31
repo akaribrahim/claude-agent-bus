@@ -319,4 +319,43 @@ assert_allow "$out" "a -C path that does not exist falls back to the session's t
 ab_hook post-bash "$(payload post-bash sid=sess-b "cwd=$WT2" id=gc-4)" > /dev/null
 
 
+# ---- `here` outlasts the cwd that contradicts it ----------------------------
+#
+# Claude Code returns the shell to the directory the chat opened in between tool
+# calls, so a session working in another checkout has every payload afterwards
+# saying the old tree — and following that put the session straight back, on the
+# very next turn. An agent in exactly that position on 2026-07-31 was told it
+# was in a checkout it had left, blocked from services it had started itself,
+# and ran the rest of its work with AGENTBUS_OFF=1:
+#
+#   "her komuttan sonra shell cwd'mi product-src'ye geri aldığı için
+#    'you are in product-src' deyip beni kendi servislerimden blokluyor"
+#
+# A declaration has to outlast the inference that contradicts it.
+
+new_session sess-pin "$REPO"
+assert_equal "$REPO" "$(session_field sess-pin root)" "it starts where it opened"
+( cd "$WT2" && ab sess-pin here > /dev/null )
+assert_equal "$WT2" "$(session_field sess-pin root)" "\`here\` moves it"
+
+ab_hook prompt-submit "$(payload session sid=sess-pin "cwd=$REPO")" > /dev/null
+assert_equal "$WT2" "$(session_field sess-pin root)" \
+  "and a turn whose cwd says otherwise does not drag it back"
+ab_hook prompt-submit "$(payload session sid=sess-pin "cwd=$REPO")" > /dev/null
+ab_hook prompt-submit "$(payload session sid=sess-pin "cwd=$REPO")" > /dev/null
+assert_equal "$WT2" "$(session_field sess-pin root)" "nor does the next, or the next"
+
+# Saying it again somewhere else is how it moves — the pin is a statement, not
+# a cage.
+( cd "$REPO" && ab sess-pin here > /dev/null )
+assert_equal "$REPO" "$(session_field sess-pin root)" "\`here\` elsewhere moves it again"
+
+# A session that has never said anything still follows its cwd, which is what
+# catches Claude Code moving one into a worktree it created.
+new_session sess-free "$REPO"
+ab_hook prompt-submit "$(payload session sid=sess-free "cwd=$INNER")" > /dev/null
+assert_equal "$INNER" "$(session_field sess-free root)" \
+  "a session that has not pinned itself is still followed"
+
+
 finish

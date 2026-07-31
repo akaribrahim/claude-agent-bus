@@ -70,6 +70,15 @@ release`, and `agentbus claim … --steal` — are never themselves blocked. The
 exist to act on a lock somebody else is holding, so the way out of a block
 always runs.
 
+If you are working in a checkout other than the one this chat opened in, say so
+once — the shell returns to the original directory between commands, so nothing
+else can tell:
+
+    cd <your worktree> && agentbus here
+
+That sticks until you say otherwise, and without it the guards judge you in a
+tree you left and will refuse you services you started yourself.
+
 ## Running things
 
 Prefer the scoped form — it points the services at your tree, holds them, runs

@@ -2,6 +2,26 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 1.9.0 — 2026-08-01
+
+Two places the agents turned the guard off, both of them the tool's fault.
+
+- **`agentbus here` now sticks.** Claude Code returns the shell to the directory
+  a chat opened in between tool calls, so a session working in another checkout
+  had every payload afterwards saying the old tree — and the bus followed it,
+  undoing the declaration on the very next turn. An agent was told it was in a
+  checkout it had left, refused services it had started itself, and ran the rest
+  of its work with `AGENTBUS_OFF=1`. Saying `here` somewhere else moves it; it is
+  a statement, not a cage, and a session that has never said anything is still
+  followed.
+- **A resource can have more than one of the thing.** Three agents shot a screen
+  tour on three simulators, each with its own device, and one `simulator` lock
+  serialised work that did not contend at all — so all three ran Maestro with
+  the guard off. `"key": "--udid\\s+(\\S+)"` makes that one lock per device.
+  A command that names no device contends with every one of them, because not
+  knowing which you are about to drive is a reason to wait; and claiming the
+  resource itself still covers them all.
+
 ## 1.8.0 — 2026-08-01
 
 A guard matches the tool, not the target — and the way out of that did not work.
