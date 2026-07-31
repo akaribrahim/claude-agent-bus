@@ -293,6 +293,63 @@ assert_file "$AGENTBUS_HOME/autoclaim/sweep-1.json" \
   "while the one belonging to a command still running is left alone"
 ab_hook post-bash "$(payload post-bash "sid=sess-b" "cwd=$WT2" id=sweep-1)" > /dev/null
 
+# ---- the escape hatch the block message offers actually works ---------------
+#
+# Every denial ends by offering `AGENTBUS_OFF=1 <command>`, and until
+# 2026-08-01 that did nothing: the assignment takes effect in the shell that
+# runs the command, and the hook has already decided by then, in another
+# process, with the session's own environment. An agent reached for a staging
+# database in another country, was queued behind a lock on the local one,
+# read the message, followed it exactly — and was refused a second time. It
+# was right and the tool was wrong.
+
+ab sess-a claim db --why "seeding" > /dev/null
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" "cmd=$CMD" id=off-1)")
+assert_deny "$out" "the command is refused, as it should be"
+assert_contains "$(json_field "$out" hookSpecificOutput permissionDecisionReason)" \
+  "AGENTBUS_OFF=1 <your command>" "and the message offers the way past"
+
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=AGENTBUS_OFF=1 $CMD" id=off-2)")
+assert_allow "$out" "and taking that offer really does get past"
+assert_equal 1 "$(locks_held)" "without claiming anything on the way"
+
+# It is an override, not a hole: the others can see it was taken.
+assert_contains "$(ab sess-a inbox)$(lock_lines)$(ab sess-a status)" \
+  "ran past the guard" "and stepping over a guard leaves a trace on the bus"
+
+# A value that means "off" is not an opt-out.
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=AGENTBUS_OFF=0 $CMD" id=off-3)")
+assert_deny "$out" "AGENTBUS_OFF=0 is not an opt-out"
+ab sess-a release db > /dev/null
+
+# ---- a resource can say when a command is not about it ----------------------
+#
+# `patterns` recognise the tool; a `db` resource describing the local Postgres
+# matches every `psql` there is, including one aimed at staging. `unless` is how
+# the config says which uses are not the guarded thing.
+
+UNLESS_CFG='{"resources":[
+    {"name":"db","desc":"the shared development database","patterns":["\\bpsql\\b"],
+     "unless":["\\.postgres\\.database\\.azure\\.com"]}]}'
+printf '%s' "$UNLESS_CFG" > "$REPO/.claude/agent-bus.json"
+printf '%s' "$UNLESS_CFG" > "$WT2/.claude/agent-bus.json"
+ab sess-a doctor > /dev/null
+
+ab sess-a claim db --why "seeding" > /dev/null
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=psql \"postgresql://u@mkg.postgres.database.azure.com/db\" -c 'select 1'" id=un-1)")
+assert_allow "$out" "a psql aimed at a host the config excludes is not guarded"
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=psql -h localhost -c 'select 1'" id=un-2)")
+assert_deny "$out" "while the local one still is"
+ab sess-a release db > /dev/null
+
+printf '%s' "$IMPLIES_CFG" > "$REPO/.claude/agent-bus.json"
+printf '%s' "$IMPLIES_CFG" > "$WT2/.claude/agent-bus.json"
+ab sess-a doctor > /dev/null
+
 # ---- a session that ends drops what it was holding --------------------------
 
 ab sess-a claim db --why "held across the end of the session" > /dev/null
@@ -300,5 +357,6 @@ assert_equal 1 "$(locks_held)" "the claim is held"
 end_session sess-a
 assert_equal 0 "$(locks_held)" "ending the session released it"
 assert_equal 2 "$(cat "$AGENTBUS_HOME/live-count")" "and it is no longer counted live"
+
 
 finish

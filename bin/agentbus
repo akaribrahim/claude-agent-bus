@@ -2382,6 +2382,30 @@ PASSTHROUGH_VERBS = ("wait", "release")
 PARTY_VERBS = ("here",)
 
 
+def command_opts_out(cmd):
+    """Does this command carry `AGENTBUS_OFF=1` in front of it?
+
+    Every block this plugin writes ends by offering exactly that, and until
+    2026-08-01 it did not work: the assignment takes effect in the shell that
+    runs the command, and the hook has already decided by then, in another
+    process, with the session's own environment. So an agent that read the
+    message, followed it to the letter, and was refused a second time was
+    right and the tool was wrong.
+
+    Honoured here, where it is visible. It stays an override rather than a
+    silent hole because taking it is recorded on the bus — the others can see
+    that a guard was stepped over, which is the difference between an escape
+    hatch and a bypass."""
+    for seg in split_segments(strip_heredocs(cmd or "")):
+        for tok in tokens_of(seg):
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+                break        # past the leading assignments; nothing more to see
+            name, _, value = tok.partition("=")
+            if name == "AGENTBUS_OFF" and value not in ("", "0", "false", "no"):
+                return True
+    return False
+
+
 def command_worktree(cmd):
     """The tree a command says it is operating on, when it says so.
 
@@ -2454,6 +2478,15 @@ def explicit_resources(cmd, cfg):
     return out
 
 
+def _matches(pat, text):
+    """One pattern against one command's targets. A bad regex in somebody's
+    config must not take the hook down with it."""
+    try:
+        return bool(re.search(pat, text, re.I))
+    except re.error:
+        return False
+
+
 def resources_for(cmd, cfg):
     """Which declared resources this command would touch."""
     hits = explicit_resources(cmd, cfg)
@@ -2464,11 +2497,16 @@ def resources_for(cmd, cfg):
     seen = {h["name"]: h for h in hits}
     for text in command_targets(cmd):
         for res in resources:
+            # `patterns` recognise the tool; `unless` recognises that this
+            # particular use of it is not about the thing being guarded. A
+            # `db` resource describing the local Postgres matches every `psql`
+            # there is, including one aimed at a staging server in another
+            # country — which happened on 2026-08-01, and the agent was made to
+            # queue behind a lock on a database it was not touching.
+            if any(_matches(pat, text) for pat in res.get("unless", [])):
+                continue
             for pat in res.get("patterns", []):
-                try:
-                    if not re.search(pat, text, re.I):
-                        continue
-                except re.error:
+                if not _matches(pat, text):
                     continue
                 prev = seen.get(res["name"])
                 if prev is None:
@@ -3262,6 +3300,13 @@ def serving_check(me, hits):
 
 
 def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
+    if command_opts_out(cmd):
+        # Said out loud, because a guard everybody can step over quietly is not
+        # a guard. This is the only place the plugin lets a command past a
+        # decision it would otherwise have made.
+        emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
+             "ran past the guard with AGENTBUS_OFF — %s" % cmd.strip()[:120])
+        return
     cfg = repo_config(me.get("repo_key", ""), me.get("root"))
     # `agentbus wait`, `agentbus release` and `agentbus claim --steal` are the
     # three commands whose entire purpose is to act on a lock somebody else
@@ -3413,8 +3458,15 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         lines += ["", "  " + res["hint"]]
     lines += [
         "",
-        "(If this is wrong, the human can rerun it themselves with "
-        "`AGENTBUS_OFF=1 <command>`.)",
+        "If this command does not touch %s at all — a different host, a remote"
+        % res["name"],
+        "or staging server, a throwaway container — then it is not what this",
+        "guard is for. Say so and it runs:",
+        "  AGENTBUS_OFF=1 <your command>",
+        "That is recorded on the bus, so use it when it is true and not to get",
+        "past a queue. Worth telling whoever maintains the config, too: an",
+        '"unless" pattern on the resource stops it matching next time.',
+        "",
         '(Last resort, only when you know they have finished: '
         '`agentbus claim %s --steal --why "..."`.)' % res["name"],
     ]

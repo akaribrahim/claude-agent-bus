@@ -2,6 +2,25 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 1.8.0 — 2026-08-01
+
+A guard matches the tool, not the target — and the way out of that did not work.
+
+- **`AGENTBUS_OFF=1 <command>` now does what every block message said it did.**
+  It did not: the assignment takes effect in the shell that runs the command,
+  and the hook has already decided by then, in another process, with the
+  session's own environment. An agent reaching for a staging database in another
+  country was queued behind a lock on the local one, read the message, followed
+  it exactly, and was refused a second time. It was right and the tool was
+  wrong. Taking that exit is now recorded on the bus, so it stays an escape
+  hatch rather than becoming a silent bypass.
+- **`unless` patterns on a resource.** `patterns` recognise the tool; a `db`
+  resource describing your local Postgres matches every `psql` there is. `unless`
+  is how the config says which uses are not the guarded thing — a cloud
+  hostname, a staging resource group, a throwaway container.
+- The block message now offers that fourth way out, and says which of the four
+  fits: wait, ask, steal, or "this is not the thing you are guarding".
+
 ## 1.7.0 — 2026-07-31
 
 Windows stops paying for a decision it has not made yet.

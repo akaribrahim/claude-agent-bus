@@ -55,6 +55,16 @@ its detached dev server keeps serving its tree. Point it at yours:
 binary path, or a subshell all reach the same service and produce the same
 silently-wrong result. That is the exact failure this exists to prevent.
 
+**Unless the command genuinely does not touch it.** A guard matches the tool,
+not the target: `psql` against a staging server in another country still looks
+like `psql`. When that is the case, say so and it runs —
+
+    AGENTBUS_OFF=1 <your command>
+
+which is recorded on the bus, so use it when it is true and not to jump a queue.
+Tell the human as well: an `unless` pattern on the resource stops it matching
+next time.
+
 The three commands a block tells you to run — `agentbus wait`, `agentbus
 release`, and `agentbus claim … --steal` — are never themselves blocked. They
 exist to act on a lock somebody else is holding, so the way out of a block
