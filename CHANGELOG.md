@@ -2,6 +2,32 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 1.7.0 — 2026-07-31
+
+Windows stops paying for a decision it has not made yet.
+
+Measured on the Windows 10 host from the 1.6.0 report: a hook with nothing to do
+cost 281 ms, of which 178 ms was spent getting ready to decide there was nothing
+to do — reading and compiling five thousand lines, then `import json, re`, then
+creating thirteen directories that already existed. POSIX skips all of that in a
+5 ms shell script; Windows had no equivalent.
+
+- **`bin/hook.py`** is that fast path in Python. It imports `os` and `sys` and
+  nothing else, scans the payload as text rather than parsing it, and makes the
+  same decisions in the same order as `bin/ab-hook` — there is a test that puts
+  every case through both and compares the answers, because a guard that fires
+  on one platform and not the other is worse than one that fires on neither.
+- When there **is** work it loads the engine as a *module*. Python writes no
+  bytecode cache for a script, so running the engine directly recompiled it on
+  every hook: 4 ms against 30 ms here, 71 ms there.
+- `ensure_dirs` looks once instead of creating thirteen directories every time.
+  74 microseconds here, 12 milliseconds there.
+- The measurement script that found this is checked in at
+  `tests/perf/hook-cost.py`. Its own "module-level definitions" line was
+  mislabelled — that bucket is the engine's `import json, re`, not its own
+  definitions, which cost 0.2 ms. Corrected, because a benchmark that names the
+  wrong thing sends the fix to the wrong place.
+
 ## 1.6.0 — 2026-07-31
 
 First real Windows hardware, and what it found. Two sessions on Windows 10 with

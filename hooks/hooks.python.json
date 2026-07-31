@@ -1,5 +1,5 @@
 {
-  "_comment": "Fallback entry point for hosts without bash (Windows without Git Bash). Exec form: no shell, so nothing depends on path separators or quoting. The installer replaces __PYTHON__ with the interpreter it found. Costs one Python start per hook instead of the ~5 ms shell fast path; correctness first.",
+  "_comment": "Fallback entry point for hosts without bash (Windows without Git Bash). Exec form: no shell, so nothing depends on path separators or quoting. The installer replaces __PYTHON__ with the interpreter it found. It calls bin/hook.py, which is the fast path in Python: it imports os and sys and nothing else, answers 'nothing to do' without loading the engine, and when there is work imports the engine as a module so the bytecode cache applies. Measured on Windows 10: 281 ms per hook became ~105 ms for the common case.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,8 +8,7 @@
             "type": "command",
             "command": "__PYTHON__",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
-              "hook",
+              "${CLAUDE_PLUGIN_ROOT}/bin/hook.py",
               "session-start"
             ],
             "timeout": 20
@@ -24,8 +23,7 @@
             "type": "command",
             "command": "__PYTHON__",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
-              "hook",
+              "${CLAUDE_PLUGIN_ROOT}/bin/hook.py",
               "prompt-submit"
             ],
             "timeout": 12
@@ -41,8 +39,7 @@
             "type": "command",
             "command": "__PYTHON__",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
-              "hook",
+              "${CLAUDE_PLUGIN_ROOT}/bin/hook.py",
               "pre-tool"
             ],
             "timeout": 15
@@ -58,8 +55,7 @@
             "type": "command",
             "command": "__PYTHON__",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
-              "hook",
+              "${CLAUDE_PLUGIN_ROOT}/bin/hook.py",
               "record-write"
             ],
             "timeout": 10
@@ -73,8 +69,7 @@
             "type": "command",
             "command": "__PYTHON__",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
-              "hook",
+              "${CLAUDE_PLUGIN_ROOT}/bin/hook.py",
               "post-bash"
             ],
             "timeout": 10
@@ -89,8 +84,7 @@
             "type": "command",
             "command": "__PYTHON__",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
-              "hook",
+              "${CLAUDE_PLUGIN_ROOT}/bin/hook.py",
               "post-batch"
             ],
             "timeout": 15
@@ -105,8 +99,7 @@
             "type": "command",
             "command": "__PYTHON__",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
-              "hook",
+              "${CLAUDE_PLUGIN_ROOT}/bin/hook.py",
               "session-end"
             ],
             "timeout": 15
@@ -121,8 +114,7 @@
             "type": "command",
             "command": "__PYTHON__",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
-              "hook",
+              "${CLAUDE_PLUGIN_ROOT}/bin/hook.py",
               "subagent-start"
             ],
             "timeout": 12
@@ -137,8 +129,7 @@
             "type": "command",
             "command": "__PYTHON__",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/bin/agentbus",
-              "hook",
+              "${CLAUDE_PLUGIN_ROOT}/bin/hook.py",
               "subagent-stop"
             ],
             "timeout": 12

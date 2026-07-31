@@ -166,6 +166,18 @@ ab_hook() {   # <event> [<json payload>] → the hook's stdout
   printf '%s' "$out"
 }
 
+# The Python fast path — what Windows actually runs. It has to make the same
+# decisions as the bash one; anything else is a guard that exists on one
+# platform and not the other.
+ab_pyhook() {   # <event> [<json payload>] → the hook's stdout
+  local ev="$1" payload='{}' out rc
+  [ $# -gt 1 ] && payload="$2"
+  out=$(printf '%s' "$payload" | python3 "$AB_ROOT/bin/hook.py" "$ev")
+  rc=$?
+  _hook_checked "py $ev" "$rc" "$out"
+  printf '%s' "$out"
+}
+
 # Same, but straight into the Python engine — the path Windows uses, where
 # there is no fast path to gate anything.
 ab_engine() {  # <event> [<json payload>] → the hook's stdout

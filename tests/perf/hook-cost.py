@@ -182,7 +182,7 @@ def main():
                    "import io;g={'__name__':'perf'};"
                    "exec(compile(io.open(%r,encoding='utf-8').read(),'e','exec'),g)"
                    % ENGINE]))
-    row("... and run its module-level definitions", ex,
+    row("... and its `import json, re` (NOT its own defs)", ex,
         "+%.0f ms over compiling" % (ex - comp))
     rest = off - ex
     row("... and everything else to the first return", max(0.0, rest),
@@ -221,7 +221,17 @@ def main():
     print("  %-46s %8.0f us  %s" % ("one isdir, which could replace it", st,
                                     "%.0fx cheaper" % (mk / st if st else 0)))
 
-    print("\nSUSPICION 3 — is there a fast path in front of the engine?")
+    print("\nTHE PYTHON FAST PATH — what Windows now runs")
+    gate = os.path.join(ROOT, "bin", "hook.py")
+    if os.path.exists(gate):
+        quiet = ms(spawn([py, gate, "pre-tool"], PAYLOAD))
+        row("a hook with nothing to do", quiet,
+            "%.0f ms saved against the engine" % (off - quiet))
+        row("  ... its floor is the interpreter", bare, "so this is close to free")
+    else:
+        print("  ! no bin/hook.py in this copy")
+
+    print("\nSUSPICION 3 — is there a shell fast path in front of it?")
     hook = os.path.join(ROOT, "bin", "ab-hook")
     wired = ""
     try:
