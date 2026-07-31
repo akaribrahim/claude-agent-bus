@@ -135,4 +135,27 @@ out=$(export AGENTBUS_OFF=1; ab_engine pre-tool "$PAYLOAD")
 assert_empty "$out" "AGENTBUS_OFF silences the engine"
 assert_equal 0 "$(locks_held)" "AGENTBUS_OFF claims nothing on the way past"
 
+# ---- a payload it cannot read is said out loud, not swallowed ---------------
+#
+# A hook that returns nothing is byte-identical to one that considered the call
+# and allowed it, so a guard that fails open must say so. On Windows,
+# PowerShell prepends a UTF-8 BOM when piping to a native executable and
+# `json.loads` raises on the first character; three debugging sessions were
+# spent concluding the ownership guard was broken when the payload had simply
+# not parsed. The same `except ValueError` also caught `UnicodeDecodeError`,
+# which is how a filename with a byte undefined in the console codepage turned
+# the guard off for that call.
+
+P=$(payload bash sid=sess-solo "cwd=$REPO" "cmd=git add -A" id=bom-1)
+out=$(printf '\357\273\277%s' "$P" | "$AB_ROOT/bin/agentbus" hook pre-tool 2>"$TEST_TMP/bom.err")
+rc=$?
+assert_equal 0 "$rc" "a payload with a UTF-8 BOM still exits 0"
+assert_equal "" "$(cat "$TEST_TMP/bom.err")" "and is read, not reported as broken"
+
+out=$(printf 'this is not json' | "$AB_ROOT/bin/agentbus" hook pre-tool 2>"$TEST_TMP/bad.err")
+assert_equal 0 "$?" "a payload that really is unreadable still exits 0"
+assert_equal "" "$out" "prints nothing on stdout, which the session parses"
+assert_contains "$(cat "$TEST_TMP/bad.err")" "guard was skipped"   "and says on stderr that it failed open"
+
+
 finish

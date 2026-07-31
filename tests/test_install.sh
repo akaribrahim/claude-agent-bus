@@ -61,14 +61,58 @@ assert_contains "$out" "already allowlisted" "and is safe to run twice"
 # thing the reader had just installed.
 
 PLUGIN_COPY="$FAKE_HOME/.claude/plugins/cache/agent-bus/agent-bus/1.0.0"
-mkdir -p "$PLUGIN_COPY"
+mkdir -p "$PLUGIN_COPY/.claude-plugin"
 cp -R "$AB_ROOT/bin" "$AB_ROOT/hooks" "$PLUGIN_COPY/"
+cp "$AB_ROOT/.claude-plugin/plugin.json" "$PLUGIN_COPY/.claude-plugin/"
 out=$(env HOME="$FAKE_HOME" PATH="$BARE_PATH" AGENTBUS_HOME="$AGENTBUS_HOME" \
   python3 "$PLUGIN_COPY/bin/agentbus" install 2>&1)
-assert_contains "$out" "installed from a marketplace" \
-  "an install under .claude/plugins is recognised"
+assert_contains "$out" "the copy Claude Code loads" \
+  "an install under plugins/cache knows it is the one that is loaded"
 assert_not_contains "$out" "move or re-clone" \
   "and is not told to move itself somewhere it would stop being loaded"
+
+# ---- and the clone it was fetched from patches the copy that is loaded -------
+#
+# A marketplace install leaves two directories: the clone it fetched, under
+# plugins/marketplaces, and the copy under plugins/cache that Claude Code
+# actually reads. The installer derived its target from its own __file__, so
+# run from the clone it patched the clone and said "Claude Code loads it from
+# here" — confidently, and wrongly. On Windows the cache copy was then left
+# holding the committed POSIX wiring, which means `bash -> ab-hook -> python3`
+# against a stub that is not Python: every hook died, no session registered,
+# and both the installer and `doctor` reported success because each was
+# describing the copy it had just touched. Reported from Windows 10 on
+# 2026-07-30, and again on the next version bump, because the cache path
+# carries the version.
+
+CLONE="$FAKE_HOME/.claude/plugins/marketplaces/agent-bus"
+mkdir -p "$CLONE/.claude-plugin"
+cp -R "$AB_ROOT/bin" "$AB_ROOT/hooks" "$CLONE/"
+cp "$AB_ROOT/.claude-plugin/plugin.json" "$CLONE/.claude-plugin/"
+# Put the cache copy back the way a fresh install leaves it: the committed
+# POSIX wiring, which is what has to be replaced.
+cp "$AB_ROOT/hooks/hooks.posix.json" "$PLUGIN_COPY/hooks/hooks.json"
+
+out=$(env HOME="$FAKE_HOME" PATH="$BARE_PATH" AGENTBUS_HOME="$AGENTBUS_HOME" \
+  python3 "$CLONE/bin/agentbus" install --python-hooks 2>&1)
+assert_contains "$out" "the marketplace clone" \
+  "the clone knows it is not the copy that gets loaded"
+assert_not_contains "$out" "loads it from here" \
+  "and no longer claims otherwise"
+assert_contains "$out" "also wired" "it says it reached the other copy"
+assert_not_contains "$(cat "$PLUGIN_COPY/hooks/hooks.json")" "ab-hook" \
+  "and the copy Claude Code loads really was rewired"
+assert_not_contains "$(cat "$PLUGIN_COPY/hooks/hooks.json")" "__PYTHON__" \
+  "with a real interpreter path, not the placeholder"
+
+# doctor has to be able to see this too: reporting only the copy it is running
+# from is what made a dead install look healthy.
+cp "$AB_ROOT/hooks/hooks.python.json" "$PLUGIN_COPY/hooks/hooks.json"
+out=$(env HOME="$FAKE_HOME" PATH="$BARE_PATH" AGENTBUS_HOME="$AGENTBUS_HOME" \
+  python3 "$CLONE/bin/agentbus" doctor 2>&1)
+assert_contains "$out" "never installed" \
+  "doctor names a loaded copy still holding the __PYTHON__ placeholder"
+assert_contains "$out" "Claude Code loads this one" "and says why it matters"
 
 OTHER="$TEST_TMP/somewhere-else"
 mkdir -p "$OTHER"

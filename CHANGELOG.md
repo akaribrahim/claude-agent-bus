@@ -2,6 +2,46 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 1.6.0 — 2026-07-31
+
+First real Windows hardware, and what it found. Two sessions on Windows 10 with
+a Turkish locale and an embeddable Python. Most of the product worked first try
+— presence, messaging, locks, the ownership guard, `here`, `serves`, renaming —
+and the rest is below. Three of the six are not Windows-specific.
+
+- **`agentbus own worktree` protected nothing and said it did.** `own` takes a
+  path, `claim` takes a resource; they look identical on a command line. A glob
+  with no wildcard means a directory, there is no `worktree` directory, so the
+  declaration covered nothing — and it was recorded, `status` printed it under
+  "Declared ownership" and "Free: worktree" in the same output, and the session
+  told three other agents the checkout was safe. Refused now, pointing at
+  `claim`. A glob that matches nothing yet is still allowed — claiming ground
+  before you break it is legitimate — but it says so.
+- **A marketplace install patched the wrong copy.** The install leaves the
+  clone it fetched *and* a versioned copy under `plugins/cache`, and only the
+  second is loaded. The installer derived its target from its own location, so
+  run from the clone it patched the clone and announced "Claude Code loads it
+  from here". On Windows the loaded copy then kept the committed POSIX wiring —
+  `bash → ab-hook → python3` against a stub that is not Python — so every hook
+  died, no session registered, and both the installer and `doctor` reported
+  success because each described the copy it had just touched. Both now find
+  every loaded copy; `doctor` names any that is still unwired.
+- **A guard could fail open in silence.** A UTF-8 BOM — which PowerShell
+  prepends when piping to a native executable — made the payload unparseable,
+  and the handler returned nothing, which is byte-identical to "considered this
+  and allowed it". Same path for a filename containing a byte undefined in the
+  console codepage. Payloads are read as bytes and decoded UTF-8 now, and a
+  parse failure says on stderr that the guard was skipped.
+- **`git -C <path>` is read as the tree the command is about.** A chat that
+  works on another worktree by path never changes directory, so the bus placed
+  it in the repository it was launched in for ever — four chats rendered on one
+  branch in one worktree while one was somewhere else. It also turns out that
+  `git -C x add` matched no pattern anybody writes, because git's global options
+  sit between the command and its subcommand: those are stripped before matching
+  now, so `git -C <path> checkout` is guarded like any other.
+- **Non-ASCII is legible on a Windows console**, and the machine is no longer
+  called a Mac in text printed on machines that are not Macs.
+
 ## 1.5.0 — 2026-07-31
 
 The two gaps left open, and a third found while closing them.

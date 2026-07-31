@@ -1516,6 +1516,30 @@ def glob_prefix(glob):
     return glob[:cut]
 
 
+def ownership_covers(me, glob):
+    """Whether a declaration would actually guard anything: "" when it does,
+    "resource" when the caller has typed a resource name where a path goes, and
+    "nothing" when it matches no path in the repository.
+
+    `own` and `claim` take arguments that look the same and mean different
+    things — a path glob and a resource name — and the failure is silent in the
+    direction that matters: the declaration is recorded, `status` lists it, and
+    nothing is protected."""
+    root = me.get("root")
+    if not glob or not root:
+        return ""
+    if any(ch in glob for ch in "*?["):
+        import glob as globmod
+        hits = globmod.glob(os.path.join(root, glob.replace("/", os.sep)))
+        return "" if hits else "nothing"
+    if os.path.exists(os.path.join(root, glob.replace("/", os.sep))):
+        return ""
+    cfg = repo_config(me.get("repo_key"), root)
+    if any(r.get("name") == glob for r in cfg.get("resources", [])):
+        return "resource"
+    return "nothing"
+
+
 def owners_of(path, me, sessions):
     """[(session, declaration)] for every live session that has declared this
     path — this session included, so callers can see their own claim."""
@@ -2258,6 +2282,36 @@ def tokens_of(segment):
         return segment.split()
 
 
+def strip_git_globals(toks):
+    """`git -C /path -c x=y add -A` → `git add -A`.
+
+    git's global options sit between the command and its subcommand, and every
+    pattern anybody writes — `\\bgit\\s+add\\b` — expects the two to be adjacent.
+    So a `git -C <path> checkout` matched nothing and was guarded by nothing,
+    which is exactly how a chat that works on another worktree by path slips
+    past every guard in the config. Found on Windows on 2026-07-31 while
+    teaching the guard to read `-C`."""
+    if not toks or os.path.basename(toks[0]) != "git":
+        return toks
+    out, i = [toks[0]], 1
+    while i < len(toks):
+        t = toks[i]
+        if t in ("-C", "-c", "--namespace", "--work-tree", "--git-dir",
+                 "--exec-path", "--config-env"):
+            i += 2
+            continue
+        if t.startswith(("--git-dir=", "--work-tree=", "--namespace=",
+                         "--exec-path=", "--config-env=")):
+            i += 1
+            continue
+        if t in ("-p", "--paginate", "-P", "--no-pager", "--bare",
+                 "--no-replace-objects", "--literal-pathspecs"):
+            i += 1
+            continue
+        break
+    return out + toks[i:]
+
+
 def is_readonly(head, toks):
     """A guarded word behind a read-only command is a mention, not a use.
 
@@ -2287,6 +2341,7 @@ def command_targets(cmd, depth=0):
             toks = toks[1:]
         if not toks:
             continue
+        toks = strip_git_globals(toks)
         head = os.path.basename(toks[0])
         if head in SHELL_HEADS and depth < 3:
             # `bash -c '…'` — that quoted argument is a command, not prose.
@@ -2316,6 +2371,39 @@ PASSTHROUGH_VERBS = ("wait", "release")
 # Verbs that take no resource but still need to know which party ran them, so
 # the guard has to leave a hint for these too.
 PARTY_VERBS = ("here",)
+
+
+def command_worktree(cmd):
+    """The tree a command says it is operating on, when it says so.
+
+    `git -C <path>` and `git --git-dir=<path>` name a checkout outright, and a
+    chat that works on another worktree that way never changes directory — so
+    everything that infers a tree from cwd places it in the repository it was
+    launched in, permanently. Reported from Windows on 2026-07-31, where four
+    chats rendered on one branch in one worktree and one of them was somewhere
+    else entirely.
+
+    The guard is already tokenising this command, so reading the path costs
+    nothing and makes the common case right without asking the agent to run
+    anything."""
+    for seg in split_segments(strip_heredocs(cmd or "")):
+        toks = tokens_of(seg)
+        while toks and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0])
+                        or os.path.basename(toks[0]) in WRAPPERS):
+            toks = toks[1:]
+        if not toks or os.path.basename(toks[0]) != "git":
+            continue
+        for i, tok in enumerate(toks[1:], 1):
+            path = ""
+            if tok == "-C" and i + 1 < len(toks):
+                path = toks[i + 1]
+            elif tok.startswith("--git-dir="):
+                path = tok[len("--git-dir="):]
+                if os.path.basename(path) == ".git":
+                    path = os.path.dirname(path)
+            if path and os.path.isdir(path):
+                return os.path.realpath(path)
+    return ""
 
 
 def explicit_resources(cmd, cfg):
@@ -2427,7 +2515,7 @@ def roster_text(me, sessions):
                 lines.append("      owns: %s" % owned)
     if other:
         labels = sorted({s.get("repo_label", "?") for s in other})
-        lines.append("Elsewhere on this Mac: %d session%s (%s)." % (
+        lines.append("Elsewhere on this machine: %d session%s (%s)." % (
             len(other), "" if len(other) == 1 else "s", ", ".join(labels)))
     return "\n".join(lines)
 
@@ -2512,7 +2600,10 @@ RULES = (
     "are blocked with the reason. Useful: `agentbus status`, "
     "`agentbus serve <res>` to point a service at your worktree, "
     "`agentbus run <res> -- <cmd>` to do that and run one command, "
-    "`agentbus post \"...\"` to tell the others something they cannot see."
+    "`agentbus post \"...\"` to tell the others something they cannot see. "
+    "If you are working in a checkout other than the one this chat opened in, "
+    "run `agentbus here` from it once — otherwise the others are told you are "
+    "somewhere you are not, and the guards judge you there."
     "\n\nOne rule that is not enforced by a block: if a build or test failure "
     "names files you did not edit, do not fix them. Another session is probably "
     "mid-edit and the error will disappear on its own — wait and re-run. If it "
@@ -2728,7 +2819,7 @@ def hook_session_start(payload):
         return
 
     blocks = ["## agent-bus", "You are `%s`. %d other Claude Code session%s live on "
-              "this Mac right now." % (rec["agent"], len(others),
+              "this machine right now." % (rec["agent"], len(others),
                                        " is" if len(others) == 1 else "s are")]
     r = roster_text(rec, sessions)
     if r:
@@ -2908,11 +2999,17 @@ def hook_pre_tool(payload):
         me = caller_view(me, payload.get("cwd"))
     sessions = load_sessions()
     if tool == "Bash":
+        cmd = ti.get("command", "")
+        # A command that names a checkout outright is better evidence than the
+        # directory the session happens to be sitting in — `git -C <path>` is
+        # how a chat works on a worktree it never changes into.
+        stated = command_worktree(cmd)
+        if stated:
+            me = caller_view(me, stated)
         # Before anything can deny it: this is the last moment at which who is
         # running an `agentbus` command is still known.
-        leave_party_hint(me, ti.get("command", ""))
-        return guard_bash(me, ti.get("command", ""), sessions,
-                          payload.get("tool_use_id"))
+        leave_party_hint(me, cmd)
+        return guard_bash(me, cmd, sessions, payload.get("tool_use_id"))
     if tool in ("Edit", "Write", "NotebookEdit"):
         return guard_file(me, ti.get("file_path") or ti.get("notebook_path") or "",
                           sessions)
@@ -4421,6 +4518,33 @@ def cli_own(args):
         glob = normalise_glob(raw, me.get("root"))
         if not glob:
             continue
+        covers = ownership_covers(me, glob)
+        if covers == "resource":
+            # `own` takes a path; `claim` takes a resource. They look identical
+            # on the command line and they are different namespaces, and getting
+            # them the wrong way round produces the one thing this project
+            # refuses to ship: a guard somebody believes they have set which
+            # protects nothing. Reported from Windows on 2026-07-31, where a
+            # session ran `agentbus own worktree`, was told it now owned
+            # something, and announced to three other agents that the checkout
+            # was safe. It was not, and `status` printed the declaration and
+            # "Free: worktree" in the same breath.
+            print("agent-bus: '%s' is a resource, not a path — `own` declares "
+                  "part of the tree,\nand there is no `%s` in this repository. "
+                  "You almost certainly want:\n  agentbus claim %s%s\n\n"
+                  "If you did mean a path, give one that exists, or a glob: "
+                  "`%s/**`."
+                  % (glob, glob, glob, (' --why "%s"' % why) if why else "",
+                     glob), file=sys.stderr)
+            sys.exit(1)
+        if covers == "nothing":
+            # Not refused: a glob for a directory about to be created is a
+            # legitimate way to claim ground before you break it. But it is said
+            # out loud, because the silent version of this is indistinguishable
+            # from a working declaration.
+            print("agent-bus: note — nothing in this repository matches '%s' "
+                  "right now, so it\nguards nothing yet." % glob,
+                  file=sys.stderr)
         decs = [d for d in decs if d.get("glob") != glob]
         decs.append({"glob": glob, "why": why, "at": now(), "strict": strict})
         added.append(glob)
@@ -4859,6 +4983,62 @@ def plugin_root():
     return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
+def plugin_name():
+    manifest = read_json(os.path.join(plugin_root(), ".claude-plugin",
+                                      "plugin.json")) or {}
+    return manifest.get("name") or "agent-bus"
+
+
+def loaded_copies():
+    """Every copy of this plugin Claude Code will actually load hooks from.
+
+    A marketplace install leaves two directories and only one of them is read:
+
+        ~/.claude/plugins/marketplaces/<mp>/            the clone it fetched
+        ~/.claude/plugins/cache/<mp>/<plugin>/<ver>/    what is loaded
+
+    `plugin_root` answers with whichever copy this file happens to be in, so an
+    installer run out of the marketplace clone patched that clone and left the
+    cache holding the repository's committed `hooks.json` — the POSIX variant,
+    which on Windows means `bash → ab-hook → python3 shebang → a stub that is
+    not Python`. Every hook died, no session registered, and both the installer
+    and `doctor` reported success, because each was describing the copy it had
+    just touched. Reported from Windows 10 on 2026-07-30, and again on the
+    1.5.0 update, because the cache path carries the version and a bump creates
+    a fresh unpatched directory.
+
+    Older versions are kept rather than replaced, which is what lets a session
+    that is already running survive an update — so every version found is
+    returned, not just the newest."""
+    cache = os.path.join(HOME, ".claude", "plugins", "cache")
+    name = plugin_name()
+    out = []
+    for depth in ("*", "*/*", "*/*/*"):
+        import glob as globmod
+        for d in globmod.glob(os.path.join(cache, depth)):
+            manifest = read_json(os.path.join(d, ".claude-plugin", "plugin.json"))
+            if manifest and manifest.get("name") == name:
+                out.append(os.path.realpath(d))
+    here = os.path.realpath(plugin_root())
+    return sorted(set(p for p in out if p != here))
+
+
+def hooks_look_wrong(root):
+    """Why a copy's wiring cannot work here, or "" when it looks fine."""
+    path = os.path.join(root, "hooks", "hooks.json")
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        return "no hooks.json at all"
+    if "__PYTHON__" in text:
+        return "still has the __PYTHON__ placeholder — never installed"
+    if IS_WIN and "ab-hook" in text:
+        return ("wired to the shell fast path, which needs bash and a real "
+                "python3 on PATH")
+    return ""
+
+
 def cli_install(args):
     """Wire this machine up. Both installer scripts are thin wrappers around this,
     so Windows and POSIX get the same decisions made by the same code."""
@@ -4868,14 +5048,19 @@ def cli_install(args):
     want = os.path.join(HOME, ".claude", "skills", "agent-bus")
     print("agent-bus installer\n")
     here = os.path.realpath(root)
+    others = loaded_copies()
     if here == os.path.realpath(want):
         print("  + location: %s" % root)
-    elif os.path.join(".claude", "plugins") in here:
-        # Installed from a marketplace. Claude Code loads it from exactly here,
-        # so telling the reader to move it would break the thing they just
-        # installed — which is what this said until the flow was actually run.
+    elif os.path.join(".claude", "plugins", "cache") in here:
         print("  + location: %s" % root)
-        print("    installed from a marketplace; Claude Code loads it from here")
+        print("    the marketplace cache — this is the copy Claude Code loads")
+    elif os.path.join(".claude", "plugins") in here:
+        # The marketplace *clone*, which is the source and not what is loaded.
+        # Saying "Claude Code loads it from here" was confidently wrong, and on
+        # Windows it meant a successful-looking install where every hook died.
+        print("  + location: %s" % root)
+        print("    the marketplace clone — Claude Code loads the cache copy, "
+              "not this one")
     else:
         print("  ! this clone is at %s" % root)
         print("  ! Claude Code loads it only from %s, or from a marketplace "
@@ -4902,6 +5087,17 @@ def cli_install(args):
         return
     print("  + hooks: %s" % ("shell fast path (~5 ms per hook)" if use_bash
                              else "python fallback (no shell needed)"))
+
+    # And every other copy Claude Code might load, which is the whole point:
+    # patching only the directory this file sits in is how an install succeeds
+    # while the hooks that actually run are the committed POSIX ones.
+    for other in others:
+        try:
+            with open(os.path.join(other, "hooks", "hooks.json"), "w") as fh:
+                fh.write(text)
+            print("  + also wired: %s" % short_path(other))
+        except OSError as exc:
+            print("  ! could not wire %s: %s" % (short_path(other), exc))
 
     for name in ("bin/agentbus", "bin/ab-hook", "install.sh"):
         p = os.path.join(root, name)
@@ -5026,10 +5222,20 @@ def cli_doctor(_args):
         if missing:
             bits.append("%d pattern(s) with no literal to pre-filter on" % len(missing))
         print("  %-12s %s" % (res["name"], "; ".join(bits)))
-    plugin_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    hooks = os.path.join(plugin_root, "hooks", "hooks.json")
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    hooks = os.path.join(root, "hooks", "hooks.json")
     print("hooks        : %s" % (hooks if os.path.exists(hooks)
                                  else "MISSING — run the installer"))
+    # The copy this is running from is not necessarily the copy Claude Code
+    # loads. Reporting only the one just patched is how a Windows install looked
+    # healthy while every hook was dying — see loaded_copies.
+    for other in loaded_copies():
+        why = hooks_look_wrong(other)
+        print("  %s %s%s" % ("!" if why else "+", short_path(other),
+                             ("  — %s" % why) if why else "  (wired)"))
+        if why:
+            print("      Claude Code loads this one. Re-run: %s install"
+                  % os.path.join(other, "bin", "agentbus"))
     # Every block message this plugin writes tells the agent to run `agentbus
     # <something>`. If that command does not resolve, the agent is handed advice
     # it cannot act on, so this is worth a line of its own.
@@ -5082,7 +5288,37 @@ USAGE = """agentbus — coordination between parallel Claude Code sessions
 """
 
 
+def read_payload():
+    """The hook payload, from bytes, as UTF-8 whatever the console thinks.
+
+    `sys.stdin.read()` decodes with whatever encoding Python picked, which off
+    Windows is UTF-8 and on Windows is the locale codepage unless something in
+    the environment says otherwise. Two ways that fails, both measured on a
+    Turkish Windows 10 host with `cp1254`:
+
+      - a UTF-8 BOM — which PowerShell prepends when piping to a native
+        executable — makes `json.loads` raise on the very first character;
+      - a payload naming a file with non-ASCII in it either decodes to mojibake,
+        so a glob or pattern whose matched part is not ASCII misses silently, or
+        hits a byte undefined in the codepage and raises `UnicodeDecodeError`.
+
+    `utf-8-sig` strips the BOM if one is there and is plain UTF-8 otherwise, and
+    reading `buffer` skips the locale guess entirely."""
+    raw = sys.stdin.buffer.read()
+    return json.loads(raw.decode("utf-8-sig", "replace") or "{}")
+
+
 def main():
+    # Windows consoles are not UTF-8 by default, so every message this prints
+    # with an em-dash in it arrives as mojibake — which is enough to make agents
+    # on a Turkish machine start transliterating what they say to each other so
+    # it stays readable.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except (OSError, ValueError):
+                pass
     ensure_dirs()
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help", "help"):
@@ -5092,8 +5328,17 @@ def main():
         if len(argv) < 2 or argv[1] not in HOOKS:
             return
         try:
-            payload = json.loads(sys.stdin.read() or "{}")
-        except ValueError:
+            payload = read_payload()
+        except ValueError as exc:
+            # Never silently. A hook that returns nothing is byte-identical to
+            # one that considered the call and allowed it, so a guard that fails
+            # open has to say it did — on stderr, which never reaches the
+            # session's parser. Three separate debugging sessions on Windows
+            # were spent concluding the ownership guard was broken when the
+            # payload had simply not parsed.
+            sys.stderr.write("agent-bus: could not read the %s payload (%s) — "
+                             "the guard was skipped for this call\n"
+                             % (argv[1], exc))
             return
         HOOKS[argv[1]](payload)
         return

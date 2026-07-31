@@ -105,7 +105,7 @@ git clone https://github.com/akaribrahim/claude-agent-bus ~/.claude/skills/agent
 ~/.claude/skills/agent-bus/install.sh
 ```
 
-Windows (PowerShell) — implemented, not verified on real hardware:
+Windows (PowerShell) — verified on Windows 10 with an embeddable Python:
 
 ```powershell
 git clone https://github.com/akaribrahim/claude-agent-bus $env:USERPROFILE\.claude\skills\agent-bus
@@ -331,9 +331,15 @@ free.
   each subagent as its own party, but the file-collision guard and the
   interference note still work per session, so two subagents editing one file
   are not warned about each other.
-- **Windows is implemented but unverified.** The Python entry point, the process
-  checks and the installer all exist and have never been run on real Windows
-  hardware. Treat it as untested rather than supported.
+- **Windows is verified but young.** Two sessions were run on Windows 10 with a
+  Turkish locale and an embeddable Python; presence, messaging, locks, the
+  ownership guard, `here`, `status`, `serves` and session renaming all behaved.
+  What that run also found is fixed here: a marketplace install patched the
+  clone rather than the cache copy Claude Code loads, so every hook died while
+  the installer reported success; a UTF-8 BOM on a payload turned a guard off
+  silently; and the console mangled every non-ASCII message. After a
+  `claude plugin update`, re-run the installer — the cache path carries the
+  version, so a bump leaves a fresh unwired copy.
 
 ## Tests
 

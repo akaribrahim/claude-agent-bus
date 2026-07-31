@@ -204,4 +204,43 @@ assert_no_file "$AGENTBUS_HOME/owns/sess-a.json" \
 out=$(edit sess-b "$REPO" "$REPO/api/service.py")
 assert_allow "$out" "and the block dies with it"
 
+
+# ---- a declaration that guards nothing is refused, not recorded -------------
+#
+# `own` takes a path glob and `claim` takes a resource name; the two look
+# identical on a command line and are different namespaces. On 2026-07-31 a
+# session on Windows meaning to hold the `worktree` *resource* while switching
+# branches ran `agentbus own worktree`. A glob with no wildcard is read as a
+# directory, there is no `worktree` directory, so it covered nothing — and the
+# command succeeded, `status` printed it under "Declared ownership" and "Free:
+# worktree" in the same output, and the session told three other agents the
+# checkout was safe. It was not.
+
+OWNREPO=$(make_repo ownres)
+mkdir -p "$OWNREPO/api"
+printf x > "$OWNREPO/api/one.py"
+set_config "$OWNREPO" <<'JSON'
+{"resources": [{"name": "worktree", "desc": "this checkout's tree and index",
+                "scope": "worktree", "patterns": ["\\bgit\\s+add\\b"]}]}
+JSON
+commit_all "$OWNREPO"
+new_session sess-own "$OWNREPO"
+new_session sess-own2 "$OWNREPO"
+out=$(ab sess-own own worktree --why "switching branches" 2>&1)
+assert_contains "$out" "is a resource, not a path" "a resource name is refused"
+assert_contains "$out" "agentbus claim worktree" "pointing at the verb that works"
+assert_not_contains "$(ab sess-own own --list)" "worktree" "and nothing is recorded"
+
+# A glob that matches nothing yet is allowed — claiming ground before you break
+# it is legitimate — but it is said out loud, because the silent version is
+# indistinguishable from a working declaration.
+out=$(ab sess-own own "docs/**" --why "about to write these" 2>&1)
+assert_contains "$out" "guards nothing yet" "an empty glob is flagged"
+assert_contains "$(ab sess-own own --list)" "docs/**" "while still being recorded"
+ab sess-own disown "docs/**" > /dev/null
+
+out=$(ab sess-own own "api/**" --why "real" 2>&1)
+assert_not_contains "$out" "guards nothing" "a glob that matches says nothing extra"
+ab sess-own disown "api/**" > /dev/null
+
 finish

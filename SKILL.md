@@ -114,6 +114,11 @@ they are on their own branch, so nothing is being overwritten, and blocking them
 would be wrong. Add `--strict` when the parallel edit would still be painful to
 merge and you want it stopped there too.
 
+`own` takes a **path**; `claim` takes a **resource**. They look the same on a
+command line and they are different namespaces — `agentbus own worktree` means
+the directory `./worktree`, not the `worktree` resource, and if no such
+directory exists it guards nothing. That is refused now rather than recorded.
+
 Two things worth knowing before you rely on it:
 
 - **`*` crosses directory separators here.** `src/*` covers `src/a/b/c.ts`, not

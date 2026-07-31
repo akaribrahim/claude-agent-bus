@@ -40,6 +40,13 @@ json.dump({"resources": [{
     # this, so the recorded pid is the shell's and the listener is its child.
     "start": "python3 -m http.server %d --bind 127.0.0.1 ; true" % port2,
     "patterns": [r":%d\b" % port2],
+}, {
+    # Per checkout, which is what makes `git -C <path>` worth reading: the lock
+    # it takes has to be the named tree's, not the caller's.
+    "name": "worktree",
+    "desc": "this checkout's tree and index",
+    "scope": "worktree",
+    "patterns": [r"\bgit\s+add\b"],
 }]}, open(path, "w"), indent=2)
 PY
 commit_all "$REPO"
@@ -280,5 +287,36 @@ commit_all "$OTHER"
 ( cd "$OTHER" && ab sess-cli name > /dev/null )
 assert_equal "$REPO" "$(session_field sess-cli root)" \
   "and a call from an unrelated repository changes nothing at all"
+
+# ---- a command that names a checkout is believed over the session's cwd -----
+#
+# `git -C <path>` is how a chat works on a worktree it never changes into, and
+# everything that infers a tree from cwd then places it in the repository it was
+# launched in, permanently. Reported from Windows on 2026-07-31: four chats
+# rendered on one branch in one worktree, and one of them was somewhere else
+# entirely — while its own generated name disagreed with the branch beside it.
+
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=git -C $REPO add -A" id=gc-1)")
+assert_allow "$out" "a git -C command is judged in the tree it names"
+assert_equal 1 "$(locks_held)" "and takes that checkout's lock"
+lk=$(ls "$AGENTBUS_HOME"/locks/ | head -1)
+ab_hook post-bash "$(payload post-bash sid=sess-b "cwd=$WT2" id=gc-1)" > /dev/null
+
+# The proof that it is the named tree and not the session's: a second session
+# standing in that tree is blocked by the lock the first one just took there.
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=git -C $REPO add -A" id=gc-2)")
+assert_allow "$out" "it can be taken again once released"
+out=$(ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" "cmd=git add -A" id=gc-3)")
+assert_deny "$out" "and a session working in that checkout is refused while it is held"
+ab_hook post-bash "$(payload post-bash sid=sess-b "cwd=$WT2" id=gc-2)" > /dev/null
+
+# A path that is not a directory is ignored rather than guessed at.
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=git -C /no/such/place add -A" id=gc-4)")
+assert_allow "$out" "a -C path that does not exist falls back to the session's tree"
+ab_hook post-bash "$(payload post-bash sid=sess-b "cwd=$WT2" id=gc-4)" > /dev/null
+
 
 finish
