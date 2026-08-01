@@ -2,6 +2,42 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.0.0 — 2026-08-02
+
+Stop taking turns on one port. Give each checkout its own.
+
+Counted over everything the bus has ever refused on this machine: 119 of 141
+blocks were the same sentence — "that service is serving a different checkout" —
+for three resources that could simply have been three services. 87 per cent of
+every refusal, and all 107 handovers, existed because two worktrees were sharing
+a port they did not have to share.
+
+- **`"ports": "per-worktree"`** on a resource gives every checkout its own,
+  derived from the checkout's path — so it is the same every time, with no state
+  to lose, and a deleted registry changes nothing. The repository's **original**
+  checkout keeps the port the config declares, which is what makes this
+  additive: nothing changes for whoever works in the main clone, or for the
+  README that names :8082.
+- **`agentbus port <res>`** and **`agentbus env`** hand the numbers to a shell.
+  `eval "$(agentbus env)"` covers the whole configuration, allocated or not.
+- `${PORT}` in `start` and `ready` is substituted; failing that, a literal
+  occurrence of the declared port is. A pattern for the new port is added, or a
+  command aimed at it would match nothing. And the lock becomes per checkout,
+  because two checkouts no longer share the thing being locked.
+- **Reaching for another checkout's port is refused.** Isolation removes
+  contention and introduces exactly one new way to be silently wrong: an agent
+  types the port it read in a README and quietly exercises another tree's code.
+  Nothing else would catch it — there is no lock to contend for and no service
+  serving the wrong checkout, because everything is behaving as designed. The
+  check does not depend on a pattern having matched, because each worktree's
+  patterns name only its own port.
+- Resources that do not opt in are untouched: a shared database still contends
+  machine-wide, which is the point. Isolate what the machine can afford to
+  duplicate; keep the bus for what it cannot — one simulator, one Maestro
+  driver on port 7001, one staging database, one git index per checkout, and
+  everything that was never about contention: presence, messages, the
+  interference guard, handoffs.
+
 ## 1.9.0 — 2026-08-01
 
 Two places the agents turned the guard off, both of them the tool's fault.

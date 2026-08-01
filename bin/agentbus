@@ -73,6 +73,7 @@ EVENTS = os.path.join(BUS, "events.jsonl")
 SEQFILE = os.path.join(BUS, "events.seq")
 LIVEFILE = os.path.join(BUS, "live-count")
 TOKENFILE = os.path.join(BUS, "guard-tokens")
+PORTS = os.path.join(BUS, "ports.json")
 
 STALE_BEAT = 45 * 60      # no heartbeat this long and no pid: the session is gone
 ABANDONED_BEAT = 3 * 3600  # this long without a heartbeat retires it either way
@@ -2099,6 +2100,148 @@ def ensure_serving(me, res_cfg, sessions=None):
 
 # ------------------------------------------------------ resource matching ----
 
+# Where per-worktree ports are allocated from. Above anything a dev tool picks
+# by default and below the ephemeral range macOS hands to outgoing connections
+# (49152 and up), so an allocation cannot collide with a port the kernel is
+# about to reuse.
+PORT_BASE = 20000
+PORT_SPAN = 10000
+
+
+def is_primary_worktree(root):
+    """Is this the repository's original checkout rather than a linked worktree?
+
+    In the original, `.git` is a directory; in one made by `git worktree add` it
+    is a file pointing at the common directory. The distinction matters because
+    the primary checkout keeps the ports the repository declares: a human
+    working there, and every script and bookmark that says :8082, carries on
+    unchanged, and only the worktrees agents create get allocated ones."""
+    dotgit = os.path.join(root or "", ".git")
+    return os.path.isdir(dotgit)
+
+
+def port_key(repo_key, name, root):
+    return "%s\0%s\0%s" % (repo_key or "", name or "", os.path.realpath(root or ""))
+
+
+def port_candidate(repo_key, name, root):
+    """Where the hash puts this checkout's port, before any collision is
+    resolved. Pure: no registry, no probe, no side effect — which is what lets
+    "whose port is that" be answered for a worktree nobody has asked about."""
+    import hashlib
+    digest = hashlib.sha1(port_key(repo_key, name, root).encode()).hexdigest()
+    return PORT_BASE + int(digest[:8], 16) % PORT_SPAN
+
+
+def port_owners(cfg, repo_key, roots):
+    """{port: root} for every allocation this machine knows of in this
+    repository — from the registry, and failing that from the hash.
+
+    The registry is a cache: it resolves collisions and survives nothing in
+    particular. Deleting it must not blind the guard, so every live checkout's
+    port is also computed directly."""
+    out = {}
+    isolated = [r for r in cfg.get("resources", []) if r.get("_declared_port")]
+    for v in (read_json(PORTS) or {}).values():
+        if v.get("port") and v.get("repo") == repo_key and v.get("root"):
+            out[v["port"]] = v["root"]
+    for root in roots:
+        for res in isolated:
+            if is_primary_worktree(root):
+                continue          # keeps the declared port, handled separately
+            out.setdefault(port_candidate(repo_key, res.get("name"), root),
+                           os.path.realpath(root))
+    return out
+
+
+def allocated_port(repo_key, name, root, declared=None):
+    """A port for this resource in this checkout that nothing else will take.
+
+    Derived from the checkout's path, so it is the same every time without any
+    state — restart the machine, delete the bus, and a worktree gets its port
+    back. The registry exists only to resolve the collisions hashing must
+    eventually produce, and to let `agentbus env` and `doctor` show who holds
+    what.
+
+    The primary checkout keeps the declared port. That is what makes this
+    additive: nothing changes for whoever is working in the original clone."""
+    root = os.path.realpath(root or "")
+    if declared and is_primary_worktree(root):
+        return declared
+    key, want = port_key(repo_key, name, root), port_candidate(repo_key, name, root)
+    reg = read_json(PORTS) or {}
+    if reg.get(key, {}).get("port"):
+        return reg[key]["port"]
+    taken = {v.get("port"): k for k, v in reg.items() if k != key}
+    with Mutex("ports"):
+        reg = read_json(PORTS) or {}
+        if reg.get(key, {}).get("port"):
+            return reg[key]["port"]
+        taken = {v.get("port"): k for k, v in reg.items() if k != key}
+        port = want
+        for _ in range(PORT_SPAN):
+            if port not in taken and port_pid(port) is None:
+                break
+            port = PORT_BASE + (port + 1 - PORT_BASE) % PORT_SPAN
+        reg[key] = {"port": port, "resource": name, "root": root,
+                    "repo": repo_key, "at": now()}
+        # Forget worktrees that no longer exist, or the registry grows for ever
+        # and starts refusing ports to the living on behalf of the deleted.
+        for k in [k for k, v in reg.items()
+                  if v.get("root") and not os.path.isdir(v["root"])]:
+            del reg[k]
+        write_json(PORTS, reg)
+    return port
+
+
+def apply_ports(cfg, repo_key, root):
+    """Give every resource that asked for it a port of this checkout's own.
+
+    A resource opts in with `"ports": "per-worktree"`. What that changes, all of
+    it here so nothing downstream has to know: the resource's `port` becomes the
+    allocated one; `${PORT}` in `start` and `ready` is substituted, and failing
+    that any literal occurrence of the declared port, so an existing command
+    line keeps working; a pattern for the new port is added, or a command aimed
+    at it would match nothing; and the lock becomes per checkout, because two
+    checkouts no longer share the thing being locked.
+
+    This is the whole of the isolation feature. Everything else in the plugin
+    reads `res["port"]` and is unchanged."""
+    if not root:
+        return cfg
+    out, changed = [], False
+    for res in cfg.get("resources", []):
+        if res.get("ports") != "per-worktree":
+            out.append(res)
+            continue
+        declared = res.get("port")
+        port = allocated_port(repo_key, res.get("name"), root, declared)
+        res = dict(res)
+        res["port"] = port
+        res["_declared_port"] = declared
+        for field in ("start", "ready"):
+            text = res.get(field)
+            if not text:
+                continue
+            if "${PORT}" in text:
+                res[field] = text.replace("${PORT}", str(port))
+            elif declared:
+                res[field] = text.replace(str(declared), str(port))
+        pats = list(res.get("patterns", []))
+        token = r":%d\b" % port
+        if token not in pats:
+            pats.append(token)
+        res["patterns"] = pats
+        res["scope"] = "worktree"
+        out.append(res)
+        changed = True
+    if not changed:
+        return cfg
+    merged = dict(cfg)
+    merged["resources"] = out
+    return merged
+
+
 def repo_config(repo_key, root=None):
     """What this repository's shared resources are.
 
@@ -2110,15 +2253,15 @@ def repo_config(repo_key, root=None):
     shared = read_json(os.path.join(root, ".claude", "agent-bus.json"), {}) if root else {}
     local = read_json(os.path.join(REPOS, "%s.json" % repo_key), {}) or {}
     if not shared:
-        return local
+        return apply_ports(local, repo_key, root)
     if not local:
-        return shared
+        return apply_ports(shared, repo_key, root)
     merged = dict(shared)
     by_name = {r["name"]: r for r in shared.get("resources", [])}
     for res in local.get("resources", []):
         by_name[res["name"]] = res
     merged["resources"] = list(by_name.values())
-    return merged
+    return apply_ports(merged, repo_key, root)
 
 
 def literal_runs(pattern):
@@ -3386,6 +3529,77 @@ def serving_check(me, hits):
     return "", ""
 
 
+def wrong_port_check(me, cfg, cmd, sessions=None):
+    """Is this command aimed at a port that belongs to another checkout?
+
+    Per-worktree ports remove contention, and they introduce one new way to be
+    silently wrong: an agent curls `localhost:8082` out of habit — from a
+    README, from a note, from the shape of every other project — and quietly
+    exercises the original checkout's code while believing it tested its own.
+    That is the founding failure of this plugin arriving through the back door,
+    and isolation cannot prevent it, only notice it.
+
+    Only ports this machine has actually allocated are treated as somebody
+    else's. An unknown port is somebody's business but not ours."""
+    ports = set()
+    for text in command_targets(cmd):
+        for m in re.finditer(r"(?::|--port[= ]|-p\s+)(\d{2,5})\b", text):
+            ports.add(int(m.group(1)))
+    if not ports:
+        return "", ""
+    isolated = [r for r in cfg.get("resources", []) if r.get("_declared_port")]
+    if not isolated:
+        return "", ""
+    mine = os.path.realpath(me.get("root") or "")
+    ours = {r.get("port") for r in isolated}
+    # Only this repository's allocations. Another project's port is somebody's
+    # business but not ours, and guessing otherwise would block a command that
+    # has nothing to do with this checkout.
+    roots = {s.get("root") for s in (sessions or []) if s.get("root")
+             and s.get("repo_key") == me.get("repo_key")}
+    owners = {p: {"root": r, "resource": ""}
+              for p, r in port_owners(cfg, me.get("repo_key"), roots).items()}
+    for port in sorted(ports):
+        if port in ours:
+            continue                      # one of this checkout's own
+        owner = owners.get(port)
+        elsewhere = owner and os.path.realpath(owner.get("root") or "") != mine
+        declared_elsewhere = (not is_primary_worktree(mine)
+                              and port in {r["_declared_port"] for r in isolated
+                                           if r.get("_declared_port")})
+        if elsewhere or declared_elsewhere:
+            res = next((r for r in isolated
+                        if r.get("_declared_port") == port
+                        or (owner and r["name"] == owner.get("resource"))),
+                       isolated[0])
+            whose = (short_path(owner["root"]) if elsewhere
+                     else "the repository's original checkout")
+            note_block(me, ":%d" % port, "it belongs to %s" % whose)
+            return "deny", "\n".join([
+                'agent-bus: BLOCKED. This command is aimed at :%d, which is not '
+                'this checkout\'s.' % port,
+                "",
+                "  :%d belongs to : %s" % (port, whose),
+                "  you are in    : %s" % short_path(mine),
+                "  yours is      : %d" % res.get("port", 0),
+                "",
+                "  Each checkout runs its own '%s' so that a request answers "
+                "with the code you" % res["name"],
+                "  are looking at. Reaching another one gives you a green "
+                "result for somebody",
+                "  else's tree — the exact failure per-worktree ports exist to "
+                "remove.",
+                "",
+                "Use yours:",
+                "  eval \"$(agentbus env)\"      # then :%d" % res.get("port", 0),
+                "  agentbus port %s            # just the number" % res["name"],
+                "",
+                "(If you really do mean another checkout's, say so: "
+                "AGENTBUS_OFF=1 <your command>.)",
+            ])
+    return "", ""
+
+
 def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
     if command_opts_out(cmd):
         # Said out loud, because a guard everybody can step over quietly is not
@@ -3399,9 +3613,20 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
     # three commands whose entire purpose is to act on a lock somebody else
     # holds. Guarding them means refusing the way out of the block, which is
     # what the block message itself tells the reader to do.
+    # Before anything else, and regardless of whether a pattern matched: a
+    # command aimed at another checkout's port is wrong however the config is
+    # written, and the port that catches it may not be in this checkout's
+    # patterns at all — each worktree's patterns name only its own.
+    verdict, text = wrong_port_check(me, cfg, cmd, sessions)
+    if verdict == "deny":
+        deny(text)
+        return
     hits = [h for h in resources_for(cmd, cfg) if not h.get("_passthrough")]
     if not hits:
         return
+    # Before anything is claimed: a command aimed at another checkout's port is
+    # wrong whoever holds what, and claiming first would leave a lock behind.
+
     # A resource whose patterns stop matching — a port moved, a script was
     # renamed — fails silently and looks exactly like a resource nobody is
     # using. Recording the last match lets `doctor` say so.
@@ -4431,6 +4656,65 @@ def cli_here(args):
           "--as <your name>.)")
 
 
+def port_env_name(res):
+    """The shell variable `agentbus env` exports for a resource."""
+    return res.get("env") or ("AGENTBUS_PORT_" +
+                              re.sub(r"[^A-Za-z0-9]+", "_", res.get("name", "")).upper())
+
+
+def cli_port(args):
+    """The port this checkout should use for a resource.
+
+    Two worktrees of one repository running the same dev server on one port is
+    the failure this whole plugin exists for: the port hides which checkout is
+    answering, so a test passes against somebody else's code. Coordinating one
+    port is the expensive way to solve that. Giving each checkout its own is the
+    cheap way, and on the machine this was written for it would have removed 87
+    per cent of every block the bus has ever issued.
+
+    The number is derived from the checkout's path, so it is stable without any
+    state, and the repository's original checkout keeps the declared port so
+    nothing changes for whoever is working there."""
+    me = need_me()
+    pos = positional(args)
+    if not pos:
+        print("usage: agentbus port <resource>", file=sys.stderr)
+        sys.exit(1)
+    res = find_resource(me, pos[0])
+    if not res:
+        print("no resource named '%s' in this repo's config" % pos[0],
+              file=sys.stderr)
+        sys.exit(1)
+    if not res.get("port"):
+        print("'%s' declares no port" % pos[0], file=sys.stderr)
+        sys.exit(1)
+    print(res["port"])
+
+
+def cli_env(args):
+    """Every declared port for this checkout, as shell exports.
+
+        eval "$(agentbus env)"
+        make dev
+
+    Resources that did not ask for per-worktree ports are exported too, at their
+    declared value, so one line covers the whole configuration and a script does
+    not have to know which is which."""
+    me = need_me()
+    cfg = repo_config(me.get("repo_key"), me.get("root"))
+    rows = [r for r in cfg.get("resources", []) if r.get("port")]
+    if flag(args, "--json"):
+        print(json.dumps({port_env_name(r): r["port"] for r in rows}, indent=2))
+        return
+    if not rows:
+        print("# no resource in this repo declares a port", file=sys.stderr)
+        return
+    for r in rows:
+        own = " (this checkout's own)" if r.get("_declared_port") else ""
+        print("export %s=%d%s" % (port_env_name(r), r["port"],
+                                  ("   # %s%s" % (r["name"], own))))
+
+
 def cli_inbox(_args):
     me = need_me()
     seen = 0
@@ -5401,6 +5685,7 @@ COMMANDS = {
     "note": cli_post, "inbox": cli_inbox, "run": cli_run, "name": cli_name,
     "own": cli_own, "disown": cli_disown, "handoff": cli_handoff,
     "watch": cli_watch, "board": cli_board, "here": cli_here,
+    "port": cli_port, "env": cli_env,
     "doing": cli_doing, "init-repo": cli_init_repo, "doctor": cli_doctor,
     "register": cli_register, "install": cli_install, "serve": cli_serve,
     "serves": cli_serves, "forget": cli_forget,
@@ -5422,6 +5707,8 @@ USAGE = """agentbus — coordination between parallel Claude Code sessions
   watch [--repo] [-n 20]       follow every agent on this machine, live
   board [--port 8787]          the same thing as a page, in your browser
   here [<path>] [--as <you>]   record which worktree you are working in
+  port <res>                   the port this checkout should use
+  env [--json]                 every declared port, as shell exports
   run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
   serve <res>                  restart a service so it serves YOUR worktree
   serves                       which checkout each service is answering for

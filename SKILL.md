@@ -79,6 +79,21 @@ else can tell:
 That sticks until you say otherwise, and without it the guards judge you in a
 tree you left and will refuse you services you started yourself.
 
+## Ports, when the repository gives you your own
+
+If a resource declares `"ports": "per-worktree"`, every checkout runs its own
+copy on its own port instead of taking turns on one. Ask for yours rather than
+copying a number out of a README:
+
+    eval "$(agentbus env)"        # exports every declared port for this checkout
+    agentbus port api             # just the number
+
+The original checkout keeps the port the config declares; worktrees get their
+own. Reaching for somebody else's is blocked, because a request to their port
+answers with their code and reports it as yours — which is the failure this
+whole plugin exists to prevent, and the one thing isolation cannot prevent by
+itself.
+
 ## Running things
 
 Prefer the scoped form — it points the services at your tree, holds them, runs

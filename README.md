@@ -189,6 +189,8 @@ machine and collaborator gets the same guards.
 | `implies` | Resources a command needs indirectly (an e2e run needs the server). |
 | `unless` | Regexes that mean this use is **not** the guarded thing. `patterns` recognise the tool; a `db` resource describing your local Postgres matches every `psql` there is, including one aimed at staging. |
 | `scope: "worktree"` | Contended only by sessions in the *same* checkout. |
+| `ports` | `"per-worktree"` gives every checkout its own port for this resource, derived from its path. The repository's original checkout keeps the declared one, so nothing changes for whoever works there. Use `${PORT}` in `start` and `ready`. |
+| `env` | The shell variable `agentbus env` exports for this resource's port. |
 | `key` | A regex whose first group names *which one*: `"key": "--udid\\s+(\\S+)"` turns one simulator lock into one per device. A command naming no instance contends with all of them. |
 | `why` / `hint` | Shown verbatim when blocking. `init-repo` leaves these empty on purpose: this is the part only you can write, and it is the part that stops an agent working around the block. |
 
@@ -215,6 +217,8 @@ agentbus release <res> | --all
 agentbus doing "..."                  one line others see in their roster
 agentbus init-repo [--dry-run|--force|--local]
 agentbus here [<path>]                record which worktree you are working in
+agentbus port <res>                   the port this checkout should use
+agentbus env                          every declared port, as shell exports
 agentbus doctor | whois | forget <agent|--stale> | install
 ```
 
