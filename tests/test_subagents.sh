@@ -146,6 +146,16 @@ assert_contains "$r" "agentbus claim simulator --as" "and how to say who you are
 out=$(sub_cmd sub-bbb "maestro test flows/two.yaml" t-b20)
 assert_deny "$out" "the sibling is stopped by it too — neither is guessed for"
 
+# The message that produced that denial ends by telling the reader to run
+# `agentbus claim <res> --as <your name>`. The guard denied that too: `--as` was
+# not recognised as a way past, so the tool printed advice it then refused —
+# the exact shape of defect this project treats as the expensive one, because an
+# agent that catches the bus being wrong stops believing it.
+r=$(reason_of "$out")
+assert_contains "$r" "agentbus claim simulator --as" "the message advertises --as"
+out=$(sub_cmd sub-aaa "agentbus claim simulator --as $P/1" t-as1)
+assert_allow "$out" "and the guard lets that command through to the CLI"
+
 # Naming yourself settles it, and then the ordinary sibling rule applies again.
 ab sess-p release --all > /dev/null
 ab sess-p claim simulator --as "$P/1" --why "batch 1: 7 flows" > /dev/null

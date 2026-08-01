@@ -720,8 +720,15 @@ def caller_view(me, cwd):
 
     A view, not a write. Persisting it was the first thing tried and it was
     worse: two subagents dragged the session's root back and forth between them
-    on every tool call, so the record was not even consistently wrong."""
-    if not cwd or cwd == me.get("cwd"):
+    on every tool call, so the record was not even consistently wrong.
+
+    A pinned session is left alone, for the same reason `follow_cwd` leaves it
+    alone: `agentbus here` is a statement about where the work is, and the cwd
+    on the payload is what Claude Code reset the shell to. Honouring the pin in
+    the record but not here made the declaration cosmetic — the roster showed
+    the declared tree while the guard went on locking, and comparing services
+    against, the tree the payload named."""
+    if not cwd or cwd == me.get("cwd") or me.get("pinned"):
         return me
     root, repo_key, label, branch = git_facts(cwd)
     view = dict(me)
@@ -2473,7 +2480,13 @@ def explicit_resources(cmd, cfg):
             continue
         # A steal is a deliberate override of exactly the lock that is in the
         # way. Denying it leaves the reader holding advice they cannot follow.
-        through = verb in PASSTHROUGH_VERBS or "--steal" in toks
+        # `--steal` overrides a lock somebody holds; `--as` says which agent is
+        # asking, which is the answer to an unidentified lock. Both are the
+        # message's own advice for getting past a block, so neither may be
+        # blocked by it — `agentbus claim <res> --as <name>` was printed by the
+        # guard and then refused by it.
+        through = (verb in PASSTHROUGH_VERBS or "--steal" in toks
+                   or "--as" in toks)
         for name in toks[2].split(","):
             res = by_name.get(name.strip())
             if res and res["name"] not in [h["name"] for h in out]:
