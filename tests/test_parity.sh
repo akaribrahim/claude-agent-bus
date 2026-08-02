@@ -367,6 +367,72 @@ assert_contains "$out" "agentbus claim bundler" "by the same line that runs"
 ab sess-a release device@P1234 > /dev/null
 assert_equal "" "$(lock_keys)" "and the instance is given back under that name too"
 
+# ---- the name a verb has, as a Plan -----------------------------------------
+#
+# The verbs have a resource name where the guard has a command, which is why
+# `plan_for` takes both. Synthesising `"agentbus claim simulator"` so that
+# `explicit_resources` could parse the name back is lossy in exactly the place
+# that matters — that line carries no `--udid`, and the section above is the
+# assertion that the guard reads no device out of an `agentbus` line at all.
+#
+# Asserted on the Plan directly rather than through a verb, because these are
+# the four forms every one of the five verbs now shares, and a failure that
+# names the form is worth more than five failures that name a verb.
+PLANNAMES="$TEST_TMP/plan-names.py"
+cat > "$PLANNAMES" <<'PY'
+import importlib.machinery, importlib.util, os, sys
+
+path = os.path.join(os.environ["AB_ROOT"], "bin", "agentbus")
+loader = importlib.machinery.SourceFileLoader("abengine", path)
+ab = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(ab)
+
+sid, cwd, names = sys.argv[1], sys.argv[2], sys.argv[3]
+os.chdir(cwd)
+_, me = ab.resolve_party({"session_id": sid, "cwd": cwd})
+plan = ab.plan_for(me, names=names)
+print("verdict %s" % plan["verdict"])
+print("reason %s" % plan["reason"])
+print("locks %s" % " ".join(r["lock"] for r in plan["resources"]))
+print("names %s" % " ".join(r["name"] for r in plan["resources"]))
+print("instances %s" % " ".join(r["instance"] for r in plan["resources"] if r["instance"]))
+PY
+plan_names() { python3 "$PLANNAMES" sess-a "$REPO" "$1"; }
+
+assert_contains "$(plan_names db)" "locks db" \
+  "a plain name is locked under itself"
+assert_contains "$(plan_names worktree)" "locks $WT_KEY" \
+  "a per-checkout name resolves to this checkout's key, with no command in hand"
+out=$(plan_names simulator@ABC123)
+assert_contains "$out" "locks simulator@ABC123" \
+  "an instance the caller names is locked under that instance"
+assert_contains "$out" "names simulator" "while the resource it belongs to is the resource"
+assert_contains "$out" "instances ABC123" "and the instance is on the Plan, as the guard's is"
+assert_contains "$(plan_names 'simulator@sim/2')" "locks simulator@sim_2" \
+  "sanitised exactly as \`instance_of\` sanitises what it reads off a command"
+assert_contains "$(plan_names "file:$REPO/one.py")" "locks file:$REPO/one.py" \
+  "an undeclared name stays literal, which is how one file is taken"
+out=$(plan_names simulatr@ABC123)
+assert_contains "$out" "verdict deny" "a mistyped instance is a refusal, not a junk lock"
+assert_contains "$out" "reason no-such-resource" "with a reason that says which"
+
+# The comma list. `explicit_resources` has always split one, so the guard
+# understood `agentbus claim rig,bundler` — and the verb wrote a single lock
+# named literally `rig,bundler` and held neither. One split, in the Plan.
+out=$(plan_names rig,bundler)
+assert_contains "$out" "locks rig bundler" "a comma list is two resources, not one name"
+assert_not_contains "$out" "rig,bundler" "and never a lock named after the list"
+assert_contains "$(plan_names ' rig , bundler ')" "locks rig bundler" \
+  "spaces around the commas are the same list"
+assert_contains "$(plan_names rig,rig)" "locks rig" "and a name repeated is one lock"
+
+# Still no expansion here: the guard and `run` expand `implies`, `claim`
+# deliberately does not, so the expansion stays with the caller that wants it
+# rather than becoming something the Plan does to everybody.
+assert_contains "$(plan_names rig)" "locks rig" \
+  "a Plan built from a name does not expand what that name implies"
+
 
 # =============================================================================
 # Check B — every advertised exit lifts the block
@@ -404,7 +470,7 @@ if aid:
     payload.update(agent_id=aid, agent_type="general-purpose")
 os.chdir(cwd)
 _, me = ab.resolve_party(payload, cmd)
-plan = ab.plan_for(me, cmd, ab.load_sessions(), probe_services=True)
+plan = ab.plan_for(me, cmd, sessions=ab.load_sessions(), probe_services=True)
 for e in plan["exits"]:
     print("%s\t%s\t%s" % (e["id"], e["kind"], e["cmd"]))
 PY
@@ -879,10 +945,15 @@ ab = importlib.util.module_from_spec(
     importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(ab)
 
-sid, cwd, cmd, probing = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+sid, cwd, what, probing = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# `names` asks the same question the five command-line verbs ask; `cmd` asks the
+# guard's. Both go through this file, because the verbs are the callers with no
+# `lsof` to spare and nothing else in the suite would see one appear.
+asking = {"names": what} if probing == "names" else {"cmd": what}
 home = os.environ["AGENTBUS_HOME"]
 os.chdir(cwd)
-_, me = ab.resolve_party({"session_id": sid, "cwd": cwd}, cmd)
+_, me = ab.resolve_party({"session_id": sid, "cwd": cwd},
+                         "" if probing == "names" else what)
 
 
 def snapshot():
@@ -908,7 +979,7 @@ def snapshot():
 # a per-worktree port the first time one is asked for, and allocating probes the
 # port to be sure nothing else has it — a subprocess and a registry write, but
 # neither of them is `plan_for` deciding anything, and both happen once ever.
-ab.plan_for(me, cmd, ab.load_sessions())
+ab.plan_for(me, sessions=ab.load_sessions(), **asking)
 
 sessions = ab.load_sessions()
 started = []
@@ -922,7 +993,8 @@ def spy(*a, **k):
 
 subprocess.run = spy
 before = snapshot()
-plan = ab.plan_for(me, cmd, sessions, probe_services=(probing == "probe"))
+plan = ab.plan_for(me, sessions=sessions,
+                   probe_services=(probing == "probe"), **asking)
 after = snapshot()
 subprocess.run = real
 
@@ -950,6 +1022,14 @@ out=$(python3 "$PURITY" sess-b "$WT" "uvicorn app:main --reload" probe)
 assert_not_contains "$out" "subprocesses 0" \
   "while \`probe_services=True\` does start one, so the flag is not decorative"
 
+# And the same question asked the way the five verbs ask it. `api` has a port
+# and a pattern, so a Plan built from its name reaches everything a Plan built
+# from `uvicorn` reaches — except that no verb may pay for an `lsof`.
+out=$(python3 "$PURITY" sess-b "$WT" api names)
+assert_contains "$out" "subprocesses 0" \
+  "a Plan built from a name starts no subprocess either"
+assert_contains "$out" "changed no" "and writes nothing on the way"
+
 # ---- the race the optimistic verdict is allowed to lose ---------------------
 #
 # `plan_for` decides outside the mutex, so between deciding and claiming another
@@ -973,7 +1053,7 @@ sid, cwd, cmd, winner = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 os.chdir(cwd)
 _, me = ab.resolve_party({"session_id": sid, "cwd": cwd}, cmd)
 
-plan = ab.plan_for(me, cmd, ab.load_sessions())
+plan = ab.plan_for(me, cmd, sessions=ab.load_sessions())
 print("planned %s" % plan["verdict"])
 
 subprocess.run([path, "claim", "db", "--why", "got there first"],

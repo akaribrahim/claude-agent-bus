@@ -3674,15 +3674,21 @@ def instance_of(res, cmd):
     return ""
 
 
-def contending_locks(me, res, cmd=""):
-    """Every held lock this command has to get past for one resource.
+def contending_locks(me, res, want):
+    """Every held lock this caller has to get past for one resource.
 
     Usually one. With instances there are several, and which of them contend
-    depends on what the command said: name a device and you contend with that
-    device and with anybody holding the whole resource; name none and you
-    contend with all of them, because not knowing which one you mean is a
-    reason to wait rather than a reason to proceed."""
-    want = lock_name(me, res, cmd)
+    depends on what was said: name a device and you contend with that device
+    and with anybody holding the whole resource; name none and you contend with
+    all of them, because not knowing which one you mean is a reason to wait
+    rather than a reason to proceed.
+
+    `want` is the name this resource is locked under for this caller — what
+    `lock_name` answered — and it is passed in rather than worked out again
+    here. That is the whole of spine two in one parameter: this function used to
+    ask the question a second time, from a command, which is why `locks_text`
+    (which has no command) could not use it and went on reporting a device
+    somebody was holding as free."""
     out = [load_lock(me.get("repo_key"), want)]
     if res.get("key"):
         base = res["name"]
@@ -4037,8 +4043,16 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
                        "ask them"))
     if not blocker["unidentified"]:
         exits.append(wait)
-    exits.append(_exit("off", "bypass", "AGENTBUS_OFF=1 <your command>",
-                       "when the command does not touch %s at all" % res["name"]))
+    if cmd:
+        # Only when there is a command to put it in front of. A Plan built from
+        # a name rather than a command — which is what the five command-line
+        # verbs ask for — has nothing this exit could apply to: `AGENTBUS_OFF`
+        # is read by the hooks and by nothing in the CLI, so
+        # `AGENTBUS_OFF=1 agentbus claim db` would be an exit that does not
+        # work, and an exit exists only when it would.
+        exits.append(_exit("off", "bypass", "AGENTBUS_OFF=1 <your command>",
+                           "when the command does not touch %s at all"
+                           % res["name"]))
     exits.append(_exit("steal", "through",
                        'agentbus claim %s --steal --why "..."' % exit_name,
                        "only when you know they have finished"))
@@ -4046,8 +4060,83 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
                  resources if resources is not None else [res], exits)
 
 
-def plan_for(me, cmd, sessions=None, probe_services=False):
-    """What this command touches. Pure: reads state, takes nothing.
+def _named_resources(cfg, me, names):
+    """The resources a command-line verb named outright, and their lock names.
+
+    Returns `(resources, unknown)`, where `unknown` is the base of an
+    `<resource>@<instance>` name this repository does not declare — the one
+    input that cannot be turned into a lock at all.
+
+    The verbs have a name where the guard has a command, which is why
+    `plan_for` takes both. Round-tripping the name through a synthesised
+    `"agentbus claim simulator"` so that `explicit_resources` could parse it
+    back is lossy in exactly the place that matters: that line carries no
+    `--udid`, so the instance — the whole point of a `key` — disappears on the
+    way through.
+
+    Four forms, tried in this order:
+
+        db                a declared resource, under `lock_name`'s answer for
+                          this caller: the bare name, or `worktree@<digest>`
+                          for a `scope: "worktree"` one
+        simulator@ABC123  one instance of a declared resource. The `key` regex
+                          reads an instance off a command and there is no
+                          command here, so the caller says which. Sanitised
+                          exactly as `instance_of` sanitises what it reads, or
+                          a device called `sim/2` is filed by the verb under a
+                          key the guard never writes
+        simulatr@ABC123   refused. This resolved by accident before M1, by
+                          falling through the pass-through below, so one
+                          mistyped character wrote a junk lock and reported it
+                          as a claim
+        file:/abs/path    passed through untouched. That key is deliberately
+                          literal — `@` and all, since a path may contain one —
+                          and so is any other undeclared name, which is how a
+                          single file gets taken
+
+    A comma list is split, because `explicit_resources` splits one and the two
+    have to mean the same thing. They did not: the guard understood `agentbus
+    claim rig,bundler` and the verb wrote a single lock named `rig,bundler`,
+    printed `claimed`, and held neither of them."""
+    by_name = {r["name"]: r for r in cfg.get("resources", [])}
+    out, seen = [], set()
+    for name in (names if isinstance(names, (list, tuple)) else [names]):
+        for part in str(name or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            res = by_name.get(part)
+            if res:
+                res = dict(res)
+                res["instance"] = ""
+                res["lock"] = lock_name(me, res)
+            else:
+                base, at, inst = part.rpartition("@")
+                if at and not part.startswith("file:"):
+                    decl = by_name.get(base)
+                    if not decl or not inst:
+                        return [], base
+                    res = dict(decl)
+                    res["instance"] = re.sub(
+                        r"[^A-Za-z0-9_.-]", "_", inst)[:32]
+                    res["lock"] = "%s@%s" % (decl["name"], res["instance"])
+                else:
+                    res = {"name": part, "instance": "", "lock": part,
+                           "_literal": True}
+            # Named outright, like `explicit_resources` marks the same thing on
+            # the guard's side: a deliberate act, worth a line on the bus, and
+            # not something the service probe should refuse to move.
+            res["_explicit"] = True
+            if res["lock"] in seen:
+                continue
+            seen.add(res["lock"])
+            out.append(res)
+    return out, ""
+
+
+def plan_for(me, cmd=None, names=None, sessions=None, probe_services=False):
+    """What this command — or this verb — touches. Pure: reads state, takes
+    nothing.
 
     Returns a Plan: `resources` (each with its resolved lock name and
     instance), `verdict` ("allow" | "deny" | "warn"), `reason`, `blocker`,
@@ -4055,18 +4144,26 @@ def plan_for(me, cmd, sessions=None, probe_services=False):
     command-line verbs use — the service-ownership check is not run and no
     subprocess is started.
 
+    `cmd` is what the guard has; `names` is what the five command-line verbs
+    have, and they are not interchangeable. See `_named_resources` for why the
+    name cannot simply be turned back into a command. `names` takes a comma
+    list, one string or several, and does NOT expand `implies`: the guard and
+    `agentbus run` expand, `agentbus claim` deliberately does not and says so
+    instead, so the expansion stays with the caller that wants it.
+
     Pure matters twice over. It is what lets the guard ask the question before
-    deciding whether to answer it, and it is what will let the five
-    command-line verbs ask the same question in M4 without each of them
-    growing an `lsof`: they are pure file operations today. Nothing here
-    writes, claims, or emits. `commit_plan` does all three, and `guard_bash`
-    emits the block.
+    deciding whether to answer it, and it is what lets the five command-line
+    verbs ask the same question without each of them growing an `lsof`: they
+    are pure file operations. Nothing here writes, claims, or emits.
+    `commit_plan` does all three — which is why the verbs do not call it; see
+    the Decision Log.
 
     The verdict is deliberately provisional. It is made outside the mutex, so
     it can lose a race to another session between here and `do_claim`;
     `commit_plan` re-tests inside the mutex and its answer is the one that
     counts."""
-    if command_opts_out(cmd):
+    cmd = cmd or ""
+    if names is None and command_opts_out(cmd):
         # Nothing is touched, deliberately. Said out loud by whoever commits
         # this plan, because a guard everybody can step over quietly is not a
         # guard — this is the only place the plugin lets a command past a
@@ -4074,29 +4171,38 @@ def plan_for(me, cmd, sessions=None, probe_services=False):
         return _plan(cmd, "allow", "opted-out")
     cfg = repo_config(me.get("repo_key", ""), me.get("root"))
     sessions = sessions if sessions is not None else load_sessions()
-    # Before anything else, and regardless of whether a pattern matched: a
-    # command aimed at another checkout's port is wrong however the config is
-    # written, and the port that catches it may not be in this checkout's
-    # patterns at all — each worktree's patterns name only its own. It comes
-    # before the resources are even worked out because claiming first would
-    # leave a lock behind a command that is not going to run.
-    wrong = wrong_port_check(me, cfg, cmd, sessions)
-    if wrong:
-        return wrong
-    hits = [h for h in resources_for(cmd, cfg) if not h.get("_passthrough")]
-    if not hits:
+    if names is None:
+        # Before anything else, and regardless of whether a pattern matched: a
+        # command aimed at another checkout's port is wrong however the config
+        # is written, and the port that catches it may not be in this
+        # checkout's patterns at all — each worktree's patterns name only its
+        # own. It comes before the resources are even worked out because
+        # claiming first would leave a lock behind a command that is not going
+        # to run.
+        wrong = wrong_port_check(me, cfg, cmd, sessions)
+        if wrong:
+            return wrong
+        resources = []
+        for res in resources_for(cmd, cfg):
+            if res.get("_passthrough"):
+                continue
+            res = dict(res)
+            res["instance"] = instance_of(res, cmd)
+            res["lock"] = lock_name(me, res, cmd)
+            resources.append(res)
+    else:
+        resources, unknown = _named_resources(cfg, me, names)
+        if unknown:
+            return _plan(cmd, "deny", "no-such-resource", {"base": unknown},
+                         [], [_exit("status", "ask", "agentbus status",
+                                    "the resources this repo declares")])
+    if not resources:
         return _plan(cmd)
-    resources = []
-    for res in hits:
-        res = dict(res)
-        res["instance"] = instance_of(res, cmd)
-        res["lock"] = lock_name(me, res, cmd)
-        resources.append(res)
     # Check every resource before taking any. A command that is going to be
     # denied must not leave half the rig claimed behind it.
     blocked = []
     for res in resources:
-        for lock in contending_locks(me, res, cmd):
+        for lock in contending_locks(me, res, res["lock"]):
             if same_party(lock, me):
                 continue
             holder, stealable, _ = lock_state(lock, sessions)
@@ -4187,6 +4293,19 @@ def render_block(plan):
     is able to print, because it does not know how to write one down."""
     b = plan.get("blocker") or {}
     reason = plan.get("reason")
+
+    if reason == "no-such-resource":
+        # The one refusal that belongs to the command-line verbs rather than to
+        # the guard: a name nothing in this repository declares. It is rendered
+        # here anyway, because it is a Plan saying no and a second place that
+        # turns a Plan into English is the defect this milestone is closing.
+        return "\n".join([
+            "agent-bus: no resource named '%s' in this repo's config. "
+            "`<resource>@<instance>` names one of several — one device of the "
+            "three the machine has — and the part before the '@' has to be a "
+            "declared resource." % b["base"],
+            _exit_line(plan, "status", width=20),
+        ])
 
     if reason == "wrong-port":
         res = b["resource"]
@@ -4352,7 +4471,7 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
     Guarding them would mean refusing the way out of a block, which is what the
     block itself tells the reader to do; `explicit_resources` marks them
     `_passthrough` and `plan_for` drops them."""
-    plan = plan_for(me, cmd, sessions)
+    plan = plan_for(me, cmd, sessions=sessions)
     if plan["reason"] == "opted-out":
         # Said out loud, because a guard everybody can step over quietly is not
         # a guard. This is the only place the plugin lets a command past a
@@ -5425,26 +5544,16 @@ def resolve_lock(me, name):
     A name that is not a declared resource is otherwise passed through
     untouched, because `agentbus claim 'file:/abs/path.py'` is how somebody
     takes a single file and that key is deliberately literal — `@` and all, since
-    a path may contain one."""
-    res = find_resource(me, name)
-    if res:
-        return lock_name(me, res)
-    base, at, inst = name.rpartition("@")
-    if at and not name.startswith("file:"):
-        res = find_resource(me, base)
-        if not res or not inst:
-            print("agent-bus: no resource named '%s' in this repo's config. "
-                  "`<resource>@<instance>` names one of several — one device of "
-                  "the three the machine has — and the part before the '@' has "
-                  "to be a declared resource. `agentbus status` lists them."
-                  % base, file=sys.stderr)
-            sys.exit(1)
-        # Sanitised exactly as `instance_of` sanitises what it reads out of a
-        # command, or a device named `sim/2` would be filed by the CLI under a
-        # key the guard never writes — which is this whole function's defect.
-        return "%s@%s" % (res["name"],
-                          re.sub(r"[^A-Za-z0-9_.-]", "_", inst)[:32])
-    return name
+    a path may contain one.
+
+    All of that now lives in `_named_resources`, and this is a shim over
+    `plan_for` while the verbs move across it one at a time. It goes when the
+    last of them has."""
+    plan = plan_for(me, names=name)
+    if plan["reason"] == "no-such-resource":
+        print(render_block(plan), file=sys.stderr)
+        sys.exit(1)
+    return plan["resources"][0]["lock"] if plan["resources"] else name
 
 
 def cli_serve(args):
