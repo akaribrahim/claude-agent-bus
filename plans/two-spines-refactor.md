@@ -128,8 +128,8 @@ requires that running one lifts the block.
       Done 2026-08-02: three commits, no behaviour changed and no assertion
       touched — 1571 as M4 left it. The Mac was re-measured and the figures sit
       beside the pre-refactor ones in `Artifacts and Notes`; **the gate does not
-      resolve**, because the delta's own spread is three times the width of the
-      band it is judged against, which is a fact about the instrument and not
+      resolve**, because the delta's own spread is nearly seven times the width
+      of the band it is judged against, which is a fact about the instrument and not
       about the code, and what a paired measurement would have to do instead is
       written down there. Windows was not measured: it needs the author's
       machine, and the 2026-07-31 figures now say so on their face. The engine
@@ -1457,10 +1457,11 @@ times over, which is where the spreads come from:
 **The gate does not resolve, and this is a fact about the instrument.** The gate was
 moved off the two absolutes because they are five per cent apart and a ten per cent band
 on either cannot see a regression against that background. But the delta is the
-difference of two nearly-equal noisy numbers and it inherits both noises: its own spread
-here, 1.4 to 4.4 ms, is three times the width of the ±10 % band around 2.2 ms it is being
-judged against. The median moved from 2.2 to 2.8, which is inside that noise; so would a
-move the same distance the other way. The correct statement is neither that the gate
+difference of two nearly-equal noisy numbers and it inherits both noises: the band it is
+judged against is ±10 % of 2.2 ms, which is 1.98 to 2.42 and 0.44 ms wide, and the six
+samples span 1.4 to 4.4 — three milliseconds, nearly seven times the width of the band
+that is supposed to contain them. The median moved from 2.2 to 2.8, which is inside that
+noise; so would a move the same distance the other way. The correct statement is neither that the gate
 passed nor that it failed — it is that **this measurement cannot answer the question the
 gate asks**, and no amount of reading it more carefully will change that.
 
