@@ -884,7 +884,14 @@ def same_party(holder, me, siblings=None):
 
     With fewer than two subagents the ambiguity cannot do harm: parent and only
     child never conflict in either direction, so an unidentified holder is left
-    permissive rather than blocking a session against itself."""
+    permissive rather than blocking a session against itself.
+
+    The ambiguity has two sides and they reason identically. A lock with no
+    `agent_id` may or may not be the session's; a CALLER with no `agent_id` may
+    or may not be the session either — a hook is told, and a shell cannot be. So
+    a caller that cannot say which agent it is gets the same treatment as a lock
+    that cannot: permissive while there is at most one subagent, blocking once
+    there are two."""
     if (holder.get("sid") or "") != (me.get("sid") or ""):
         return False
     a = holder.get("agent_id") or ""
@@ -893,6 +900,20 @@ def same_party(holder, me, siblings=None):
         return True
     if a and b:
         return False        # two different subagents: the case that must serialise
+    if a and not b:
+        # A named subagent holds it and the caller has no id. From a hook that
+        # means the session itself, which never contends with its own subagent.
+        # From a shell it means nothing at all: `agentbus wait db` typed any way
+        # but the line the guard saw carries no hint, and answering "already
+        # yours" against a sibling's lock made the wait print `claimed 'db'`,
+        # exit 0 and leave the sibling that read the advice still blocked —
+        # having upgraded its one-command soft lock to hard on the way past,
+        # which release_autoclaim then would not give back.
+        if me.get("party_known"):
+            return True
+        if siblings is None:
+            siblings = sibling_count(holder.get("sid"))
+        return siblings < 2
     if holder.get("party_known", True):
         return True         # the side with no id is known to be the session itself
     if siblings is None:

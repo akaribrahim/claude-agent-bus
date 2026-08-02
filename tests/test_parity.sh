@@ -531,31 +531,37 @@ guard b3-3 sess-a "$REPO" "psql -c 'select 2'" sub-2
 assert_equal allow "$VERDICT" "and the block lifts for the sibling that waited"
 ab sess-a release --all > /dev/null
 
-# DEFECT (pinned, M1 must decide): the same exit, run without the guard having
-# seen that exact line, reports success and lifts nothing.
+# The same exit, run without the guard having seen that exact line. It used to
+# report success and lift nothing: `agentbus wait db` from a shell cannot say
+# which subagent is asking, so with no hint it was read as the session itself —
+# and a parent never contends with its own subagent, so `do_claim` answered
+# "already yours", printed `claimed 'db'` and exited 0 while the sibling that
+# read the advice stayed blocked. Any wording but the advertised one reaches
+# this path, and so does an `agentbus wait` inside a script.
 #
-# `agentbus wait db` from a shell cannot say which subagent is asking, so with
-# no hint it is read as the session itself — and a parent never contends with
-# its own subagent, so `do_claim` answers "already yours". It prints
-# `claimed 'db'`, exits 0, and the sibling that read the advice is still
-# blocked. Any wording but the advertised one reaches this path, and so does an
-# `agentbus wait` inside a script the hook never saw.
+# A caller that cannot name its party now gets the answer an unattributable
+# LOCK gets: with two agents live, it is not yours. `--timeout 0` is itself a
+# wording the guard never saw, which is the case being measured — and it makes
+# the queue this now joins report back instead of sitting for ninety seconds.
 sub1_holds_db b3-hold2
 assert_equal "db" "$(lock_keys)" "the sibling's command takes the database again"
-out=$(run_exit sess-a 'agentbus wait db --why "..."')
-assert_contains "$out" "claimed 'db'" \
-  "DEFECT (pinned): a wait the guard did not see reports success without taking anything"
-assert_equal "db" "$(lock_keys)" "leaving the sibling's lock exactly where it was"
+out=$(run_exit sess-a 'agentbus wait db --timeout 0 --why "..."')
+assert_not_contains "$out" "claimed 'db'" \
+  "a wait the guard did not see does not report a claim it never made"
+assert_contains "$out" "is held by $A" "it queues against the sibling's lock instead"
+assert_equal "db" "$(lock_keys)" "leaving that lock exactly where it was"
 guard b3-4 sess-a "$REPO" "psql -c 'select 2'" sub-2
 assert_equal deny "$VERDICT" \
-  "DEFECT (pinned): so that same exit, typed any other way, does NOT lift the block"
-# And a second thing worth knowing while it is in front of us: that stray wait
-# upgraded a one-command claim to a hard one, and `release_autoclaim` gives back
-# only soft locks — so PostToolUse no longer frees it.
+  "so the sibling is still blocked, which is now what the wait said too"
+# And the lock it did not take is still the soft one-command claim it was. That
+# wait asked for a hard lock, and answering "already yours" upgraded the
+# sibling's claim in place — `release_autoclaim` gives back only soft locks, so
+# PostToolUse stopped freeing it. Closed as a consequence: the branch that
+# upgraded it is no longer reachable for a party that cannot prove it is yours.
 ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=b3-hold2 \
   agent_id=sub-1 agent_type=general-purpose)" > /dev/null
-assert_equal "db" "$(lock_keys)" \
-  "DEFECT (pinned): and the command ending no longer gives it back, because it is hard now"
+assert_equal "" "$(lock_keys)" \
+  "and the command ending gives it back, still soft, as it was before the wait"
 ab sess-a release --all > /dev/null
 
 # ---- 4. taken by somebody in this session who cannot be named ---------------
