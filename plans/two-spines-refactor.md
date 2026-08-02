@@ -89,8 +89,20 @@ that running one lifts the block.
       both of M2's own new checks. `current_session` is gone and `as_name` was
       never added — reasoning below. The second commit exists because the first
       was green through both mistakes this refactor most invites.
-- [ ] (M3) One decision core for commands — `plan_for` plus `commit_plan`, with the
+- [x] (M3) One decision core for commands — `plan_for` plus `commit_plan`, with the
       guard and the block message rendered from the result.
+      Done 2026-08-02: four commits, 1376 → 1433. `plan_for` is pure and
+      `commit_plan` claims inside the mutex; `render_block` places
+      `plan["exits"]` and composes no command, which an AST check now
+      enforces. `serving_check` and `wrong_port_check` return Plans;
+      `guard_bash` is four steps. `test_parity.sh`'s hand-written exit table
+      is gone — both the assertions and the lines the file *runs* come from
+      `plan.exits[].cmd`. One wording change, paired with `assert_deny` and
+      `assert_allow` in the same commit; no decision assertion touched.
+      Falsified four times in a copied tree, and one of those found the
+      purity snapshot was blind to a write that changes no contents.
+      The exit `kind` set is `through | ask | correct | bypass`, not the six
+      the plan drafted — reasoning below.
 - [ ] (M4) Retire the duplicate paths: the five command-line verbs call the core; the
       two fast paths are pinned to each other and to the token pre-filter by tests.
 - [ ] (M5) Re-measure cost, update the documentation that describes the old shape, and
@@ -303,6 +315,52 @@ that running one lifts the block.
   anything; what actually rooted the call was `follow_cwd`, one function earlier and one
   file section away. Nothing in the order changed when it went.
 
+- Observation (M3, 2026-08-02): **the plan's exit kinds named mechanisms and the
+  reader needs effects.** `wait, ask, steal, serve, as, off` says which command an exit
+  is. What a blocked agent has to know is what running it does, and M0's exit table had
+  already found that distinction and used four words for it: `agentbus status` and
+  `agentbus post --to <holder>` do not lift anything and do not claim to; `eval
+  "$(agentbus env)"` and `agentbus port api` do not lift the block either — they correct
+  the command, and the block is *supposed* to stand for the one that was refused;
+  `AGENTBUS_OFF=1` steps over the decision rather than resolving it. So `kind` is
+  `through | ask | correct | bypass`, and an `id` — `wait`, `steal`, `adopt`, `release`,
+  `serve`, `run`, `status`, `ask`, `env`, `port`, `off` — carries the mechanism, because
+  `render_block` has to place two exits of one kind in different sentences and a test has
+  to be able to ask for one by name. Both fields are needed and neither substitutes for
+  the other.
+
+- Observation (M3, 2026-08-02): **the assertion that a message contains its Plan's exits
+  is a tautology, and the one that matters is that the message's exits are the ones the
+  test runs.** Deleting M0's table leaves `render_block` pinned to the Plan — good, and
+  it is what catches a hand-written line creeping back into a message — but it cannot
+  catch the Plan advertising something that does not work, because the same object
+  produced both sides. What catches that is running the advertised line and requiring the
+  block to lift, and that only holds if the line being run *is* the advertised one. The
+  literals were left in the run sites at first and they would have drifted silently; they
+  now come from `plan_exit <id>`. Three keep a literal deliberately and say so: the two
+  lines ending in `<your command>`, and the `agentbus wait --timeout 0` whose whole point
+  is being a wording the guard never saw.
+
+- Observation (M3, 2026-08-02): **a content-hash snapshot cannot see the guard's most
+  common write.** The new assertion that `plan_for` changes nothing was falsified by
+  moving the `matched/` marker writes back into it — and the suite stayed green. Those
+  markers are empty files whose contents are identical before and after; only the mtime
+  moves. Fixed by hashing contents and stat, and it is the sixth time in this repository
+  that a green assertion was measuring the wrong thing — the second found by the
+  falsification step rather than by a defect.
+
+- Observation (M3, 2026-08-02): **the race that `commit_plan` exists for was unreachable
+  from the suite, and `test_locks.sh` caught it anyway.** `plan_for`'s optimistic check
+  and `do_claim`'s check inside the mutex apply the same rule to the same session list,
+  so without a genuine race they cannot disagree, and no scenario could reach the
+  lose-the-race branch. Making `commit_plan` ignore `do_claim` outright does fail
+  `test_locks.sh`'s "no concurrent pair was allowed through twice" — reliably, three runs
+  of three, over forty concurrent pairs. That is the real property and it was already
+  pinned. What it is not is legible: the failure names concurrency, not the branch. M3
+  adds a staged version that opens the interval at human speed — build the Plan while the
+  resource is free, let another session claim it, then commit — so the branch has one
+  assertion that fails by its own name.
+
 - Observation: the two spines were identified by classifying defects, not by reading
   code, and that is what makes this plan worth doing rather than a rewrite. Twenty-two
   defects, root causes assigned by hand: identity/location 6, one-decision-twice 6,
@@ -510,6 +568,51 @@ that running one lifts the block.
   time after registering is exactly equivalent, and the memoised hint is what makes
   calling twice safe at all. `as_name` is circular rather than merely unused, which is
   in `Surprises & Discoveries`.
+  Date/Author: 2026-08-02, Claude.
+
+- Decision (M3): an exit carries both what it is and what it achieves, and the four
+  effects are `through`, `ask`, `correct` and `bypass`.
+  Rationale: the plan's list was six mechanisms and the sentence it has to support is
+  "run this and the block lifts" against "run this and you will know more" against "this
+  is not the same command any more". Those are effects. `id` keeps the mechanism because
+  the renderer places two exits of one kind in different sentences — the unidentified
+  block's `wait` sits in its own paragraph and again in the common list — and because a
+  test that has to ask for one exit by name would otherwise ask by matching its text,
+  which is the hand-written table coming back through the door it left by.
+  Date/Author: 2026-08-02, Claude.
+
+- Decision (M3): `guard_bash` leaves `probe_services` off and calls `serving_check`
+  itself, after `commit_plan`.
+  Rationale: folding the probe into `plan_for` for the guard would put it before the
+  claim, and three things depend on it being after. A command denied by the probe has
+  already announced and given back what it took, `bump_guarded` has already counted it,
+  and the lock-beats-serve precedence is expressed by the lock verdict returning first.
+  The flag is honoured where it is documented — `plan_for(probe_services=True)` folds the
+  same function in — and the guard is the one caller with a reason not to use it. Both
+  paths run one function, so there is still one answer.
+  Date/Author: 2026-08-02, Claude.
+
+- Decision (M3): the unidentified block names the agent it is talking to instead of
+  printing `--as <your name>`.
+  Rationale: it is the last hole in an exit on the command surface, and the Plan was
+  holding the value all along — the block only exists for a caller that arrived with an
+  `agent_id`, so there is always a name. The line used to end "(yours is in the message
+  that named you)", which is a message admitting it printed a template and asking the
+  reader to go and fill it in. A caller that genuinely cannot be named now gets no
+  `adopt` exit at all rather than one with a hole in it, which is the rule the whole
+  milestone rests on: an exit exists only if it would work. This is the one wording
+  change M3 makes, and it is paired in its own commit with `assert_deny` and
+  `assert_allow` on the decision field either side of running the line.
+  Date/Author: 2026-08-02, Claude.
+
+- Decision (M3): the Plan does not describe file blocks, and the three functions that
+  emit them keep their hand-written text.
+  Rationale: unchanged from the review's boundary, restated here because M3 is where it
+  would have been easy to cross. `guard_file`, `ownership_verdict` and `interference_note`
+  decide about paths and declared globs; a Plan whose resources each carry a lock name and
+  an instance does not describe a file edit refused by somebody's glob. Generalising it to
+  fit would leave every field optional and the type meaningless. The honest scope is the
+  command surface now and the file surface later.
   Date/Author: 2026-08-02, Claude.
 
 ## Outcomes & Retrospective
@@ -786,10 +889,13 @@ Add three functions:
         """A Plan whose verdict is 'deny' as the text a session reads."""
 
 An exit is a dict with `cmd` (a runnable command line, fully substituted — not a format
-string with `<res>` in it), `when` (one sentence saying when this exit is the right one)
-and `kind` (`wait`, `ask`, `steal`, `serve`, `as`, `off`). `plan_for` builds exits from
-the same facts it used to decide, so an exit exists only if it would work, and
-`test_parity.sh` reads `plan.exits[].cmd` instead of parsing English.
+string with `<res>` in it), `when` (one short line saying when this exit is the right one
+or what running it gives you), `kind` (what running it achieves) and `id` (which exit it
+is). As built, `kind` is `through | ask | correct | bypass` rather than the six mechanism
+names this paragraph first listed, and `id` carries the mechanism; the reasoning is in
+the Decision Log. `plan_for` builds exits from the same facts it used to decide, so an
+exit exists only if it would work, and `test_parity.sh` reads `plan.exits[].cmd` instead
+of parsing English — for the lines it runs as well as the lines it asserts on.
 
 `guard_bash` becomes: `plan_for`, then `commit_plan`, then `serving_check` as today
 (after the claim, undoing it on deny, preserving the lock-beats-serve precedence), then
@@ -824,6 +930,20 @@ one at a time, and the shim deleted last. `find_resource` keeps its two other ca
 directly: it is a display path over every configured resource with no command in hand,
 and it cannot move into `plan_for`. While there, fix its latent bug — with no command it
 never sees instance locks, so `status` reports an instance-held resource as free.
+
+Four things M3 leaves for it, found while building the Plan:
+
+- `commit_plan` writes the `matched/` markers, calls `bump_guarded` and announces an
+  explicit claim. Those are right for the guard and have to be decided for a verb:
+  `agentbus claim db` counting towards "commands this session took a shared resource
+  for" is a change to what a handoff reports.
+- `note_plan_block` is called by `guard_bash` and not by `commit_plan`, so a verb that
+  commits a Plan emits no block event. That matches today's behaviour and is the reason
+  it sits where it does; say so rather than move it by accident.
+- `plan_for(names=…)` should take the comma list, which is the note in
+  `Surprises & Discoveries` about `agentbus claim rig,bundler`.
+- `serving_check` takes a Plan now, so `cli_serve` and `cli_run` can ask the same
+  question the guard asks instead of their own.
 
 The `AGENTBUS_DEBUG=1` environment variable is set for every command run in this
 milestone. `main`'s catch-all swallows exceptions and exits 0, so a half-migrated
