@@ -298,6 +298,20 @@ that running one lifts the block.
   bus. Visible beats silent where the tool cannot know.
   Date/Author: 2026-08-02, Ibrahim + Claude.
 
+- Decision (M1): a subagent's own recorded root beats its parent's pin — the code was
+  right and this plan's prose was wrong, so the prose changed and no code did.
+  Rationale: a subagent's record tracks where that subagent demonstrably is.
+  `follow_agent_cwd` moves it only on positive evidence — a cwd that differs from both
+  the record and the parent's — and `party_view` already gives the subagent its own root
+  for every other purpose, so making the pin win here would have contradicted the rest of
+  the function to satisfy a sentence. The session's pin is a statement about the session;
+  read strictly, the old order had a session pinned to one tree dragging its subagents
+  into it, which is exactly the two-parties-two-checkouts case the subagent record exists
+  to express. And after the commit above, a subagent that wants to declare its own
+  location has a way to say so — `agentbus here --as <name>`, with a flag of its own —
+  and that declaration is the thing that should beat an inference, not the parent's.
+  Date/Author: 2026-08-02, Ibrahim + Claude.
+
 - Decision (M1): a caller that cannot name its party is treated exactly as a lock that
   cannot — permissive with at most one subagent, blocking with two.
   Rationale: `same_party` already reasoned this way about an unattributed holder and
@@ -407,13 +421,17 @@ hint exists. Otherwise an explicit `--as <name>` naming one of this session's ow
 subagents, honoured by the verb rather than by the resolver. Otherwise the session.
 
 *Where they are working.* A path the command itself names (`git -C <path>`), for that
-command only, without moving any record. Otherwise the root pinned by `agentbus here`,
-until `here` is run elsewhere. Otherwise the subagent's own recorded root, if the acting
-party is a subagent — updated when a payload's cwd differs both from the record and from
-the parent's cwd, because a cwd equal to the parent's is what a subagent reports when it
-has never changed directory and therefore carries no information. Otherwise the payload's
-cwd, which for an unpinned session is authoritative and moves the record. Otherwise the
-record as it stands.
+command only, without moving any record — and above every declaration below it, because
+it is a statement about one command where they are statements about a party. Otherwise,
+if the acting party is a subagent, that subagent's own recorded root: the tree it
+declared with `agentbus here --as <name>`, which is pinned and which no inference moves,
+or else the tree inferred for it — updated when a payload's cwd differs both from the
+record and from the parent's cwd, because a cwd equal to the parent's is what a subagent
+reports when it has never changed directory and therefore carries no information. Either
+way that record outranks the session's pin, which is where this order used to say the
+opposite; the reasoning is in the Decision Log. Otherwise the root pinned by `agentbus
+here`, until `here` is run elsewhere. Otherwise the payload's cwd, which for an unpinned
+session is authoritative and moves the record. Otherwise the record as it stands.
 
 Four places write `me` back to the session file and must therefore never be handed a
 view: `rename_session` (2818), `follow_chat_title` (2850), `cli_name` (4593), `cli_doing`

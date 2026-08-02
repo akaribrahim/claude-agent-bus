@@ -16,14 +16,16 @@
 #   by the resolver. Otherwise the session.
 #
 #   WHERE THEY ARE WORKING.  A path the command itself names (`git -C <path>`),
-#   for that command only, without moving any record. Otherwise the root pinned
-#   by `agentbus here`, until `here` is run elsewhere. Otherwise the subagent's
-#   own recorded root, if the acting party is a subagent — updated when a
-#   payload's cwd differs both from the record and from the parent's cwd,
-#   because a cwd equal to the parent's is what a subagent reports when it has
-#   never changed directory and therefore carries no information. Otherwise the
-#   payload's cwd, which for an unpinned session is authoritative and moves the
-#   record. Otherwise the record as it stands.
+#   for that command only, without moving any record, and above every
+#   declaration below it. Otherwise, if the acting party is a subagent, that
+#   subagent's own recorded root — the tree it declared with `agentbus here --as
+#   <name>`, or else the tree inferred for it, updated when a payload's cwd
+#   differs both from the record and from the parent's cwd, because a cwd equal
+#   to the parent's is what a subagent reports when it has never changed
+#   directory and therefore carries no information. Either way it outranks the
+#   session's pin. Otherwise the root pinned by `agentbus here`, until `here` is
+#   run elsewhere. Otherwise the payload's cwd, which for an unpinned session is
+#   authoritative and moves the record. Otherwise the record as it stands.
 #
 # EVERY case asserts through a decision the guard actually made — the name a
 # lock appears under on disk, or a `permissionDecision`, or who a denial says
@@ -40,20 +42,23 @@
 # where somebody is working therefore shows up as a different file in
 # `locks/` — which is the only place the guard's answer is visible from outside.
 #
-# Two cases below still contradict the order above, or are left unsettled by it.
-# They are marked DIVERGENCE and they pin what the code does today, which is the
-# whole point of M0: the behaviour is characterised first and changed
-# afterwards, in a commit that says which of the two was wrong.
+# One case below still contradicts the order above. It is marked DIVERGENCE and
+# it pins what the code does today, which is the whole point of M0: the
+# behaviour is characterised first and changed afterwards, in a commit that says
+# which of the two was wrong.
 #
 #   `--as` overrides the party hint, though the order puts the hint above it.
-#   A subagent's own root beats its parent's pin, which the order does not say.
 #
-# The third was settled in M1 and the code moved: a pinned session used to
-# ignore `git -C`, and no longer does. The pin was applied inside `caller_view`,
-# which is also the function the guard calls to apply `git -C`, so the pin
-# swallowed it on the way through. `git -C <path>` is a statement about one
-# command and a pin is a statement about a session, and the narrower one wins —
-# which is what the order above said all along.
+# Two were settled in M1. A pinned session used to ignore `git -C`, and no
+# longer does: the pin was applied inside `caller_view`, which is also the
+# function the guard calls to apply `git -C`, so the pin swallowed it on the way
+# through. `git -C <path>` is a statement about one command and a pin is a
+# statement about a session, and the narrower one wins — which is what the order
+# above said all along, so the code moved.
+#
+# The other went the other way. A subagent's own root beats its parent's pin,
+# and the order now says so; nothing in the engine changed. The reasoning is at
+# the case itself.
 
 . "$AB_ROOT/tests/lib.sh"
 
@@ -494,14 +499,19 @@ assert_contains "$(held_locks)" "$(wt_lock "$REPO")" \
 
 free_all sess-sub
 
-# DIVERGENCE, or an ordering the prose does not settle — either way it has to be
-# decided in M2 rather than inherited. The order puts the pin ABOVE the
-# subagent's own root, and read strictly that means a session pinned to one tree
-# drags its subagents into it. The code does the opposite: `party_view` overlays
-# the agent's record on top of the session's, pin and all. It reads as right —
-# `agentbus here --as <name>` writes the AGENT's record and never sets the
-# session's `pinned` flag, so the two are declarations by different parties
-# about different things — but the resolver will have to say so out loud.
+# The order used to put the pin ABOVE the subagent's own root, which read
+# strictly means a session pinned to one tree drags its subagents into it — the
+# two-parties-two-checkouts case the assertions just above exist to express,
+# undone by one `agentbus here`. M1 settled it the other way and corrected the
+# order rather than the code, which is why this is no longer marked DIVERGENCE.
+#
+# A subagent's record tracks where that subagent demonstrably is:
+# `follow_agent_cwd` moves it only on positive evidence, and `party_view` hands
+# the subagent that root for every other purpose. The parent's pin is a
+# statement about the parent. And a subagent that wants to state its own
+# location now has a way to — `agentbus here --as <name>`, asserted below —
+# so what beats an inference here is a declaration by the same party, not a
+# declaration by another one.
 ( cd "$REPO" && ab sess-sub here > /dev/null )
 out=$(apre sess-sub sub-w "$REPO" "git add -A" l-c4)
 assert_allow "$out" "subagent (c) vs pin (b): the parent pins itself elsewhere"
