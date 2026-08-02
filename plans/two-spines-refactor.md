@@ -78,8 +78,17 @@ that running one lifts the block.
       defect, recorded below. Every `DIVERGENCE` label in `test_identity.sh` is
       gone and both precedence orders above now state what the engine does,
       which is what M2 turns into `resolve_party`.
-- [ ] (M2) One resolver for who-and-where — `resolve_party`, replacing the inference
+- [x] (M2) One resolver for who-and-where — `resolve_party`, replacing the inference
       functions, with the precedence order written down and tested directly.
+      Done 2026-08-02: two commits, 1360 → 1376, no assertion edited or renamed.
+      `resolve_party(payload, cmd)` returns `(record, view)` and applies both
+      orders as nine named blocks; `follow_cwd`, `caller_view`, `party_view`,
+      `follow_agent_cwd` and `command_worktree` are private to it; the hint is
+      memoised; `require_record` guards the four write sites. Falsified in a
+      copied tree four times: the `git -C` block, the pin short-circuit, and
+      both of M2's own new checks. `current_session` is gone and `as_name` was
+      never added — reasoning below. The second commit exists because the first
+      was green through both mistakes this refactor most invites.
 - [ ] (M3) One decision core for commands — `plan_for` plus `commit_plan`, with the
       guard and the block message rendered from the result.
 - [ ] (M4) Retire the duplicate paths: the five command-line verbs call the core; the
@@ -235,6 +244,64 @@ that running one lifts the block.
   could not overwrite what the agent declared, and that guard covers only a cwd equal to
   the parent's. Every other cwd walked over the declaration — which is the common case,
   since a subagent told to work in a worktree reports that worktree.
+
+- Observation (M2, 2026-08-02): **`as_name` cannot be passed to `resolve_party` even
+  if it should be.** The plan's signature takes an "already-validated subagent name",
+  and validating one means `act_as`, which walks `load_agents(me["sid"])` — so a caller
+  has to have resolved before it has anything to hand over. The parameter is circular,
+  not merely unused, and `acting` staying at the verb is not the only reason it is
+  absent. Dropped, with clause (b) of *who is acting* kept in `resolve_party` as a
+  block that carries no code and says where it is honoured instead. That block matters:
+  without it the function reads as though `--as` had been forgotten.
+
+- Observation (M2, 2026-08-02): **`current_session` was never a session lookup**, which
+  is why the question "does it survive underneath the resolver" had an easy answer. Two
+  of its lines found a session id; the other forty were `follow_cwd`, `caller_view`,
+  `take_party_hint` and `follow_agent_cwd` — half the spine, under a name that promised
+  identity. Splitting the two lines back out would have left a cheap door that answers
+  "who is acting" with "nobody knows", which is precisely the unidentified lock
+  `same_party` exists to catch; a hook or verb reaching for the cheaper call is exactly
+  how the spine grew to thirteen functions. It is gone, and `register` — which computes
+  a session id too, and honours `pinned` when refreshing an existing record — is left
+  alone as the record's *constructor* rather than folded in. `resolve_party` deliberately
+  never registers: it is called from `hook_post_batch` and `hook_post_bash`, and a
+  PostToolBatch that registered would resurrect a session that had just been reaped. The
+  two hooks that may not take no for an answer call `register` and ask again.
+
+- Observation (M2, 2026-08-02): **`current_session`'s own comment said the CLI's re-rooted
+  dict "must not be written back", and two verbs wrote it back.** `agentbus name` and
+  `agentbus doing` persist whatever `need_me` hands them, and what it handed them was the
+  record re-rooted to the caller's shell — plus, whenever a hint existed, a subagent's
+  `agent_id` and `agent`. That last part is unreachable today only because `name` and
+  `doing` are not in `CLAIMING_VERBS + PASSTHROUGH_VERBS + PARTY_VERBS`, so no hint is
+  ever left under their argv. It was one entry in a tuple away from a subagent renaming
+  its parent and filing its own identity in the session record. `need_record` and
+  `require_record` close it by construction rather than by that coincidence. The re-root
+  itself is kept, deliberately: within one repository it is the same rule `follow_cwd`
+  applies to a payload, and it is what makes `agentbus doing` from a worktree say where
+  the work is.
+
+- Observation (M2, 2026-08-02): **the milestone was green through both of the mistakes
+  it most invites**, which is the fifth time this repository has had a green suite
+  measuring the wrong thing — and the first where it was noticed before the defect
+  rather than after. Handing one value to every caller passes every case in
+  `test_identity.sh`, because each drives one party at a time and a view written into
+  the session record still describes a real checkout: it is only wrong for the *other*
+  party, on the next call. And putting `_party_view` back into a hook — the exact way
+  this spine grew to thirteen functions, a hook wanting a subagent's root and reaching
+  for the nearest function that has one — leaves all sixteen behavioural files green.
+  Both now fail: the first through a section that drives the writing verbs from a party
+  a hint identifies as a subagent and then scans the whole bus for a persisted view, the
+  second through an AST check in `tests/check_syntax.py` that also refuses to pass by
+  having nothing to look for if a helper is renamed.
+
+- Observation (M2, 2026-08-02): **`hook_pre_tool`'s `caller_view` call on the session
+  path was already dead.** `current_session` had just run `follow_cwd` over the same
+  payload cwd, so by the time `caller_view(me, payload.get("cwd"))` ran, either the
+  record already matched the cwd or the session was pinned and both functions returned
+  early. The line looked like the one that rooted a session's call and it could not move
+  anything; what actually rooted the call was `follow_cwd`, one function earlier and one
+  file section away. Nothing in the order changed when it went.
 
 - Observation: the two spines were identified by classifying defects, not by reading
   code, and that is what makes this plan worth doing rather than a rewrite. Twenty-two
@@ -429,6 +496,22 @@ that running one lifts the block.
   the party is known.
   Date/Author: 2026-08-02, Ibrahim + Claude.
 
+- Decision (M2): `resolve_party` replaces `current_session` outright, drops the drafted
+  `as_name`, and gives the command-line tool two doors — `need_me` for the verbs that
+  decide and `need_record` for the two that write.
+  Rationale: three shapes were considered for the record/view split. A single value was
+  rejected for the reason already in the Decision Log, and M2 found that the suite would
+  not have caught it. Keeping `current_session` as a thin session-id lookup was rejected
+  because it was never one — two of its lines found a session id and forty were the
+  spine — and because a cheap door that answers "who is acting" with "nobody knows" is
+  the unidentified lock `same_party` exists to catch. A `record=` parameter, so that the
+  two hooks which register could feed the fresh record back in, was rejected once
+  `register` turned out to set `party_known` itself: calling `resolve_party` a second
+  time after registering is exactly equivalent, and the memoised hint is what makes
+  calling twice safe at all. `as_name` is circular rather than merely unused, which is
+  in `Surprises & Discoveries`.
+  Date/Author: 2026-08-02, Claude.
+
 ## Outcomes & Retrospective
 
 To be written at the end of M5.
@@ -499,6 +582,11 @@ to "could this command touch a resource" and it must remain a strict **superset*
 and no test that calls the engine directly would notice.
 
 ### Spine one as it stands: who is acting, and where
+
+**Superseded by M2 as of 2026-08-02.** What follows is the shape the milestone started
+from; the definition lines are stale and the census is history. The two precedence
+orders below are *not* history — they are the specification, they are what
+`resolve_party` implements block by block, and `tests/test_identity.sh` pins them.
 
 Thirteen functions participate. Definition lines as of 2026-08-02, after the two fixes
 above:

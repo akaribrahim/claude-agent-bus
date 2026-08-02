@@ -346,7 +346,7 @@ ab_hook prompt-submit "$(payload session sid=sess-pin "cwd=$REPO")" > /dev/null
 assert_equal "$WT2" "$(session_field sess-pin root)" "nor does the next, or the next"
 
 # And — the half of this that was missed the first time — the GUARD has to
-# judge it there too. The record is what `status` prints; `caller_view` is what
+# judge it there too. The record is what `status` prints; `_caller_view` is what
 # the guard decides from, and it had no pin check, so the declaration was
 # cosmetic: the roster showed the declared tree while the guard went on
 # comparing services against the tree the payload named. That is the same

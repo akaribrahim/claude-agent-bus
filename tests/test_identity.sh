@@ -2,12 +2,13 @@
 # Who is acting, and where they are working — the two precedence orders, one
 # case per rule.
 #
-# Thirteen functions in the engine answer those two questions between them, each
-# added to close one defect and none of them removing another. Six of the
-# twenty-two defects this plugin has produced came from that spine. This file
-# states the answers as two orders and pins them rule by rule, so that a
-# refactor which collapses the thirteen into one resolver either keeps every
-# rule or fails here by name.
+# Thirteen functions in the engine used to answer those two questions between
+# them, each added to close one defect and none of them removing another. Six of
+# the twenty-two defects this plugin has produced came from that spine. This file
+# states the answers as two orders and pins them rule by rule, so that the
+# refactor which collapsed the thirteen into `resolve_party` either kept every
+# rule or failed here by name. It is still the specification: the orders live
+# here and in that one function, and nowhere a third time.
 #
 #   WHO IS ACTING.  The `agent_id` on the payload, if there is one. Otherwise an
 #   explicit `--as <name>` naming one of this session's own subagents, honoured
@@ -49,7 +50,7 @@
 # code's way and two went the prose's:
 #
 #   A pinned session used to ignore `git -C`. The pin was applied inside
-#   `caller_view`, which is also the function the guard calls to apply `git -C`,
+#   `_caller_view`, which is also the function the guard calls to apply `git -C`,
 #   so the pin swallowed it on the way through. `git -C <path>` is a statement
 #   about one command and a pin is a statement about a session, and the narrower
 #   one wins — which is what the order above said all along, so the CODE moved.
@@ -69,7 +70,7 @@
 # --------------------------------------------------------------- helpers ----
 #
 # None of these are in lib.sh. `reason_of` is copied from test_subagents.sh;
-# the other three are new and exist because the assertions here are about
+# the other four are new and exist because the assertions here are about
 # things the guard wrote rather than about hook output.
 
 reason_of() { json_field "$1" hookSpecificOutput permissionDecisionReason; }
@@ -307,7 +308,7 @@ assert_contains "$(reason_of "$out")" "$ONE" \
 free_all sess-a
 
 # Where the two meet, and the case the order used to get backwards. The hint is
-# applied in `current_session` and `acting` then overwrites it, so `--as` wins.
+# applied in `resolve_party` and `acting` then overwrites it, so `--as` wins.
 # M1 settled it by correcting the order rather than the code: a hint is an
 # inference the guard made from a command line — two subagents running the
 # identical line can already swap hints, which `take_party_hint` accepts as the
@@ -397,8 +398,8 @@ free_all sess-a
 #
 # This is the case that must contradict the record deliberately, because the
 # assertion that shipped with the pin did not: it asked the record, which was
-# right, while `caller_view` — which is what the guard decides from — had no pin
-# check at all and went on locking the tree the payload named. The evidence at
+# right, while `_caller_view` — which is what the guard decides from — had no
+# pin check at all and went on locking the tree the payload named. The evidence at
 # the time was
 #
 #     pinned record : worktree@fefd30
@@ -433,8 +434,8 @@ assert_contains "$(held_locks)" "$(wt_lock "$REPO")" \
 free_all sess-a sess-b sess-pin
 
 # The two statements meet here, and the narrower one wins. `git -C <path>` is
-# about one command; a pin is about a session. Until M1 the pin took it: the
-# guard applies `command_worktree`'s answer by calling `caller_view`, whose pin
+# about one command; a pin is about a session. Until M1 the pin took it:
+# `_command_worktree`'s answer is applied by calling `_caller_view`, whose pin
 # short-circuit returned before the path was looked at, so the function that was
 # supposed to apply `git -C` was the function that discarded it.
 out=$(pre sess-pin "$REPO" "git -C $REPO add -A" l-b4)
@@ -457,7 +458,7 @@ assert_equal "$(wt_lock "$WT")" "$(held_locks)" \
 free_all sess-pin
 
 # A subagent of a pinned session is caught by the same rule, and has to be freed
-# by the same one: `party_view` builds its view with `dict(me)`, so the parent's
+# by the same one: `_party_view` builds its view with `dict(me)`, so the parent's
 # `pinned` is copied into it and the short-circuit fires on the subagent's path
 # too. Rooted in the pinned tree deliberately — then the only thing that can put
 # the lock in the other checkout is the path the command names.
@@ -535,7 +536,7 @@ free_all sess-sub
 # order rather than the code, which is why this is no longer marked DIVERGENCE.
 #
 # A subagent's record tracks where that subagent demonstrably is:
-# `follow_agent_cwd` moves it only on positive evidence, and `party_view` hands
+# `_follow_agent_cwd` moves it only on positive evidence, and `_party_view` hands
 # the subagent that root for every other purpose. The parent's pin is a
 # statement about the parent. And a subagent that wants to state its own
 # location now has a way to — `agentbus here --as <name>`, asserted below —
