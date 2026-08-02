@@ -165,11 +165,56 @@ def check_no_stray_output():
     ok("nothing prints to stdout outside the CLI and hook emitters")
 
 
+def check_one_resolver():
+    """"Who is acting and where" is answered in `resolve_party` and nowhere else.
+
+    Thirteen functions used to answer it between them, and the order they were
+    applied in lived at each call site rather than anywhere a reader could check
+    it. Six of this plugin's twenty-two defects came out of the disagreements —
+    among them a guard that applied `git -C <path>` by calling the very function
+    whose pin check discarded it, and an `agentbus here` that pinned the record
+    `status` prints while the guard went on deciding from the payload's cwd.
+
+    The five inference helpers are private to `resolve_party` now; this is what
+    keeps them private. A grep would be gameable by renaming a local, and the
+    mistake is not made deliberately anyway: it is made by a hook that wants a
+    subagent's root and reaches for the nearest function that has one, which is
+    exactly how the spine grew to thirteen functions the first time."""
+    import ast
+    tree = ast.parse(open(os.path.join(ROOT, "bin", "agentbus")).read())
+    what = "the who-and-where helpers are private to resolve_party"
+    private = {"_follow_cwd", "_caller_view", "_party_view",
+               "_follow_agent_cwd", "_command_worktree"}
+    # They may call each other: a subagent's view is its record followed to
+    # where it is working, which is one lookup and not two.
+    allowed = private | {"resolve_party"}
+    defined, offenders = set(), []
+    for top in tree.body:
+        if not isinstance(top, ast.FunctionDef):
+            continue
+        if top.name in private:
+            defined.add(top.name)
+        if top.name in allowed:
+            continue
+        for sub in ast.walk(top):
+            if isinstance(sub, ast.Call) and getattr(sub.func, "id", "") in private:
+                offenders.append("line %d: %s() called from %s()"
+                                 % (sub.lineno, sub.func.id, top.name))
+    missing = sorted(private - defined)
+    if missing:
+        # Renaming one would make this check pass by having nothing to look for.
+        return bad(what, "no such function in the engine: %s" % ", ".join(missing))
+    if offenders:
+        return bad(what, "\n".join(offenders))
+    ok(what)
+
+
 def main():
     check_engine_compiles()
     check_fastpath_parses()
     check_hook_wiring()
     check_no_stray_output()
+    check_one_resolver()
     return 1 if failed else 0
 
 

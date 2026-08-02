@@ -100,6 +100,23 @@ for p in glob.glob('$AGENTBUS_HOME/locks/*.json'):
 print(' '.join(sorted(names)))"
 }
 
+# Every file on the bus that carries the marker `resolve_party` puts on a view.
+# A record on disk with `_view` on it is a view that was persisted, wherever it
+# came from — including from a write site nobody has thought to check.
+views_on_disk() {
+  python3 -c "
+import glob, json, os
+bad = []
+for p in glob.glob(os.path.join('$AGENTBUS_HOME', '**', '*.json'), recursive=True):
+    try:
+        rec = json.load(open(p))
+    except Exception:
+        continue
+    if isinstance(rec, dict) and '_view' in rec:
+        bad.append(os.path.basename(p))
+print(' '.join(sorted(bad)))"
+}
+
 # The checkout the guard recorded on a lock when it took it. Same decision as
 # the digest in the name, in a form a failure message can be read from.
 lock_worktree() {   # <lock name> → the root the guard resolved
@@ -599,5 +616,64 @@ assert_equal "$(wt_lock "$WT")" "$(held_locks)" \
   "record (e): and locked where the record stands, which is where (d) left it"
 
 free_all sess-free
+
+# ==============================================================================
+# AND ONE ANSWER IS NEVER WRITTEN OVER THE OTHER
+# ==============================================================================
+#
+# `resolve_party` answers twice: the session's own record, which is safe to
+# write back, and the acting party's view of it, which is not. Four verbs write
+# what they are handed straight to the session file — `rename_session`,
+# `follow_chat_title`, `agentbus name` and `agentbus doing` — and every other
+# verb wants the view, so handing one value to all of them is the obvious
+# simplification and it is wrong. Persisting a view was the first thing tried
+# and it was worse than a stale record: two subagents dragged the session's root
+# back and forth between them on every tool call, so it was not even
+# consistently wrong. A subagent's `agentbus here --as` would likewise pin its
+# parent, one field carrying two meanings.
+#
+# Nothing above would catch it. Every case in this file drives one party at a
+# time, and a view written into the session record still describes a real
+# checkout — it is only wrong for the OTHER party, on the next call.
+
+new_session sess-v "$REPO"
+ab_hook subagent-start "$(payload subagent-start sid=sess-v "cwd=$REPO" \
+  agent_id=sub-v agent_type=general-purpose)" > /dev/null
+
+# A shell becomes a subagent only through the hint, so the declaration below is
+# made by the agent and handled by a verb that writes.
+out=$(apre sess-v sub-v "$REPO" "agentbus here $WT" w-v1)
+assert_allow "$out" "record vs view: the guard leaves a hint for the declaring agent"
+( cd "$REPO" && ab sess-v here "$WT" > /dev/null )
+assert_equal "$WT" "$(agent_field sess-v sub-v root)" \
+  "record vs view: the agent the hint named is the one that got the declaration"
+
+# The guard assertion the section turns on. If the agent's view had been written
+# to the session file, the parent would now be judged in the agent's checkout —
+# and would collide with the session that is actually standing there.
+out=$(pre sess-v "$REPO" "git add -A" w-v2)
+assert_allow "$out" "record vs view: the parent's own command is allowed"
+assert_equal "$(wt_lock "$REPO")" "$(held_locks)" \
+  "record vs view: and locked in the parent's checkout, not the one its agent declared"
+assert_equal "$REPO" "$(session_field sess-v root)" \
+  "record vs view: the session record never moved   [supporting]"
+assert_equal "" "$(session_field sess-v agent_id)" \
+  "record vs view: nor took on the identity of the party that ran the verb   [supporting]"
+free_all sess-v
+
+# And the two verbs whose whole job is to write the record. `name` and `doing`
+# are not verbs the guard leaves hints for, so nothing here can identify a
+# party — which is the point: the wrong value is available and must not be the
+# one taken.
+ab sess-v name idv > /dev/null
+ab sess-v doing "checking what gets written" > /dev/null
+out=$(pre sess-v "$REPO" "git add -A" w-v3)
+assert_allow "$out" "record vs view: a renamed session is still guarded"
+assert_equal "$(wt_lock "$REPO")" "$(held_locks)" \
+  "record vs view: in the same checkout it was in before it was written to"
+free_all sess-v
+
+assert_equal "" "$(views_on_disk)" \
+  "record vs view: and no file on the bus carries a party view at all"
 
 finish
