@@ -722,6 +722,10 @@ assert_contains "$REASON" "which is not this checkout's" "and told whose it is n
 advertised wrong-port
 assert_contains "$REASON" "$MINE" "and told which port is this checkout's"
 
+# The advertised line is `eval "$(agentbus env)"`, asserted verbatim above. What
+# is run here is the inner half: evaluating it would export API_PORT into this
+# test's own shell for every scenario after it, and what the exit is worth is
+# entirely in what the inner half prints.
 out=$(take_exit b8-2 sess-b "$WT" 'agentbus env')
 assert_contains "$out" "export API_PORT=$MINE" "the advertised env hands over this checkout's port"
 guard b8-3 sess-b "$WT" "$WRONG"
