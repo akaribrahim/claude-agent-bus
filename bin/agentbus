@@ -3717,8 +3717,12 @@ def lock_name(me, res, cmd=""):
     same tree without ever making two sessions in different worktrees wait.
 
     A resource with a `key` is one per instance: one simulator of several, one
-    device of several."""
-    inst = instance_of(res, cmd)
+    device of several. The instance is normally read off the command by
+    `instance_of`; an instance already on the resource is one the caller named
+    outright — `agentbus claim simulator@ABC123`, where there is no command for
+    a `key` regex to match against — and it wins, because it is the only
+    evidence there is."""
+    inst = res.get("instance") or instance_of(res, cmd)
     if inst:
         return "%s@%s" % (res["name"], inst)
     if res.get("scope") == "worktree":
@@ -4107,7 +4111,11 @@ def _named_resources(cfg, me, names):
     A comma list is split, because `explicit_resources` splits one and the two
     have to mean the same thing. They did not: the guard understood `agentbus
     claim rig,bundler` and the verb wrote a single lock named `rig,bundler`,
-    printed `claimed`, and held neither of them."""
+    printed `claimed`, and held neither of them.
+
+    Each resource comes back with its `instance` filled in and no `lock`:
+    naming the lock is `lock_name`'s job and `plan_for` does it for both halves
+    at once, so that there is still exactly one function that answers it."""
     by_name = {r["name"]: r for r in cfg.get("resources", [])}
     out, seen = [], set()
     for name in (names if isinstance(names, (list, tuple)) else [names]):
@@ -4119,7 +4127,6 @@ def _named_resources(cfg, me, names):
             if res:
                 res = dict(res)
                 res["instance"] = ""
-                res["lock"] = lock_name(me, res)
             else:
                 base, at, inst = part.rpartition("@")
                 if at and not part.startswith("file:"):
@@ -4129,17 +4136,15 @@ def _named_resources(cfg, me, names):
                     res = dict(decl)
                     res["instance"] = re.sub(
                         r"[^A-Za-z0-9_.-]", "_", inst)[:32]
-                    res["lock"] = "%s@%s" % (decl["name"], res["instance"])
                 else:
-                    res = {"name": part, "instance": "", "lock": part,
-                           "_literal": True}
+                    res = {"name": part, "instance": "", "_literal": True}
             # Named outright, like `explicit_resources` marks the same thing on
             # the guard's side: a deliberate act, worth a line on the bus, and
             # not something the service probe should refuse to move.
             res["_explicit"] = True
-            if res["lock"] in seen:
+            if (res["name"], res["instance"]) in seen:
                 continue
-            seen.add(res["lock"])
+            seen.add((res["name"], res["instance"]))
             out.append(res)
     return out, ""
 
@@ -4206,6 +4211,8 @@ def plan_for(me, cmd=None, names=None, sessions=None, probe_services=False):
             return _plan(cmd, "deny", "no-such-resource", {"base": unknown},
                          [], [_exit("status", "ask", "agentbus status",
                                     "the resources this repo declares")])
+        for res in resources:
+            res["lock"] = lock_name(me, res)
     if not resources:
         return _plan(cmd)
     # Check every resource before taking any. A command that is going to be
@@ -5602,17 +5609,27 @@ def cli_serve(args):
         print("'%s' declares no `start` command, so agent-bus cannot move it. "
               "Add one to .claude/agent-bus.json." % pos[0], file=sys.stderr)
         sys.exit(1)
-    ok, lock, holder, _ = do_claim(me, lock_name(me, res), why="handover",
-                                   mode="hard")
+    # From the Plan, like every other verb: this is a service and services are
+    # not usually instance-keyed, but a `scope: "worktree"` one would have been
+    # claimed here under a name the guard never writes.
+    plan = plan_for(me, names=res["name"])
+    planned = plan["resources"][0]
+    ok, lock, holder, reason = do_claim(me, planned["lock"], why="handover",
+                                        mode="hard")
     if not ok:
-        print("'%s' is held by %s (%s) — ask before moving it out from under them:"
-              "\n  agentbus post --to %s \"I need %s pointed at my worktree\""
-              % (res["name"], holder.get("agent"),
-                 held_for(lock.get("acquired_at")), holder.get("agent"),
-                 res["name"]), file=sys.stderr)
+        if not holder:
+            print("agent-bus: could not take '%s': %s" % (res["name"], reason),
+                  file=sys.stderr)
+            sys.exit(1)
+        # The line under this used to be an `agentbus post --to <holder>` this
+        # function wrote out for itself — the only advice on the command surface
+        # that was still composed by hand rather than taken from the Plan.
+        print(render_refusal(
+            _lock_block(me, "", planned, lock, holder, plan["resources"]),
+            " — ask before moving it out from under them."), file=sys.stderr)
         sys.exit(1)
     good, detail = ensure_serving(me, res)
-    do_release(me, lock_name(me, res), quiet=True)
+    do_release(me, planned["lock"], quiet=True)
     if not good:
         print("agent-bus: %s" % detail, file=sys.stderr)
         sys.exit(1)

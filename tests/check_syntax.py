@@ -209,6 +209,53 @@ def check_one_resolver():
     ok(what)
 
 
+def check_one_lock_namer():
+    """"Under what name is this locked" is asked in `plan_for` and `locks_text`.
+
+    The other half of spine two. Twelve call sites used to reach `lock_name`,
+    `resolve_lock` or `file_lock_name` between them, and five were command-line
+    verbs working the answer out for themselves — which is how `agentbus claim
+    worktree` came to write a lock under the bare name for weeks while the guard
+    filed the same resource as `worktree@<digest>`, printing "claimed" the whole
+    time and holding nothing anybody read. `agentbus wait` did it too, and the
+    last-resort advice at the bottom of every deny message was a `claim --steal`
+    that resolved the same wrong way.
+
+    Two callers are left and they are not interchangeable. `plan_for` answers it
+    for one command or one named resource, which is what every verb and the
+    guard now go through. `locks_text` answers it for every declared resource
+    with no command in hand at all — it is a display path, reached from `status`
+    and from the session-start banner, and there is nothing for a Plan to be
+    about.
+
+    An AST check rather than a grep count, because a grep is satisfied by
+    renaming a parameter, and it refuses to pass by having nothing to look for
+    if the function itself is renamed."""
+    import ast
+    tree = ast.parse(open(os.path.join(ROOT, "bin", "agentbus")).read())
+    what = "lock_name is called only from plan_for and locks_text"
+    allowed = {"plan_for", "locks_text", "lock_name"}
+    defined, offenders = False, []
+    for top in tree.body:
+        if not isinstance(top, ast.FunctionDef):
+            continue
+        if top.name == "lock_name":
+            defined = True
+        if top.name in allowed:
+            continue
+        for sub in ast.walk(top):
+            if isinstance(sub, ast.Call) and \
+                    getattr(sub.func, "id", "") == "lock_name":
+                offenders.append("line %d: lock_name() called from %s()"
+                                 % (sub.lineno, top.name))
+    if not defined:
+        # Renaming it would make this check pass by having nothing to look for.
+        return bad(what, "no function called lock_name in the engine")
+    if offenders:
+        return bad(what, "\n".join(offenders))
+    ok(what)
+
+
 def check_exits_are_planned():
     """A block message may not compose a command line of its own.
 
@@ -267,6 +314,7 @@ def main():
     check_hook_wiring()
     check_no_stray_output()
     check_one_resolver()
+    check_one_lock_namer()
     check_exits_are_planned()
     return 1 if failed else 0
 
