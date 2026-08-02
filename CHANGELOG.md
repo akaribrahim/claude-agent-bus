@@ -2,6 +2,86 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.1.0 — 2026-08-02
+
+Make the way out of a block a line you can actually run.
+
+A guard is only as good as its exit. Twelve of this plugin's twenty-two defects
+came from two habits: answering "who is acting and where" in thirteen places,
+and answering "what does this command touch, and what is it locked under" in
+the guard, in five command-line verbs, and a third time in the English of the
+block message itself. When those answers disagreed, the tool contradicted
+itself — and what a reader saw was advice that ran, reported success, and
+changed nothing.
+
+Both questions now have one answer each, and the advice at the bottom of a
+block is generated from the same object that decided to block. A message can no
+longer advertise a line the guard would refuse, because a message no longer
+knows how to write a command down.
+
+**Blocks you could not get out of**
+
+- **A block about one device now names that device.** With a `key` resource,
+  the guard locks `simulator@ABC123` while every exit it printed said
+  `simulator`. Both of them — the wait and the steal — took a *different* lock
+  that nobody was contending for, printed `claimed`, exited 0, and left the
+  device exactly where it was. Only `AGENTBUS_OFF=1` ever got anyone past. The
+  exits now name the lock that is actually in the way.
+- **`agentbus claim <res>@<instance>`** takes one of several outright, and a
+  mistyped base is refused instead of quietly writing a lock under the typo —
+  which was the same defect one keystroke away.
+- **The unidentified-party block's first suggestion works.** It said `agentbus
+  claim <res> --as <your name>`; the guard let the line through and the command
+  itself then refused it, because naming yourself does not prove an anonymous
+  lock is yours. It now says `--as <your name> --steal`, and says why: nobody
+  can confirm the claim is yours, so taking it is recorded on the bus as a
+  takeover rather than a quiet adoption.
+
+**Commands that reported success and did nothing**
+
+- **`agentbus claim a,b` takes both.** The comma list is the form the guard
+  understands and the form this plugin's own advice printed — and `claim`,
+  `wait` and `release` all wrote a single lock named literally `a,b` while `a`
+  and `b` stayed free. All three take the list now.
+- **`agentbus wait` from a shell queues instead of lying.** Typed any way but
+  the exact line the guard saw, a wait could not say which agent it was, was
+  read as the session itself, and a session never contends with its own
+  subagent — so it printed `claimed`, exited 0, and the sibling that had read
+  the advice stayed blocked. Worse, it asked for a hard lock, which upgraded
+  the sibling's one-command claim in place so that the command ending no longer
+  gave it back.
+- **`agentbus status` sees a device somebody is holding.** With no command in
+  hand it only ever looked for the bare resource, so a resource held under an
+  instance was reported as free — on the screen an agent reads before deciding
+  whether it needs to wait for anything.
+- **`agentbus run <device>`** takes what that device implies, not what happened
+  to be typed.
+
+**Saying where you are**
+
+- **`git -C <path>` beats `agentbus here`.** A pin is a statement about where a
+  session is working; `git -C` is a statement about one command, and the
+  narrower one now wins.
+- **`agentbus here --as <name>` sticks.** A session's declaration was protected
+  by a flag and a subagent's was protected by a coincidence, so the next hook
+  payload could overwrite what an agent had just declared.
+- Both fast paths now agree about an engine that has lost its executable bit. A
+  checkout in that state used to stop guarding on macOS and go on guarding on
+  Windows, which is worse than either answer alone.
+
+**Cost**
+
+A hook that wakes the engine got about 4 ms slower, and the reason is honest
+rather than algorithmic: the engine grew from 5800 to 6700 lines, and a hook is
+handed a script rather than an import, so Python recompiles the whole file
+every time and is never allowed to cache the result. The guard's own work is
+still single-digit milliseconds. The shell fast path in front of it is
+unchanged at about 5 ms, and it is what most tool calls actually pay.
+
+The test suite went from 932 assertions to 1571, and three of them are
+structural: they fail if the two questions above are ever answered in more than
+one place again.
+
 ## 2.0.0 — 2026-08-02
 
 Stop taking turns on one port. Give each checkout its own.

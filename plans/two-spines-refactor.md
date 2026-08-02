@@ -490,6 +490,16 @@ requires that running one lifts the block.
   added and nobody re-counted. Counting call sites in the source gives neither, because
   several checks are an `ok`/`bad` pair around one `if`; the run is the count.
 
+- Observation (M5, 2026-08-02): **one unreproduced failure in five full suite runs.**
+  While the 2.1.0 version bump was being checked, `make test` reported `1571 assertions,
+  1 failure` once. Every file in that run took roughly twice as long as usual
+  (`test_subagents.sh` 32s against 17s, `test_detect.sh` 18s against 4s) — the machine
+  was running the live acceptance suite and three other sessions at the time. Four full
+  runs before and after it were clean, and the failing assertion's name was not captured.
+  Recorded rather than dismissed: an unnamed flake is the beginning of the same story as
+  the `tail -12` one this plan closed, and the next person to see it should know it has
+  been seen before and is suspected to be load-sensitive rather than new.
+
 ## Decision Log
 
 - Decision: refactor the two spines in place rather than rewriting the plugin.

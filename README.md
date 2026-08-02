@@ -368,7 +368,9 @@ hook payloads could not.
 ## Requirements
 
 Python 3.8+. Bash for the fast path, or Python-only hooks without it. macOS and
-Linux verified; Windows implemented, unverified.
+Linux verified. Windows 10 verified but young — see Limits for exactly how far
+that run got, and note that the hook cost in the table above has not been
+re-measured there since the 2.1.0 refactor.
 
 ## License
 
