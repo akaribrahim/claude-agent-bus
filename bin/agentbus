@@ -889,15 +889,22 @@ def resolve_party(payload=None, cmd=""):
     # overrule it — a hint left under the same command line least of all.
     aid = payload.get("agent_id") if payload else None
     if aid:
-        # Where (b) arrives with it. `_party_view` roots the subagent in its own
-        # record: the tree it declared with `agentbus here --as <name>`, which
-        # is pinned and which no inference moves, or else the tree inferred for
-        # it. That record outranks the session's pin (c) — a pin is a statement
-        # about the session, and one session with two parties in two checkouts
-        # is exactly what a single per-session root cannot express. On
-        # 2026-07-29 an agent that had pointed a service at its own worktree was
-        # refused permission to use it and turned the plugin off for the rest of
-        # its turn, which is the one outcome this plugin cannot afford.
+        # ---- where (b): the acting subagent's own recorded root --------------
+        #
+        # It arrives with the identity, because for a subagent the two are one
+        # lookup. `_party_view` roots it in its own record: the tree it declared
+        # with `agentbus here --as <name>`, which is pinned and which no
+        # inference moves, or else the tree inferred for it — moved only on a
+        # cwd that differs from both the record and the parent's, since a cwd
+        # equal to the parent's is what a subagent reports when it has never
+        # changed directory and therefore says nothing.
+        #
+        # That record outranks the session's pin (c). A pin is a statement about
+        # the session, and one session with two parties in two checkouts is
+        # exactly what a single per-session root cannot express. On 2026-07-29
+        # an agent that had pointed a service at its own worktree was refused
+        # permission to use it and turned the plugin off for the rest of its
+        # turn, which is the one outcome this plugin cannot afford.
         view = _party_view(record, payload)
     else:
         view = dict(record)
