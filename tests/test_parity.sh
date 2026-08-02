@@ -363,7 +363,7 @@ sibling|ask|agentbus post --to @holder@ "..."
 sibling|through|agentbus wait db --why "..."
 sibling|bypass|AGENTBUS_OFF=1 <your command>
 sibling|through|agentbus claim db --steal --why "..."
-unidentified|through|agentbus claim db --as <your name>
+unidentified|through|agentbus claim db --as <your name> --steal --why "..."
 unidentified|through|agentbus wait db --why "..."
 unidentified|through|agentbus release --all
 unidentified|ask|agentbus status
@@ -572,21 +572,30 @@ assert_equal deny "$VERDICT" "a claim nobody can attribute blocks this session's
 assert_contains "$REASON" "nothing can" "and says why it cannot tell"
 advertised unidentified
 
-# DEFECT (pinned, M1 must fix): `agentbus claim db --as <your name>` is the
-# first thing this block tells the reader to do, and it does not work.
+# `agentbus claim db --as <your name>` was this block's first advice and it did
+# not work: the guard let the line past, and then `do_claim` refused it, because
+# `same_party` answers no for exactly the reason the block exists. Naming
+# yourself does not make an anonymous lock yours — believing it would let one
+# subagent adopt another's in silence, which is the failure `same_party` is for.
 #
-# The guard no longer refuses the line — that half was fixed on 2026-08-02, when
-# `--as` was added beside `--steal` in `explicit_resources`. But `do_claim` is
-# then asked to take a lock held by an unidentified party of the same session,
-# `same_party` answers no for exactly the reason the block exists, and the CLI
-# exits 1. The advice is reachable and useless: naming yourself does not make an
-# anonymous lock yours, and nothing in the message says to add `--steal`.
-out=$(take_exit b4-2 sess-a "$REPO" "agentbus claim db --as $SUB2" sub-2)
-assert_contains "$out" "is held by $A" \
-  "DEFECT (pinned): the \`--as\` claim the block advertises is refused by the CLI"
+# So M1 changed the advice rather than the rule: taking a lock nobody can
+# attribute IS a takeover, and `--steal` is how this tool says takeover. The
+# line the block prints now works, and the taking is loud.
+out=$(take_exit b4-2 sess-a "$REPO" \
+  "agentbus claim db --as $SUB2 --steal --why \"...\"" sub-2)
+assert_contains "$out" "claimed 'db'" \
+  "the \`--as … --steal\` claim the block advertises takes the anonymous lock"
 guard b4-3 sess-a "$REPO" "$PSQL" sub-2
-assert_equal deny "$VERDICT" \
-  "DEFECT (pinned): so the first exit the unidentified block offers does NOT lift it"
+assert_equal allow "$VERDICT" \
+  "so the first exit the unidentified block offers lifts it"
+assert_contains "$(ab sess-a status)" "took 'db' from $A (forced)" \
+  "and it is on the bus as a takeover, not as a quiet adoption"
+
+# Back to an anonymous lock, for the two exits that have not been run yet.
+ab sess-a release --all > /dev/null
+ab sess-a claim db --why "from inside a runner script" > /dev/null
+guard b4-3b sess-a "$REPO" "$PSQL" sub-2
+assert_equal deny "$VERDICT" "a second script-borne claim blocks the same way"
 
 # The wait does queue against the right lock, which is the property that matters
 # — it is the exit that works if the other agent ever finishes.

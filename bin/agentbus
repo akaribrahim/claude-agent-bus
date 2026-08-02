@@ -3730,13 +3730,24 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         # indistinguishable from its parent's. Treating that as "the session
         # itself" is what let three agents drive one simulator at once, so it
         # blocks instead; this is how whoever took it says who they are.
+        #
+        # `--steal` is part of the advice rather than an afterthought. Naming
+        # yourself does not make an anonymous lock yours — `same_party` refuses
+        # it for exactly the reason this block exists, and believing `--as` here
+        # would let one subagent adopt another's lock in silence, which is the
+        # three-agents-one-simulator failure. Taking it anyway is a takeover, so
+        # it is called one: `--steal` puts "took 'X' from Y (forced)" on the bus
+        # and the other agent can see what happened.
         lines += ["", "  One of this session's agents took this through a shell, "
                       "where nothing can",
                   "  tell one agent from another — so agent-bus cannot say "
                   "whether it is yours.",
-                  "  If it is yours, name yourself and take it properly:",
-                  "    agentbus claim %s --as <your name>   (yours is in the "
-                  "message that named you)" % exit_name,
+                  "  If it is yours, say so and take it. Nothing here can "
+                  "confirm that it is, so",
+                  "  this goes on the bus as a takeover and whoever holds it "
+                  "sees that it moved:",
+                  "    agentbus claim %s --as <your name> --steal --why \"...\"   "
+                  "(yours is in the message that named you)" % exit_name,
                   "  If it is not, wait for it, or give it back if you know it "
                   "is finished:",
                   "    agentbus wait %s --why \"...\"" % exit_name,
