@@ -105,6 +105,50 @@ for line in open(sys.argv[1]):
 PY
 }
 
+# The same, but only what the session has said since a mark taken earlier.
+#
+# For asserting that something did NOT happen, `transcript | tail -n` is not
+# good enough, and this is not hypothetical: the "a failure naming nobody
+# else's files produces no note" check below used `tail -12` and failed
+# intermittently, because how far back twelve lines reach depends on how much
+# the model chose to say that turn. When it was terse, the window swallowed the
+# PREVIOUS turn — the one where a note was correct — and the check reported the
+# plugin had done the very thing it was verifying it had not.
+#
+# A record count taken before the prompt is exact and does not care how
+# talkative the model is.
+mark() {   # <stream-json file> → a mark to pass to transcript_since
+  [ -f "$1" ] && wc -l < "$1" || printf '0'
+}
+
+transcript_since() {   # <stream-json file> <mark>
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+skip = int(sys.argv[2])
+for i, line in enumerate(open(sys.argv[1])):
+    if i < skip:
+        continue
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    kind = m.get("type")
+    if kind in ("assistant", "user"):
+        for c in m.get("message", {}).get("content", []) or []:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "text":
+                print(c["text"])
+            elif c.get("type") == "tool_result":
+                t = c.get("content")
+                if isinstance(t, list):
+                    t = " ".join(x.get("text", "") for x in t if isinstance(x, dict))
+                print(t or "")
+    elif kind == "result":
+        print(m.get("result") or "")
+PY
+}
+
 # What our hooks actually printed, taken from the session's own hook events.
 #
 # This is the evidence that matters for anything injected as additionalContext.
@@ -324,10 +368,11 @@ for f in sorted(glob.glob('$T/bus/sessions/*.json')):
   fi
 
   # The same shape of failure, about a file nobody else has touched.
+  local mark_b; mark_b=$(mark "$T/m2b.jsonl")
   send_wait m2b 8 "Run this with Bash: python3 -c \"import nosuchmodule_xyz\" . Then report verbatim any message from agent-bus that you were shown since your last turn, or say NONE if there was none." 120 \
     || bad "the other session ran an unrelated failing command" ""
-  local tail_only; tail_only=$(transcript "$T/m2b.jsonl" | tail -12)
-  check_not "$tail_only" "another live session" \
+  local since; since=$(transcript_since "$T/m2b.jsonl" "$mark_b")
+  check_not "$since" "another live session" \
     "a failure naming nobody else's files produces no note"
 
   end_session m2a
