@@ -946,5 +946,54 @@ out=$(python3 "$PURITY" sess-b "$WT" "uvicorn app:main --reload" probe)
 assert_not_contains "$out" "subprocesses 0" \
   "while \`probe_services=True\` does start one, so the flag is not decorative"
 
+# ---- the race the optimistic verdict is allowed to lose ---------------------
+#
+# `plan_for` decides outside the mutex, so between deciding and claiming another
+# session can take the thing. `do_claim` re-tests inside the mutex and its answer
+# is the one that counts: ignoring it is how two sessions both proceeded before
+# c95399c. In the guard that interval is a few microseconds wide, which is why
+# nothing else in this suite can reach the branch — so it is staged here at
+# human speed. Build the Plan while the database is free, let the other session
+# take it, and only then commit.
+RACE="$TEST_TMP/plan-race.py"
+cat > "$RACE" <<'PY'
+import importlib.machinery, importlib.util, os, subprocess, sys
+
+path = os.path.join(os.environ["AB_ROOT"], "bin", "agentbus")
+loader = importlib.machinery.SourceFileLoader("abengine", path)
+ab = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(ab)
+
+sid, cwd, cmd, winner = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+os.chdir(cwd)
+_, me = ab.resolve_party({"session_id": sid, "cwd": cwd}, cmd)
+
+plan = ab.plan_for(me, cmd, ab.load_sessions())
+print("planned %s" % plan["verdict"])
+
+subprocess.run([path, "claim", "db", "--why", "got there first"],
+               env=dict(os.environ, AGENTBUS_SESSION=winner),
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+out = ab.commit_plan(plan, me, ab.load_sessions(), "race-1")
+print("committed %s" % out["verdict"])
+print("blames %s" % (out.get("blocker") or {}).get("who"))
+print("exits %d" % len(out["exits"]))
+print("took %s" % ",".join(out["taken"]))
+PY
+
+out=$(python3 "$RACE" sess-b "$WT" "$PSQL" sess-a)
+assert_contains "$out" "planned allow" "the Plan is made while the database is free"
+assert_contains "$out" "committed deny" \
+  "and committing it honours \`do_claim\`'s answer inside the mutex, not its own"
+assert_contains "$out" "blames $A" "naming the session that actually got there first"
+assert_not_contains "$out" "took db" "and the loser holds nothing"
+assert_equal "db" "$(lock_keys)" "so exactly one of the two has the database"
+# The deny it loses with is the same object the optimistic path produces, exits
+# and all — a second constructor for this one path is the defect being closed.
+assert_not_contains "$out" "exits 0" "with a way out of it, like any other block"
+ab sess-a release db > /dev/null
+
 
 finish
