@@ -377,10 +377,12 @@ assert_contains "$out" "claimed 'bundler'" "the advertised list claims the first
 assert_contains "$out" "claimed 'probe'" "and the second"
 assert_equal "bundler probe stack" "$(lock_keys)" \
   "so the line the note prints takes exactly what it names"
-ab sess-a release bundler > /dev/null
-ab sess-a release probe > /dev/null
+out=$(ab sess-a release bundler,probe 2>&1)
+assert_contains "$out" "released 'bundler'" "and the same list gives the first back"
+assert_contains "$out" "released 'probe'" "and the second"
+assert_equal "stack" "$(lock_keys)" "leaving only what was claimed on its own"
 ab sess-a release stack > /dev/null
-assert_equal "" "$(lock_keys)" "and every one of them can be given back"
+assert_equal "" "$(lock_keys)" "which goes back by name, as it always did"
 
 # The note is worth nothing where it is not printed, and it was not printed for
 # the one name an agent is most likely to type. It is computed from what was

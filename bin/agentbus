@@ -4842,28 +4842,34 @@ def cli_release(args):
         return
     pos = positional(args)
     if not pos:
-        print("usage: agentbus release <resource> | --all [--as <you>]", file=sys.stderr)
+        print("usage: agentbus release <resource>[,<resource>] | --all "
+              "[--as <you>]", file=sys.stderr)
         sys.exit(1)
-    key = resolve_lock(me, pos[0])
-    if do_release(me, key):
-        if key.startswith("file:"):
-            refresh_derived()      # and the block lifts in the same second
-        print("released '%s'" % pos[0])
-        return
-    lock = load_lock(me.get("repo_key"), key)
-    if lock and lock.get("sid") == me.get("sid") and lock.get("agent_id"):
-        # Somebody in this session holds it, and this caller cannot show it is
-        # them. Refusing beats guessing: a sibling handing back another agent's
-        # rig mid-run is the failure this is here to stop.
-        print("agent-bus: '%s' is held by %s, one of this session's agents, and "
-              "nothing in a shell can tell which agent is asking. Say so, or "
-              "give back everything you hold:\n"
-              "  agentbus release %s --as %s\n"
-              "  agentbus release --all"
-              % (pos[0], lock.get("agent"), pos[0], lock.get("agent")),
-              file=sys.stderr)
+    plan = plan_for(me, names=pos[0])
+    if plan["reason"] == "no-such-resource":
+        print(render_block(plan), file=sys.stderr)
         sys.exit(1)
-    print("not yours")
+    for res in plan["resources"]:
+        key, name = res["lock"], _named(res)
+        if do_release(me, key):
+            if key.startswith("file:"):
+                refresh_derived()      # and the block lifts in the same second
+            print("released '%s'" % name)
+            continue
+        lock = load_lock(me.get("repo_key"), key)
+        if lock and lock.get("sid") == me.get("sid") and lock.get("agent_id"):
+            # Somebody in this session holds it, and this caller cannot show it
+            # is them. Refusing beats guessing: a sibling handing back another
+            # agent's rig mid-run is the failure this is here to stop.
+            print("agent-bus: '%s' is held by %s, one of this session's agents, "
+                  "and nothing in a shell can tell which agent is asking. Say "
+                  "so, or give back everything you hold:\n"
+                  "  agentbus release %s --as %s\n"
+                  "  agentbus release --all"
+                  % (name, lock.get("agent"), name, lock.get("agent")),
+                  file=sys.stderr)
+            sys.exit(1)
+        print("not yours: '%s'" % name)
 
 
 def cli_wait(args):
