@@ -710,7 +710,7 @@ def follow_cwd(rec, cwd, trusted=True):
     return rec
 
 
-def caller_view(me, cwd):
+def caller_view(me, cwd, override_pin=False):
     """`me`, but rooted where this particular call is actually running.
 
     A session has one worktree; a session running parallel subagents in two
@@ -728,8 +728,20 @@ def caller_view(me, cwd):
     on the payload is what Claude Code reset the shell to. Honouring the pin in
     the record but not here made the declaration cosmetic — the roster showed
     the declared tree while the guard went on locking, and comparing services
-    against, the tree the payload named."""
-    if not cwd or cwd == me.get("cwd") or me.get("pinned"):
+    against, the tree the payload named.
+
+    `override_pin` is the single exception, and only one caller passes it: the
+    guard, when the command names a checkout outright. A pin is a statement
+    about where a session is working; `git -C <path>` is a statement about one
+    command, and the narrower, more specific statement wins. The parameter has
+    to exist because the guard applies `command_worktree`'s answer by *calling
+    this function* — so the pin check above swallowed `git -C` on its way
+    through the very function that was meant to apply it, and a pinned session
+    was judged in its pinned tree while running a command about another one. A
+    pin still governs every command that names no path."""
+    if not cwd or cwd == me.get("cwd"):
+        return me
+    if me.get("pinned") and not override_pin:
         return me
     root, repo_key, label, branch = git_facts(cwd)
     view = dict(me)
@@ -3239,10 +3251,16 @@ def hook_pre_tool(payload):
         cmd = ti.get("command", "")
         # A command that names a checkout outright is better evidence than the
         # directory the session happens to be sitting in — `git -C <path>` is
-        # how a chat works on a worktree it never changes into.
+        # how a chat works on a worktree it never changes into. It is better
+        # evidence than a pin as well, which is what `override_pin` says: the
+        # pin is about a session and this is about one command. Without it the
+        # pin check inside `caller_view` swallowed the answer this line exists
+        # to apply, for a subagent too — `party_view` copies the session's
+        # `pinned` into the view, so a pinned session's agents were caught by it
+        # as well.
         stated = command_worktree(cmd)
         if stated:
-            me = caller_view(me, stated)
+            me = caller_view(me, stated, override_pin=True)
         # Before anything can deny it: this is the last moment at which who is
         # running an `agentbus` command is still known.
         leave_party_hint(me, cmd)

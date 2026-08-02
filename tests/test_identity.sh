@@ -40,14 +40,20 @@
 # where somebody is working therefore shows up as a different file in
 # `locks/` — which is the only place the guard's answer is visible from outside.
 #
-# Three cases below contradict the order above, or are left unsettled by it.
+# Two cases below still contradict the order above, or are left unsettled by it.
 # They are marked DIVERGENCE and they pin what the code does today, which is the
 # whole point of M0: the behaviour is characterised first and changed
 # afterwards, in a commit that says which of the two was wrong.
 #
 #   `--as` overrides the party hint, though the order puts the hint above it.
-#   A pinned session ignores `git -C`, though the order puts `git -C` above it.
 #   A subagent's own root beats its parent's pin, which the order does not say.
+#
+# The third was settled in M1 and the code moved: a pinned session used to
+# ignore `git -C`, and no longer does. The pin was applied inside `caller_view`,
+# which is also the function the guard calls to apply `git -C`, so the pin
+# swallowed it on the way through. `git -C <path>` is a statement about one
+# command and a pin is a statement about a session, and the narrower one wins —
+# which is what the order above said all along.
 
 . "$AB_ROOT/tests/lib.sh"
 
@@ -392,14 +398,42 @@ assert_contains "$(held_locks)" "$(wt_lock "$REPO")" \
 
 free_all sess-a sess-b sess-pin
 
-# DIVERGENCE from the order above. The order puts `git -C` ABOVE the pin; the
-# code applies the pin inside `caller_view`, which is also the function that
-# applies `git -C`, so a pinned session ignores a path its own command names.
-# Pinned as it stands; M1 decides which of the two is right.
+# The two statements meet here, and the narrower one wins. `git -C <path>` is
+# about one command; a pin is about a session. Until M1 the pin took it: the
+# guard applies `command_worktree`'s answer by calling `caller_view`, whose pin
+# short-circuit returned before the path was looked at, so the function that was
+# supposed to apply `git -C` was the function that discarded it.
 out=$(pre sess-pin "$REPO" "git -C $REPO add -A" l-b4)
-assert_allow "$out" "pin (b) DIVERGENCE: the command names the unpinned checkout"
+assert_allow "$out" "pin (b) vs git -C (a): the command names the unpinned checkout"
+assert_equal "$(wt_lock "$REPO")" "$(held_locks)" \
+  "pin (b) vs git -C (a): and git -C wins — it is a statement about one command"
+assert_equal "$WT" "$(session_field sess-pin root)" \
+  "pin (b) vs git -C (a): the pin itself did not move   [supporting]"
+
+free_all sess-pin
+
+# The other half of "one command": the same session, still pinned to the same
+# tree, running a command that names no path. Without this pair the change above
+# is indistinguishable from the pin having stopped working.
+out=$(pre sess-pin "$REPO" "git add -A" l-b4b)
+assert_allow "$out" "pin (b): the next command names no checkout"
 assert_equal "$(wt_lock "$WT")" "$(held_locks)" \
-  "pin (b) DIVERGENCE: and the pin wins anyway — git -C does not override it"
+  "pin (b): so the pin governs it again — git -C moved that one command and no more"
+
+free_all sess-pin
+
+# A subagent of a pinned session is caught by the same rule, and has to be freed
+# by the same one: `party_view` builds its view with `dict(me)`, so the parent's
+# `pinned` is copied into it and the short-circuit fires on the subagent's path
+# too. Rooted in the pinned tree deliberately — then the only thing that can put
+# the lock in the other checkout is the path the command names.
+ab_hook subagent-start "$(payload subagent-start sid=sess-pin "cwd=$WT" \
+  agent_id=sub-p agent_type=general-purpose)" > /dev/null
+out=$(apre sess-pin sub-p "$WT" "git -C $REPO add -A" l-b4c)
+assert_allow "$out" \
+  "pin (b) vs git -C (a): a subagent of a pinned session names a checkout"
+assert_equal "$(wt_lock "$REPO")" "$(held_locks)" \
+  "pin (b) vs git -C (a): and git -C wins for it too, through its parent's pin"
 
 free_all sess-pin
 
