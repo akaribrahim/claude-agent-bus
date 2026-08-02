@@ -69,6 +69,10 @@ that running one lifts the block.
       them. It found four live defects, recorded below.
 - [ ] (M1) Close the divergences the harness pins, one commit each, updating the
       harness in the same commit as each fix.
+      Half done 2026-08-02: three of the four pinned defects closed, one commit
+      each, 1322 → 1338. Still open: the two deliberate divergences to confirm
+      (`cli_claim` and `implies`), and the three `DIVERGENCE` precedence
+      questions, which belong with the identity spine.
 - [ ] (M2) One resolver for who-and-where — `resolve_party`, replacing the inference
       functions, with the precedence order written down and tested directly.
 - [ ] (M3) One decision core for commands — `plan_for` plus `commit_plan`, with the
@@ -127,6 +131,7 @@ that running one lifts the block.
   `test_parity.sh` as `DEFECT (pinned)`; M1 must decide whether `--as` should be
   believed here or the advice should change. This is the third instance of this plan's
   opening defect class and the second time it has been recorded as closed while live.
+  Closed in M1, `f378703`, by changing the advice rather than the rule.
 
 - Observation (M0, 2026-08-02): **an instance block has no working exit at all.** The
   block is about `simulator@ABC123`; its advice names the resource the way a person
@@ -138,6 +143,12 @@ that running one lifts the block.
   past. This is the same shape as the `scope: "worktree"` defect closed on 2026-07-29,
   and it is why the plan's rule is "the block must lift" rather than "the exit must be
   allowed" — every one of these exits is allowed by the guard, perfectly.
+  Closed in M1, `8e07602`. Note for M3 and M4: `resolve_lock` already returned
+  `simulator@ABC123` unchanged, through the pass-through that exists for
+  `file:/abs/path`, so the CLI half worked by accident and `agentbus claim simulatr@ABC`
+  wrote a lock under the typo just as cheerfully. Whatever replaces this function has to
+  keep refusing an `@` name whose base is not declared, or the defect comes back one
+  keystroke away from where it was.
 
 - Observation (M0, 2026-08-02): **a wait the guard did not see reports a claim it did
   not make, and leaks a lock doing it.** `agentbus wait <res>` from a shell with no
@@ -148,6 +159,9 @@ that running one lifts the block.
   in place — and `release_autoclaim` gives back only soft locks, so `PostToolUse` no
   longer frees it. Any wording but the advertised one reaches this path, as does an
   `agentbus wait` inside a script.
+  Closed in M1, `659902d`. The leak went with it rather than being fixed separately:
+  with the caller no longer read as the session, `already yours` is unreachable for a
+  party that cannot show the lock is its own, so there is nothing left to upgrade.
 
 - Observation (M0, 2026-08-02): **three places where this plan's prose and the code
   disagree about precedence**, all pinned as `DIVERGENCE` and all for M1:
@@ -260,6 +274,41 @@ that running one lifts the block.
   miss its own hint, `party_known` would go false, and the resulting lock would block the
   caller's own siblings.
   Date/Author: 2026-08-02, Claude, after review.
+
+- Decision (M1): a block about one instance advertises that instance, and
+  `resolve_lock` learns the `<resource>@<instance>` form deliberately.
+  Rationale: the runnable lines have to name the lock that is in the way, or they act on
+  a lock nothing was contending for and report success. The plain name stays in the
+  prose — nobody types a digest, and `worktree@3f9c1a` is not what a person calls their
+  checkout. The base of an `@` name must be a declared resource: the form resolved by
+  accident before this, which is also why a typo became a junk lock reported as a claim.
+  `agentbus claim simulator --udid ABC`, the other candidate from the plan's M1 notes,
+  was not taken — the block prints one string, and one string that both halves
+  understand is the whole point.
+  Date/Author: 2026-08-02, Ibrahim + Claude.
+
+- Decision (M1): the unidentified-party block advertises `--as <your name> --steal`,
+  and says why, rather than `--as` being believed.
+  Rationale: three options. Teaching `same_party` that naming yourself adopts an
+  unattributed lock of your own session was rejected — subagent B would take subagent
+  A's lock in silence, which is the three-agents-one-simulator failure `same_party`
+  exists to prevent. An `--adopt` verb was rejected as new surface for a case `--steal`
+  already models. What is left is the truth: nobody can prove the lock is yours, so
+  taking it is a takeover, and `--steal` already puts `took 'X' from Y (forced)` on the
+  bus. Visible beats silent where the tool cannot know.
+  Date/Author: 2026-08-02, Ibrahim + Claude.
+
+- Decision (M1): a caller that cannot name its party is treated exactly as a lock that
+  cannot — permissive with at most one subagent, blocking with two.
+  Rationale: `same_party` already reasoned this way about an unattributed holder and
+  answered "already yours" unconditionally about an unattributed caller, which is the
+  same ambiguity asked from the other end. The asymmetry let a shell's `agentbus wait`
+  report a claim it never made against a sibling's lock, and upgrade that sibling's
+  soft one-command claim to hard on the way past. Both docstring cases survive by
+  construction: a delegating parent's lock carries no `agent_id`, so the new branch is
+  not entered, and a session asking about its own subagent comes through a hook, where
+  the party is known.
+  Date/Author: 2026-08-02, Ibrahim + Claude.
 
 ## Outcomes & Retrospective
 
