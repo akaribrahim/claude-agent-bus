@@ -886,17 +886,21 @@ _, me = ab.resolve_party({"session_id": sid, "cwd": cwd}, cmd)
 
 
 def snapshot():
+    # Contents AND mtime. Half of what the guard writes is a marker file whose
+    # contents are empty both before and after — `matched/`, which records that
+    # a resource's patterns still match something. A content-only snapshot said
+    # "nothing changed" while `plan_for` rewrote every one of them.
     out = []
     for root, dirs, files in os.walk(home):
         dirs.sort()
         for name in sorted(files):
             p = os.path.join(root, name)
             try:
-                body = open(p, "rb").read()
+                body, stamp = open(p, "rb").read(), os.stat(p).st_mtime_ns
             except OSError:
-                body = b"?"
-            out.append("%s %s" % (os.path.relpath(p, home),
-                                  hashlib.sha1(body).hexdigest()))
+                body, stamp = b"?", 0
+            out.append("%s %s %d" % (os.path.relpath(p, home),
+                                     hashlib.sha1(body).hexdigest(), stamp))
     return "\n".join(out)
 
 
