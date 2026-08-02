@@ -3681,6 +3681,16 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
                 note_ctx(text)
             return
     res, lock, holder = blocked[0]
+    # The name to put in a line the reader is meant to run. For a `key`-bearing
+    # resource that is the instance in the way, not the resource: `agentbus wait
+    # simulator` resolves to a bare `simulator` lock nothing was contending for,
+    # takes it, prints "claimed" and leaves the device exactly where it was.
+    # Only the runnable lines use it — the prose keeps the plain name, which is
+    # what a person calls the thing and, for a worktree-scoped resource, the only
+    # half of the key anyone typed.
+    held = lock.get("resource") or res["name"]
+    exit_name = held if (res.get("key")
+                         and held.startswith(res["name"] + "@")) else res["name"]
     note_block(me, "'%s'" % res["name"],
                "held by %s" % (lock.get("agent") or holder.get("agent")))
     same_tree = (os.path.realpath(holder.get("root") or "")
@@ -3726,10 +3736,10 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
                   "whether it is yours.",
                   "  If it is yours, name yourself and take it properly:",
                   "    agentbus claim %s --as <your name>   (yours is in the "
-                  "message that named you)" % res["name"],
+                  "message that named you)" % exit_name,
                   "  If it is not, wait for it, or give it back if you know it "
                   "is finished:",
-                  "    agentbus wait %s --why \"...\"" % res["name"],
+                  "    agentbus wait %s --why \"...\"" % exit_name,
                   "    agentbus release --all   (from whichever agent took it)"]
         if res.get("why"):
             lines += ["", "  " + res["why"]]
@@ -3766,7 +3776,7 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         '  agentbus post --to %s "..."   ask them'
         % (lock.get("agent") or holder.get("agent")),
         '  agentbus wait %s --why "..."  queue; takes it the moment it frees'
-        % res["name"],
+        % exit_name,
     ]
     if res.get("hint"):
         lines += ["", "  " + res["hint"]]
@@ -3782,7 +3792,7 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         '"unless" pattern on the resource stops it matching next time.',
         "",
         '(Last resort, only when you know they have finished: '
-        '`agentbus claim %s --steal --why "..."`.)' % res["name"],
+        '`agentbus claim %s --steal --why "..."`.)' % exit_name,
     ]
     deny("\n".join(lines))
 
@@ -4063,7 +4073,9 @@ def cli_wait(args):
     # The key is what the lock lives under; the name is what a person typed and
     # what every message says back to them. For a worktree-scoped resource these
     # differ, and showing the key would be answering in the plugin's private
-    # vocabulary.
+    # vocabulary. For an instance they are the same string — `simulator@ABC123`
+    # is the key and it is also what the block told the reader to type, so
+    # echoing it back is answering in theirs.
     name, why = pos[0], opt(args, "--why", "")
     res = resolve_lock(me, name)
     # Below the Bash tool's own default timeout, so the wait reports back rather
@@ -4744,11 +4756,39 @@ def resolve_lock(me, name):
     queueing for stayed exactly where it was. The deny message's own last-resort
     advice — `agentbus claim <res> --steal` — was a no-op for these.
 
-    A name that is not a declared resource is passed through untouched, because
-    `agentbus claim 'file:/abs/path.py'` is how somebody takes a single file and
-    that key is deliberately literal."""
+    A resource with a `key` is one lock per instance, and the instance is read
+    off the command with a regex — which there is none of here. So the caller
+    says which: `<resource>@<instance>`, the same name the lock is filed under
+    and the name the block about it now advertises. It resolved before this was
+    written, by falling through the pass-through below, which also meant
+    `agentbus claim simulatr@ABC` cheerfully wrote a lock under the typo,
+    reported success and left the device somebody else's — the defect the
+    instance form exists to close, one keystroke away. So an `@` name whose base
+    is not declared is refused instead.
+
+    A name that is not a declared resource is otherwise passed through
+    untouched, because `agentbus claim 'file:/abs/path.py'` is how somebody
+    takes a single file and that key is deliberately literal — `@` and all, since
+    a path may contain one."""
     res = find_resource(me, name)
-    return lock_name(me, res) if res else name
+    if res:
+        return lock_name(me, res)
+    base, at, inst = name.rpartition("@")
+    if at and not name.startswith("file:"):
+        res = find_resource(me, base)
+        if not res or not inst:
+            print("agent-bus: no resource named '%s' in this repo's config. "
+                  "`<resource>@<instance>` names one of several — one device of "
+                  "the three the machine has — and the part before the '@' has "
+                  "to be a declared resource. `agentbus status` lists them."
+                  % base, file=sys.stderr)
+            sys.exit(1)
+        # Sanitised exactly as `instance_of` sanitises what it reads out of a
+        # command, or a device named `sim/2` would be filed by the CLI under a
+        # key the guard never writes — which is this whole function's defect.
+        return "%s@%s" % (res["name"],
+                          re.sub(r"[^A-Za-z0-9_.-]", "_", inst)[:32])
+    return name
 
 
 def cli_serve(args):

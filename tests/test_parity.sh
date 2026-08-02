@@ -373,9 +373,9 @@ unidentified|through|agentbus claim db --steal --why "..."
 implied|through|agentbus wait bundler --why "..."
 implied|bypass|AGENTBUS_OFF=1 <your command>
 implied|through|agentbus claim bundler --steal --why "..."
-instance|through|agentbus wait simulator --why "..."
+instance|through|agentbus wait simulator@ABC123 --why "..."
 instance|bypass|AGENTBUS_OFF=1 <your command>
-instance|through|agentbus claim simulator --steal --why "..."
+instance|through|agentbus claim simulator@ABC123 --steal --why "..."
 serving|through|agentbus serve web
 serving|through|agentbus run web -- <your command>
 wrong-port|correct|eval "$(agentbus env)"
@@ -620,19 +620,17 @@ ab sess-b release bundler > /dev/null
 
 # ---- 6. blocked on one instance of several ----------------------------------
 #
-# DEFECT (pinned, M1 must fix): both ways through that this block advertises
-# report success and leave it exactly where it was.
+# The block is about `simulator@ABC123`, and until M1 its advice named the
+# resource the way a person types it — `simulator`. `resolve_lock`, given a name
+# and no command, could not get back to the instance, so `agentbus wait
+# simulator` and `agentbus claim simulator --steal` acted on a bare `simulator`
+# lock that nothing was contending for: they took a lock that was free, printed
+# "claimed", exited 0, and the device was still somebody else's. Only the bypass
+# got the reader past.
 #
-# The block is about `simulator@ABC123`. Its advice names the resource the way a
-# person types it — `simulator` — and `resolve_lock`, given a name and no
-# command, cannot get back to the instance. So `agentbus wait simulator` and
-# `agentbus claim simulator --steal` both act on a bare `simulator` lock that
-# nothing was contending for: they take a lock that was free, print "claimed",
-# exit 0, and the device is still somebody else's.
-#
-# This is the same shape as the `scope: "worktree"` defect fixed on 2026-07-29 —
-# an exit that reports success against a lock it never looked at — and it is why
-# the plan's rule is "the block must lift", not "the exit must be allowed".
+# Both halves were needed and both are asserted here: the block now advertises
+# the instance, and the CLI can resolve one. Asserting only the first would pass
+# against a message naming a lock the tool cannot take.
 
 ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" "cmd=$MAESTRO" id=b6-hold)" > /dev/null
 assert_equal "simulator@ABC123" "$(lock_keys)" "one session takes one device"
@@ -641,36 +639,47 @@ HOLDER="$A"
 guard b6-1 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
 assert_equal deny "$VERDICT" "and another reaching for that device is refused"
 advertised instance
+assert_not_contains "$REASON" 'agentbus wait simulator --why' \
+  "and not the bare resource, which is a different lock"
 
-# Bounded, because the day M1 teaches `resolve_lock` about instances this wait
-# stops returning instantly and starts queueing for the ninety seconds it
-# defaults to — which is the fix working, and should read as one failed
-# assertion rather than as a suite that hangs.
-exit_seen_by_guard b6-2 sess-b "$WT" 'agentbus wait simulator --why "..."'
-start_exit sess-b 'agentbus wait simulator --why "..."' "$TEST_TMP/wait-inst.out"
+# A real queue now, so the holder has to let go for this to come back — the same
+# shape as the held block in section 1, and the reason this wait is worth the
+# wall-clock time.
+exit_seen_by_guard b6-2 sess-b "$WT" 'agentbus wait simulator@ABC123 --why "..."'
+start_exit sess-b 'agentbus wait simulator@ABC123 --why "..."' "$TEST_TMP/wait-inst.out"
+sleep 1
+ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=b6-hold)" > /dev/null
 finish_exit 15
 out=$(cat "$TEST_TMP/wait-inst.out")
-assert_contains "$out" "claimed 'simulator'" \
-  "DEFECT (pinned): the advertised wait reports a claim instantly"
-assert_equal "simulator simulator@ABC123" "$(lock_keys)" \
-  "DEFECT (pinned): having taken a second, unrelated lock rather than the one in the way"
+assert_contains "$out" "is held by $A" "the advertised wait queues against the device in the way"
+assert_contains "$out" "claimed 'simulator@ABC123'" "and takes that device when it frees"
+assert_equal "simulator@ABC123" "$(lock_keys)" "rather than a second, unrelated lock"
 guard b6-3 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
-assert_equal deny "$VERDICT" \
-  "DEFECT (pinned): so \`agentbus wait simulator\` does NOT lift an instance block"
-ab sess-b release simulator > /dev/null
+assert_equal allow "$VERDICT" "so \`agentbus wait simulator@ABC123\` lifts an instance block"
+ab sess-b release simulator@ABC123 > /dev/null
 
-out=$(take_exit b6-4 sess-b "$WT" 'agentbus claim simulator --steal --why "..."')
-assert_contains "$out" "claimed 'simulator'" \
-  "DEFECT (pinned): and the advertised steal reports success too"
-guard b6-5 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
-assert_equal deny "$VERDICT" \
-  "DEFECT (pinned): while \`agentbus claim simulator --steal\` does NOT lift it either"
-ab sess-b release simulator > /dev/null
+ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" "cmd=$MAESTRO" id=b6-hold2)" > /dev/null
+assert_equal "simulator@ABC123" "$(lock_keys)" "the other session has the device again"
+guard b6-4 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
+assert_equal deny "$VERDICT" "and this one is blocked on it again"
+out=$(take_exit b6-5 sess-b "$WT" 'agentbus claim simulator@ABC123 --steal --why "..."')
+assert_contains "$out" "claimed 'simulator@ABC123'" "the advertised steal takes that device"
+assert_equal "simulator@ABC123" "$(lock_keys)" "and there is still exactly one lock on it"
+guard b6-6 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
+assert_equal allow "$VERDICT" "so the steal lifts it too"
+ab sess-b release simulator@ABC123 > /dev/null
 
-# The bypass is the only exit on this block that does what it says.
-guard b6-6 sess-b "$WT" "AGENTBUS_OFF=1 maestro --udid ABC123 test b.yaml"
-assert_equal allow "$VERDICT" "only the bypass gets the reader past an instance block"
-ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=b6-hold)" > /dev/null
+# The name has to be one this repository declares. Without that, one mistyped
+# character is the whole defect again — a lock written under a name nothing
+# contends for, reported as a claim.
+out=$(ab sess-b claim simulatr@ABC123 --why "..." 2>&1)
+assert_contains "$out" "no resource named 'simulatr'" \
+  "a mistyped instance is refused rather than turned into a junk lock"
+assert_equal "" "$(lock_keys)" "and nothing is written for it"
+
+guard b6-7 sess-b "$WT" "AGENTBUS_OFF=1 maestro --udid ABC123 test b.yaml"
+assert_equal allow "$VERDICT" "the bypass still steps over an instance block"
+ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=b6-hold2)" > /dev/null
 assert_equal "" "$(lock_keys)" "the rig is free again"
 
 # ---- 7. the service is answering for another checkout -----------------------
