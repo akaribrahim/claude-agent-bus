@@ -4017,10 +4017,18 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
         # three-agents-one-simulator failure. Taking it anyway is a takeover, so
         # it is called one: `--steal` puts "took 'X' from Y (forced)" on the bus
         # and the other agent can see what happened.
-        exits.append(_exit(
-            "adopt", "through",
-            'agentbus claim %s --as <your name> --steal --why "..."' % exit_name,
-            "yours is in the message that named you"))
+        # Named outright, not `<your name>`. This block only exists for a caller
+        # that has an `agent_id`, so the Plan is holding the answer the line used
+        # to send the reader off to find: it ended "(yours is in the message that
+        # named you)", which is a message admitting it had printed a hole. A
+        # caller nothing can name gets no `adopt` exit rather than a template —
+        # an exit exists only when it would work.
+        if me.get("agent"):
+            exits.append(_exit(
+                "adopt", "through",
+                'agentbus claim %s --as %s --steal --why "..."'
+                % (exit_name, me.get("agent")),
+                "if that agent was you"))
         exits.append(wait)
         exits.append(_exit("release", "through", "agentbus release --all",
                            "from whichever agent took it"))
@@ -4268,8 +4276,8 @@ def render_block(plan):
                   "confirm that it is, so",
                   "  this goes on the bus as a takeover and whoever holds it "
                   "sees that it moved:"]
-        lines.append("    %s   (%s)" % (_exit_cmd(plan, "adopt"),
-                                        _exit_when(plan, "adopt")))
+        if _exit_cmd(plan, "adopt"):
+            lines.append("    %s" % _exit_cmd(plan, "adopt"))
         lines += ["  If it is not, wait for it, or give it back if you know it "
                   "is finished:",
                   "    %s" % _exit_cmd(plan, "wait"),

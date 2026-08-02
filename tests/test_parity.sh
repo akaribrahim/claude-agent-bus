@@ -91,6 +91,9 @@ print('%s@%s' % (sys.argv[1],
 GUARD_OUT="$TEST_TMP/guard.json"
 guard() {   # <tool use id> <session> <cwd> <command> [<agent id>]
   local id="$1" sid="$2" cwd="$3" cmd="$4" aid="${5:-}" extra=""
+  # Remembered so that `advertised` can ask the engine for the same command's
+  # Plan without every scenario repeating its four arguments.
+  GSID="$sid"; GCWD="$cwd"; GCMD="$cmd"; GAID="$aid"
   [ -n "$aid" ] && extra="agent_id=$aid agent_type=general-purpose"
   ab_hook pre-tool \
     "$(payload bash "sid=$sid" "cwd=$cwd" "cmd=$cmd" "id=$id" $extra)" > "$GUARD_OUT"
@@ -369,66 +372,87 @@ assert_equal "" "$(lock_keys)" "and the instance is given back under that name t
 # Check B — every advertised exit lifts the block
 # =============================================================================
 #
-# The table below is hand-written and is a second copy of what the messages in
-# `guard_bash`, `serving_check` and `wrong_port_check` say. That is deliberate
-# duplication: a table derived from the message could not catch the message
-# being wrong, and extracting a command line out of rendered English is exactly
-# the thing M3 removes the need for. When `plan_for` returns exits as
-# `{cmd, when, kind}` and the message is rendered from them, this table is what
-# gets deleted.
+# M0 carried a hand-written table here of (scenario → the command lines that
+# block's message must contain), and said in as many words that it was the
+# thing M3 deletes. This is the deletion. The expected set now comes from the
+# Plan itself, so every line asserted on below is a line the guard actually
+# produced for that command, in that state, against that holder — and the
+# assertion that the rendered message contains it verbatim is what pins
+# `render_block` to the Plan rather than to English typed out twice.
 #
-#   <scenario>|<what the exit claims to do>|<text the block must contain, verbatim>
+# What is NOT derived, and must not be: whether running the line lifts the
+# block. That is the property this whole check exists for, it is hand-written
+# per scenario below, and a Plan cannot be asked to confirm its own advice.
 #
-#   through — running it must make the refused command allowed
-#   correct — it does not unblock; it says to run a DIFFERENT command instead
-#   bypass  — it steps over the decision rather than resolving it
-#   ask     — a way to find out, or to ask; not a way through
-#
-# `@holder@` is the one substitution: a block names the agent holding the lock,
-# and no fixture can know that name before it runs.
+# `probe_services=True` because one of the eight blocks — the serving one — is
+# reachable only through the probe. For the other seven the lock or the port
+# settles the verdict before the probe would run, so it costs them nothing.
+PLANEXITS="$TEST_TMP/plan-exits.py"
+cat > "$PLANEXITS" <<'PY'
+import importlib.machinery, importlib.util, os, sys
 
-EXITS='
-held|ask|agentbus status
-held|ask|agentbus post --to @holder@ "..."
-held|through|agentbus wait db --why "..."
-held|bypass|AGENTBUS_OFF=1 <your command>
-held|through|agentbus claim db --steal --why "..."
-same-checkout|ask|agentbus status
-same-checkout|ask|agentbus post --to @holder@ "..."
-same-checkout|through|agentbus wait db --why "..."
-same-checkout|bypass|AGENTBUS_OFF=1 <your command>
-same-checkout|through|agentbus claim db --steal --why "..."
-sibling|ask|agentbus status
-sibling|ask|agentbus post --to @holder@ "..."
-sibling|through|agentbus wait db --why "..."
-sibling|bypass|AGENTBUS_OFF=1 <your command>
-sibling|through|agentbus claim db --steal --why "..."
-unidentified|through|agentbus claim db --as <your name> --steal --why "..."
-unidentified|through|agentbus wait db --why "..."
-unidentified|through|agentbus release --all
-unidentified|ask|agentbus status
-unidentified|ask|agentbus post --to @holder@ "..."
-unidentified|bypass|AGENTBUS_OFF=1 <your command>
-unidentified|through|agentbus claim db --steal --why "..."
-implied|through|agentbus wait bundler --why "..."
-implied|bypass|AGENTBUS_OFF=1 <your command>
-implied|through|agentbus claim bundler --steal --why "..."
-instance|through|agentbus wait simulator@ABC123 --why "..."
-instance|bypass|AGENTBUS_OFF=1 <your command>
-instance|through|agentbus claim simulator@ABC123 --steal --why "..."
-serving|through|agentbus serve web
-serving|through|agentbus run web -- <your command>
-wrong-port|correct|eval "$(agentbus env)"
-wrong-port|correct|agentbus port api
-wrong-port|bypass|AGENTBUS_OFF=1 <your command>
-'
+path = os.path.join(os.environ["AB_ROOT"], "bin", "agentbus")
+loader = importlib.machinery.SourceFileLoader("abengine", path)
+ab = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(ab)
 
-advertised() {   # <scenario> — assert every exit the table lists appears in $REASON
-  printf '%s\n' "$EXITS" | while IFS='|' read -r scen kind text; do
-    [ "$scen" = "$1" ] || continue
-    text=${text//@holder@/$HOLDER}
-    assert_contains "$REASON" "$text" "the $1 block advertises \`$text\` ($kind)"
+sid, cwd, cmd = sys.argv[1], sys.argv[2], sys.argv[3]
+aid = sys.argv[4] if len(sys.argv) > 4 else ""
+payload = {"session_id": sid, "cwd": cwd}
+if aid:
+    payload.update(agent_id=aid, agent_type="general-purpose")
+os.chdir(cwd)
+_, me = ab.resolve_party(payload, cmd)
+plan = ab.plan_for(me, cmd, ab.load_sessions(), probe_services=True)
+for e in plan["exits"]:
+    print("%s\t%s\t%s" % (e["id"], e["kind"], e["cmd"]))
+PY
+
+PLAN_EXITS=""
+
+advertised() {   # <what this block is about> — the Plan's exits are in $REASON
+  PLAN_EXITS=$(python3 "$PLANEXITS" "$GSID" "$GCWD" "$GCMD" "$GAID")
+  if [ -z "$PLAN_EXITS" ]; then
+    _bad "the $1 block offers a way out at all" \
+         "plan_for returned no exits for: $GCMD"
+    return
+  fi
+  printf '%s\n' "$PLAN_EXITS" | while IFS=$'\t' read -r id kind cmd; do
+    [ -n "$cmd" ] || continue
+    assert_contains "$REASON" "$cmd" "the $1 block advertises \`$cmd\` ($kind)"
+    # And that it is a line, not a template. This is the defect class in one
+    # assertion: `agentbus wait <res>` was advertised and refused, `agentbus
+    # claim worktree` was advertised and wrote a lock nothing read, and both
+    # were format strings the message filled in for itself. The single
+    # placeholder any exit may carry is the reader's own command line, which is
+    # already on their screen and which no Plan should be pasting back at them.
+    case "${cmd//<your command>/}" in
+      *"<"*|*">"*)
+        _bad "the $1 block's \`$id\` exit is a line, not a template" \
+             "still has a hole in it: $cmd" ;;
+      *)
+        _ok "the $1 block's \`$id\` exit is a line, not a template" ;;
+    esac
   done
+}
+
+plan_exit() {   # <exit id> → that exit's command line, verbatim
+  printf '%s\n' "$PLAN_EXITS" \
+    | awk -F'\t' -v id="$1" '$1 == id {print $3; f = 1} END {if (!f) print "no-such-exit:" id}'
+}
+
+# Some blocks must not offer a way of stepping over the decision. Asserted on
+# the Plan and not only on the message, because a `bypass` that appeared in the
+# exits would be printed by whatever renders them next.
+assert_no_bypass() {   # <what this block is about>
+  local offered
+  offered=$(printf '%s\n' "$PLAN_EXITS" | awk -F'\t' '$2 == "bypass" {print $3}')
+  if [ -n "$offered" ]; then
+    _bad "the $1 block offers no bypass" "it offers: $offered"
+  else
+    _ok "the $1 block offers no bypass"
+  fi
 }
 
 # ---- 1. held by another session, in another checkout ------------------------
@@ -444,27 +468,27 @@ assert_contains "$REASON" "$A" "and the block names who is holding it"
 # have to be reachable — a guard that refuses the advice it just printed is a
 # defect this repository has shipped twice — and neither may quietly become a
 # way through without somebody noticing.
-out=$(take_exit b1-2 sess-b "$WT" 'agentbus status')
+out=$(take_exit b1-2 sess-b "$WT" "$(plan_exit status)")
 assert_contains "$out" "$A" "\`agentbus status\` runs and shows the other session"
 guard b1-3 sess-b "$WT" "$PSQL"
 assert_equal deny "$VERDICT" "reading the roster does not lift the block, and does not claim to"
 
-take_exit b1-4 sess-b "$WT" "agentbus post --to $A \"...\"" > /dev/null
+take_exit b1-4 sess-b "$WT" "$(plan_exit ask)" > /dev/null
 assert_contains "$(ab sess-a inbox)" "..." "\`agentbus post --to\` reaches the holder"
 guard b1-5 sess-b "$WT" "$PSQL"
 assert_equal deny "$VERDICT" "and asking them does not lift it either"
 
-# The bypass. Advertised as `AGENTBUS_OFF=1 <your command>`, which is the one
-# exit that is a template rather than a line to copy — the reader substitutes
-# the command they were refused. It is not a lift in the sense the others are:
-# it steps over the decision instead of resolving it, and the block stands for
-# the next command that does not carry it.
+# The bypass. Advertised as `AGENTBUS_OFF=1 <your command>`, the one exit that
+# carries a placeholder — the reader substitutes the command they were refused,
+# which is why it is substituted by hand here rather than taken from the Plan.
+# It is not a lift in the sense the others are: it steps over the decision
+# instead of resolving it, and the block stands for the next command without it.
 guard b1-6 sess-b "$WT" "AGENTBUS_OFF=1 $PSQL"
 assert_equal allow "$VERDICT" "AGENTBUS_OFF=1 in front of the command gets past the guard"
 guard b1-7 sess-b "$WT" "$PSQL"
 assert_equal deny "$VERDICT" "…which is a bypass, not a lift: the block is exactly where it was"
 
-out=$(take_exit b1-8 sess-b "$WT" 'agentbus claim db --steal --why "..."')
+out=$(take_exit b1-8 sess-b "$WT" "$(plan_exit steal)")
 assert_contains "$out" "claimed 'db'" "the advertised steal takes it"
 guard b1-9 sess-b "$WT" "$PSQL"
 assert_equal allow "$VERDICT" "and the block lifts"
@@ -475,8 +499,9 @@ ab sess-b release db > /dev/null
 ab sess-a claim db --why "seeding the database" > /dev/null
 guard b1-10 sess-b "$WT" "$PSQL"
 assert_equal deny "$VERDICT" "the database is held again"
-exit_seen_by_guard b1-11 sess-b "$WT" 'agentbus wait db --why "..."'
-start_exit sess-b 'agentbus wait db --why "..."' "$TEST_TMP/wait-held.out"
+WAITLINE=$(plan_exit wait)
+exit_seen_by_guard b1-11 sess-b "$WT" "$WAITLINE"
+start_exit sess-b "$WAITLINE" "$TEST_TMP/wait-held.out"
 sleep 1
 ab sess-a release db > /dev/null
 finish_exit 15
@@ -507,7 +532,7 @@ advertised same-checkout
 # so only the two that touch the lock are run again here.
 guard b2-2 sess-c "$REPO" "AGENTBUS_OFF=1 $PSQL"
 assert_equal allow "$VERDICT" "the bypass works from the same checkout"
-out=$(take_exit b2-3 sess-c "$REPO" 'agentbus claim db --steal --why "..."')
+out=$(take_exit b2-3 sess-c "$REPO" "$(plan_exit steal)")
 assert_contains "$out" "claimed 'db'" "and so does the steal"
 guard b2-4 sess-c "$REPO" "$PSQL"
 assert_equal allow "$VERDICT" "which lifts the block"
@@ -555,8 +580,9 @@ advertised sibling
 # Typed exactly as advertised it works, and the reason it works is the hint: the
 # hook is the only thing that knows sub-2 is the one asking, and it leaves that
 # under a key computed from the tokens of the line it saw.
-exit_seen_by_guard b3-2 sess-a "$REPO" 'agentbus wait db --why "..."' sub-2
-start_exit sess-a 'agentbus wait db --why "..."' "$TEST_TMP/wait-sib.out"
+WAITLINE=$(plan_exit wait)
+exit_seen_by_guard b3-2 sess-a "$REPO" "$WAITLINE" sub-2
+start_exit sess-a "$WAITLINE" "$TEST_TMP/wait-sib.out"
 sleep 1
 ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=b3-hold \
   agent_id=sub-1 agent_type=general-purpose)" > /dev/null
@@ -617,6 +643,10 @@ guard b4-1 sess-a "$REPO" "$PSQL" sub-2
 assert_equal deny "$VERDICT" "a claim nobody can attribute blocks this session's own agents"
 assert_contains "$REASON" "nothing can" "and says why it cannot tell"
 advertised unidentified
+# This block's advice is the one line M3 changed the wording of, so the wording
+# assertions below are paired with the decision field itself, on both sides of
+# running the exit: wording may move, decisions may not.
+assert_deny "$(cat "$GUARD_OUT")" "and the decision is a deny, whatever it says"
 
 # `agentbus claim db --as <your name>` was this block's first advice and it did
 # not work: the guard let the line past, and then `do_claim` refused it, because
@@ -627,13 +657,21 @@ advertised unidentified
 # So M1 changed the advice rather than the rule: taking a lock nobody can
 # attribute IS a takeover, and `--steal` is how this tool says takeover. The
 # line the block prints now works, and the taking is loud.
-out=$(take_exit b4-2 sess-a "$REPO" \
-  "agentbus claim db --as $SUB2 --steal --why \"...\"" sub-2)
+#
+# M3 filled the last hole in it. It used to read `--as <your name>` and end
+# "(yours is in the message that named you)" — a message telling the reader to
+# go and find a value it was holding all along. The Plan knows which agent is
+# asking, because the block only exists for a caller that has an `agent_id`, so
+# the name is in the line and the exit is one a reader can copy.
+assert_contains "$(plan_exit adopt)" "--as $SUB2" \
+  "the adopt exit names the agent that is asking, rather than telling it to"
+out=$(take_exit b4-2 sess-a "$REPO" "$(plan_exit adopt)" sub-2)
 assert_contains "$out" "claimed 'db'" \
   "the \`--as … --steal\` claim the block advertises takes the anonymous lock"
 guard b4-3 sess-a "$REPO" "$PSQL" sub-2
 assert_equal allow "$VERDICT" \
   "so the first exit the unidentified block offers lifts it"
+assert_allow "$(cat "$GUARD_OUT")" "and the decision field says so too"
 assert_contains "$(ab sess-a status)" "took 'db' from $A (forced)" \
   "and it is on the bus as a takeover, not as a quiet adoption"
 
@@ -650,7 +688,7 @@ assert_contains "$out" "is held by $A" "the advertised wait queues against the r
 assert_not_contains "$out" "claimed 'db'" "rather than reporting a claim it did not make"
 
 # And the one that does lift it.
-out=$(take_exit b4-5 sess-a "$REPO" 'agentbus release --all')
+out=$(take_exit b4-5 sess-a "$REPO" "$(plan_exit release)")
 assert_contains "$out" "released 1" "\`agentbus release --all\` gives back the anonymous lock"
 guard b4-6 sess-a "$REPO" "$PSQL" sub-2
 assert_equal allow "$VERDICT" "and that exit lifts the block"
@@ -667,7 +705,7 @@ advertised implied
 
 guard b5-2 sess-b "$WT" "AGENTBUS_OFF=1 rigrun --all"
 assert_equal allow "$VERDICT" "the bypass works for an implied resource"
-out=$(take_exit b5-3 sess-b "$WT" 'agentbus claim bundler --steal --why "..."')
+out=$(take_exit b5-3 sess-b "$WT" "$(plan_exit steal)")
 assert_contains "$out" "claimed 'bundler'" "the steal names the implied resource and takes it"
 guard b5-4 sess-b "$WT" "rigrun --all"
 assert_equal allow "$VERDICT" "and the block lifts"
@@ -700,8 +738,11 @@ assert_not_contains "$REASON" 'agentbus wait simulator --why' \
 # A real queue now, so the holder has to let go for this to come back — the same
 # shape as the held block in section 1, and the reason this wait is worth the
 # wall-clock time.
-exit_seen_by_guard b6-2 sess-b "$WT" 'agentbus wait simulator@ABC123 --why "..."'
-start_exit sess-b 'agentbus wait simulator@ABC123 --why "..."' "$TEST_TMP/wait-inst.out"
+WAITLINE=$(plan_exit wait)
+assert_contains "$WAITLINE" "simulator@ABC123" \
+  "the wait the block advertises names the device, not the resource"
+exit_seen_by_guard b6-2 sess-b "$WT" "$WAITLINE"
+start_exit sess-b "$WAITLINE" "$TEST_TMP/wait-inst.out"
 sleep 1
 ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=b6-hold)" > /dev/null
 finish_exit 15
@@ -717,7 +758,7 @@ ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" "cmd=$MAESTRO" id=b6-hol
 assert_equal "simulator@ABC123" "$(lock_keys)" "the other session has the device again"
 guard b6-4 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
 assert_equal deny "$VERDICT" "and this one is blocked on it again"
-out=$(take_exit b6-5 sess-b "$WT" 'agentbus claim simulator@ABC123 --steal --why "..."')
+out=$(take_exit b6-5 sess-b "$WT" "$(plan_exit steal)")
 assert_contains "$out" "claimed 'simulator@ABC123'" "the advertised steal takes that device"
 assert_equal "simulator@ABC123" "$(lock_keys)" "and there is still exactly one lock on it"
 guard b6-6 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
@@ -751,9 +792,14 @@ assert_contains "$REASON" "serving a different checkout" "and told why"
 advertised serving
 assert_not_contains "$REASON" "AGENTBUS_OFF" \
   "and offers no bypass, so the exits above are the whole of its advice"
+# Asserted on the Plan as well as on the message. "I really do mean the other
+# checkout's server" is not a thing anybody means, so there must be nothing for
+# a renderer to print — a message that merely happens not to mention
+# AGENTBUS_OFF today is one exit away from mentioning it tomorrow.
+assert_no_bypass serving
 assert_equal "" "$(lock_keys)" "the refused command claimed nothing on the way"
 
-out=$(take_exit b7-2 sess-b "$WT" 'agentbus serve web')
+out=$(take_exit b7-2 sess-b "$WT" "$(plan_exit serve)")
 assert_contains "$out" "restarted from your worktree" "the advertised handover runs"
 guard b7-3 sess-b "$WT" "webcurl /health"
 assert_equal allow "$VERDICT" "and the block lifts"
@@ -797,11 +843,108 @@ assert_equal deny "$VERDICT" "the same command is still refused, as it must be"
 guard b8-4 sess-b "$WT" "curl -sf localhost:$MINE/health"
 assert_equal allow "$VERDICT" "and the command it tells you to run instead is allowed"
 
-out=$(take_exit b8-5 sess-b "$WT" 'agentbus port api')
+out=$(take_exit b8-5 sess-b "$WT" "$(plan_exit port)")
 assert_equal "$MINE" "$out" "\`agentbus port api\` prints the same number on its own"
 
 guard b8-6 sess-b "$WT" "AGENTBUS_OFF=1 $WRONG"
 assert_equal allow "$VERDICT" "and saying you really do mean the other one gets you through"
+
+
+# =============================================================================
+# Check C — what a Plan is, as opposed to what it says
+# =============================================================================
+#
+# Two properties of `plan_for` that no other assertion in this suite can see,
+# and both of which M4 spends: it starts no subprocess unless it is asked to
+# probe, and it changes nothing on the bus at all.
+#
+# The five command-line verbs M4 routes through `plan_for` are pure file
+# operations today. An `lsof` inside `agentbus claim` would be invisible to
+# every assertion about locks, messages and verdicts — the verb would answer
+# correctly, just slower, on a hook path that is measured in single-digit
+# milliseconds. So it is measured here, at the only moment it is cheap to.
+#
+# Purity is also what makes the exits above trustworthy: `advertised` asks the
+# engine for a Plan in the middle of a live block, and if asking changed
+# anything the answer would be about a different world than the one the guard
+# decided in.
+
+PURITY="$TEST_TMP/plan-purity.py"
+cat > "$PURITY" <<'PY'
+import hashlib, importlib.machinery, importlib.util, os, subprocess, sys
+
+path = os.path.join(os.environ["AB_ROOT"], "bin", "agentbus")
+loader = importlib.machinery.SourceFileLoader("abengine", path)
+ab = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(ab)
+
+sid, cwd, cmd, probing = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+home = os.environ["AGENTBUS_HOME"]
+os.chdir(cwd)
+_, me = ab.resolve_party({"session_id": sid, "cwd": cwd}, cmd)
+
+
+def snapshot():
+    out = []
+    for root, dirs, files in os.walk(home):
+        dirs.sort()
+        for name in sorted(files):
+            p = os.path.join(root, name)
+            try:
+                body = open(p, "rb").read()
+            except OSError:
+                body = b"?"
+            out.append("%s %s" % (os.path.relpath(p, home),
+                                  hashlib.sha1(body).hexdigest()))
+    return "\n".join(out)
+
+
+# Warm whatever is allowed to be lazy before measuring. `repo_config` allocates
+# a per-worktree port the first time one is asked for, and allocating probes the
+# port to be sure nothing else has it — a subprocess and a registry write, but
+# neither of them is `plan_for` deciding anything, and both happen once ever.
+ab.plan_for(me, cmd, ab.load_sessions())
+
+sessions = ab.load_sessions()
+started = []
+real = subprocess.run
+
+
+def spy(*a, **k):
+    started.append(a[0] if a else k.get("args"))
+    return real(*a, **k)
+
+
+subprocess.run = spy
+before = snapshot()
+plan = ab.plan_for(me, cmd, sessions, probe_services=(probing == "probe"))
+after = snapshot()
+subprocess.run = real
+
+print("subprocesses %d" % len(started))
+print("changed %s" % ("no" if before == after else "yes"))
+print("verdict %s" % plan["verdict"])
+if before != after:
+    b, a = before.splitlines(), after.splitlines()
+    print("\n".join(["  + " + l for l in a if l not in b]
+                    + ["  - " + l for l in b if l not in a]))
+PY
+
+# A command that touches a resource with a port, so that the probe has
+# something to probe. Nothing holds anything by now, so the lock verdict does
+# not settle it first and the probe is genuinely reached.
+assert_equal "" "$(lock_keys)" "nothing is held going into the purity checks"
+
+out=$(python3 "$PURITY" sess-b "$WT" "uvicorn app:main --reload" plain)
+assert_contains "$out" "subprocesses 0" \
+  "\`plan_for\` starts no subprocess when it is not asked to probe"
+assert_contains "$out" "changed no" \
+  "and writes nothing at all — no lock, no matched marker, no event"
+
+out=$(python3 "$PURITY" sess-b "$WT" "uvicorn app:main --reload" probe)
+assert_not_contains "$out" "subprocesses 0" \
+  "while \`probe_services=True\` does start one, so the flag is not decorative"
 
 
 finish
