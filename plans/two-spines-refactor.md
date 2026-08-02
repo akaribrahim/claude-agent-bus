@@ -123,8 +123,24 @@ requires that running one lifts the block.
       isolated bus, with the live one untouched. It is 39 checks and not the
       36 this plan says — the count moved when the subagent section was added
       and nobody updated the prose.
-- [ ] (M5) Re-measure cost, update the documentation that describes the old shape, and
+- [x] (M5) Re-measure cost, update the documentation that describes the old shape, and
       write the retrospective.
+      Done 2026-08-02: three commits, no behaviour changed and no assertion
+      touched — 1571 as M4 left it. The Mac was re-measured and the figures sit
+      beside the pre-refactor ones in `Artifacts and Notes`; **the gate does not
+      resolve**, because the delta's own spread is three times the width of the
+      band it is judged against, which is a fact about the instrument and not
+      about the code, and what a paired measurement would have to do instead is
+      written down there. Windows was not measured: it needs the author's
+      machine, and the 2026-07-31 figures now say so on their face. The engine
+      is +916 lines and the floor moved 41.5 → ~45.7 ms, about 26 ms of it a
+      recompile no hook can cache — recorded as a cost of this refactor, with
+      the tool's own figure for caching the bytecode as possible future work.
+      `README.md`, `SKILL.md` and the module docstring were updated only where
+      the refactor moved what they describe; the two spines' shape, the comma
+      form, the `<resource>@<instance>` form and the cost table. Three more
+      observations are in `Surprises & Discoveries`, two of them found by
+      reading in M5 and neither fixed here.
 
 ## Surprises & Discoveries
 
@@ -423,6 +439,39 @@ requires that running one lifts the block.
   rendering the full exit set would have advertised it, which is the rule this
   milestone rests on broken by the milestone itself. The exit is now built only when
   the Plan has a command.
+
+- Observation (M4, 2026-08-02): **the live acceptance suite went red for a reason that
+  had nothing to do with the code.** The check that a failure naming nobody else's files
+  produces no note read the transcript with `tail -12`. How far back twelve lines reach
+  depends on how much the model chose to say that turn, and when it was terse the window
+  reached into the PREVIOUS turn — where an interference note was correct and expected —
+  so the check reported the plugin had done the exact thing it was verifying it had not.
+  Once in three runs of the whole suite while M4 was being checked, never in two runs of
+  that section alone. For asserting that something did *not* happen, a window sized by
+  guesswork is worse than no assertion: a suite that goes red on its own teaches whoever
+  runs it to shrug at the colour. This is the same disease as the green assertions this
+  plan kept finding, with the sign flipped, and it is the only red one. Closed in
+  `78188fe` by taking a record count before the prompt, which is exact and does not care
+  how talkative the model is.
+
+- Observation (M5, 2026-08-02): **the event stream still flattens an instance, and the
+  status screen no longer does.** `announce_locks` names a lock through `plain_name`,
+  which drops everything after the `@`. That is right for `worktree@3f9c1a`, a digest
+  nobody typed and which must not appear in the log; it is no longer right for a device,
+  because since M1 `simulator@ABC123` is a name an agent types and a block advertises,
+  and since M4's `00c9c6b` `status` prints it that way. On an isolated bus a claim on
+  `simulator@ABC123` shows as `simulator@ABC123` under "Shared resources in use" and as
+  `took 'simulator'` under "Recent", so two agents holding two different devices write
+  identical lines. Display only — no decision reads those strings — and left alone here,
+  because M5 changes no behaviour.
+
+- Observation (M5, 2026-08-02): **the tool that took these measurements describes a
+  machine that no longer exists.** `tests/perf/hook-cost.py`'s docstring says "on Windows
+  there is no fast path, so every hook pays for a full interpreter start and a 5000-line
+  recompile". `bin/hook.py` has been that fast path since before this plan and the tool
+  measures it in a section of its own, and the file is 6732 lines. Not fixed: M5's
+  documentation scope was `README.md`, `SKILL.md` and the engine's own docstring, and a
+  fourth file's preamble is worth deciding about deliberately rather than in passing.
 
 - Observation: the two spines were identified by classifying defects, not by reading
   code, and that is what makes this plan worth doing rather than a rewrite. Twenty-two
@@ -741,7 +790,193 @@ requires that running one lifts the block.
 
 ## Outcomes & Retrospective
 
-To be written at the end of M5.
+### What the two spines cost
+
+Twenty-two defects, root causes assigned by hand, twelve of them in these two categories:
+six from guessing who is acting and where, six from the same decision being made in more
+than one place. The other ten spread over six causes — configuration expressiveness 3,
+packaging 2, observability 2, platform assumption 1, gate logic 1, input handling 1 — and
+no other cause reaches three. That distribution is the argument for this plan rather than
+a rewrite: two causes account for more than half, and a rewrite would have addressed the
+twelve no better than the ten.
+
+Every one of the twenty-two was found in real use. The suite was green through all of
+them, and it was 932 assertions when this plan started.
+
+What the twelve cost in kind rather than in count. `agentbus claim worktree` wrote a lock
+under the bare name for weeks while the guard filed the same resource as
+`worktree@<digest>`: it printed "claimed", exited 0, and held nothing anybody read. A
+block offered `agentbus wait <res>` and `AGENTBUS_OFF=1 <command>` and the guard that
+printed them refused both. Another told an agent to run `agentbus claim <res> --as <your
+name>` and denied exactly that line. On the identity side, thirteen functions inferred
+who and where from a session id, an `agent_id` that only a subagent has, and a cwd that
+is often not where the work is happening — each added to close one defect and none
+removing another. The most recent was half a fix: `agentbus here` pinned the record
+`status` prints while `caller_view`, which the guard decides from, had no pin check, so a
+declaration a human made was cosmetic.
+
+There is a cost in that list which the list does not show. Three of the defects were
+recorded as closed while they were still live — the `here` pin once, the `--as` advice
+twice. A defect believed closed stops being looked for, and each of the three was found
+again by somebody reading the code rather than by anything running.
+
+### What it cost to collapse them
+
+Thirty-four commits, `5948ffc` to `78188fe`, 04:58 to 09:16 on 2026-08-02 — four hours
+and eighteen minutes of wall clock, a commit every seven and a half minutes, six of which
+touch nothing but this plan. M1 was the longest stretch, twelve commits over sixty-nine
+minutes; M0 the largest single commit, 1336 lines. A good deal of that time was spent
+proving tests could fail: twelve falsifications in a copied tree in M0, four in M2, four
+in M3, seven in M4, and one per behaviour change in M1 with the write half and the read
+half done separately — on the order of thirty-five copied-tree runs, each a rule
+deliberately broken to watch an assertion notice.
+
+Assertions went 932 → 1571, +639 and +69 %, across fourteen behavioural files becoming
+sixteen, plus three AST checks in `tests/check_syntax.py`. M0's characterisation harness
+is 390 of that growth and 1255 lines of test code written before anything was refactored;
+those two files are 1895 lines today, and `test_parity.sh` alone is 401 assertions and
+twenty-eight seconds, a quarter of the suite's wall clock.
+
+`bin/agentbus` went 5816 → 6732 lines, +916, with 1770 lines changed. The file got bigger
+while the number of places answering each question got smaller, and both halves of that
+are real: `resolve_party` and `plan_for` hold, in one place each, reasoning that used to
+be spread over thirteen functions and five verbs — together with comments naming the
+defect every block exists for, which is longer written down than it was scattered.
+
+Every hook that wakes the engine pays for those lines. The floor moved 41.5 → 45.1–46.1
+ms, about 26 ms of which is Python compiling a file it is never allowed to cache, because
+a hook is handed a script and not an import. The guard's own work is single-digit
+milliseconds; the tax for the file it lives in is five times that, and this refactor
+added a fifth of the tax. `Artifacts and Notes` records the figures, why the ±10 % gate
+on the delta cannot resolve them, and what caching the bytecode would be worth.
+
+### Did the defect rate in those two categories go to zero?
+
+Not knowable, and this plan is not entitled to the claim. What can be said is what was
+closed, what is now structurally unavailable, and what is merely passing today.
+
+Eleven defects of these two shapes were closed between the review and M4, and not one of
+them was reported from use. Every one was found by looking:
+
+*By the review, before any code moved.* The `agentbus here` pin that never bound the
+guard, and the unidentified-party block advertising an `--as` line the guard denied.
+
+*By M0's harness, against unmodified code.* `VERBOSE=1` making every file's assertions
+lie. The `--as` advice being reachable and still useless, because `do_claim` refused what
+the guard had just been taught to let past. An instance block with no working exit at
+all, whose advice took a lock nothing was contending for and reported success. And a
+`wait` the guard never saw reporting a claim it had not made, while upgrading a sibling's
+one-command soft lock to hard and leaking it.
+
+*While doing M1.* The implied-resources note advertising `agentbus claim rig,bundler`, a
+comma list the guard splits and the verb wrote as a single junk lock.
+
+*While doing M4.* The same comma defect in `release` and in `wait`. `locks_text`
+reporting an instance-held resource as free, on the screen an agent reads before deciding
+whether it needs to wait for anything. And the two fast paths disagreeing about an engine
+without its executable bit, so a checkout that lost the mode bit would stop guarding on
+macOS and go on guarding on Windows — the divergence worse than either answer.
+
+A twelfth was avoided rather than closed: `_lock_block` would have offered
+`AGENTBUS_OFF=1` to a command-line verb, where it does nothing whatever. That is the rule
+this milestone rests on, broken by the milestone itself, and it was caught because the
+rule was written down.
+
+Structurally unavailable now, which is the stronger claim:
+
+*Advice is generated by the object that decides.* `render_block` places `plan["exits"]`
+and composes no command; `check_exits_are_planned` fails if a string containing
+`agentbus ` or `AGENTBUS_OFF` appears anywhere inside it, and refuses to pass by finding
+nothing if the function is renamed. A message cannot advertise a line the guard would
+refuse, because a message no longer knows how to write one down.
+
+*`lock_name` has two callers*, `plan_for` and the display path `locks_text`, enforced by
+`check_one_lock_namer` with the same rename guard. `resolve_lock` is gone and the five
+verbs take their names from a Plan; the twelve call sites that used to answer "under what
+name is this locked" are two.
+
+*The five who-and-where helpers are private to `resolve_party`*, enforced by
+`check_one_resolver` with the same rename guard, and `current_session` is gone — so there
+is no cheap door left that answers "who is acting" with "nobody knows", which is the
+unidentified lock `same_party` exists to catch and precisely how the spine grew to
+thirteen functions the first time.
+
+*The exit check runs the advertised line.* `test_parity.sh` takes it from
+`plan.exits[].cmd` rather than retyping it, runs it, and requires the originally denied
+command to be allowed afterwards. "The guard allows the exit" is not that property:
+`agentbus claim worktree` was allowed, perfectly, for weeks.
+
+Merely passing today, and the list is not short:
+
+*The token pre-filter* is a third copy of the gate decision and cannot be collapsed,
+because its purpose is to answer without starting the engine `resources_for` lives in. It
+is held to a superset invariant by one fixture exercising `unless`, `implies`, `key` and
+`_explicit`. A resource shape nobody thought to put in that fixture is not covered, and
+this is the failure mode that is silent in both directions.
+
+*The two fast paths* are two implementations of one gate in two languages, pinned by
+`test_pyhook.sh` driving both through every branch against a stand-in engine. That is
+agreement demonstrated, not agreement by construction: a branch added to one and not the
+other is caught only if somebody also adds the case.
+
+*The file surface still writes its own advice.* `guard_file`, `ownership_verdict` and
+`interference_note` were put out of scope deliberately, and the review's census says most
+advice sites are there. The class of defect this plan opens with is closed on the command
+surface and open on the file surface.
+
+*Windows is unmeasured* for cost, and everything above was demonstrated on this Mac.
+
+The reason to refuse the word "zero" is in this repository's own record. The pin fix
+shipped with an assertion that asked the session record, and the record was right for the
+whole time the guard was wrong. The `--as` advice was recorded as closed on 2026-08-02
+and was still live; M0's harness found it again the same day and it took M1 to close it.
+Two half fixes in one plugin in one week is a base rate, not an anecdote. What this plan
+is entitled to claim is narrower and worth more: the two categories are structurally
+harder to re-enter than they were, three AST checks fail if the collapse regresses, and
+the next honest data point is the next month of real use.
+
+### The most reusable thing this produced
+
+Not the two functions. The rule that every assertion is falsified in a copied tree —
+break the thing it claims to pin, run it, watch it fail — together with the habit of
+asking a green suite what it would still be green *through*.
+
+Six green assertions that measured the wrong thing turned up while this plan ran, counted
+from `Surprises & Discoveries`:
+
+- the pin assertion that asked the session record while the guard was wrong — found by
+  the independent review, reading;
+- `VERBOSE=1`, which put the harness's own `ok` lines on stdout and therefore inside
+  `out=$(ab_hook …)`: 22 of 118 assertions in `test_subagents.sh` failed under the flag
+  documented for inspecting them, and 11 of 100 in `test_serving.sh` — found by using it;
+- `test_identity.sh` staying green when `resolve_party` hands one value to every caller,
+  because each case drives one party at a time — found by the falsification step;
+- all sixteen behavioural files staying green when a hook reaches for `_party_view`
+  directly, the exact mechanism by which the spine grew to thirteen functions — found by
+  the falsification step;
+- the purity snapshot for `plan_for`, which hashed contents and so could not see the
+  `matched/` marker writes, whose contents never change and whose mtime does — found by
+  the falsification step;
+- `test_matcher.py` rebuilding `refresh_derived`'s token line instead of asking for it,
+  four lines short, having silently lost the `agentbus` token: a test reconstructing the
+  thing it checks, which is this plan's opening defect one level up — found by extending
+  the fixture with a case that matches through an `agentbus` line.
+
+Three of the six were found by the falsification step itself rather than by any defect,
+which is the whole argument for the discipline: it pays before anything breaks. One was
+found by using the documented tool, one by extending a fixture, one by an outside reader.
+
+And one red-but-wrong, the same disease with the sign flipped: the live acceptance check
+that read `transcript | tail -12` and, when the model was terse that turn, reached into
+the previous turn and reported the plugin had done the exact thing it was verifying it
+had not.
+
+A note on the count, because this plan's own numbering does not add up. The four
+pre-existing entries listed in M0 plus these six give eight, but M0's `VERBOSE` entry
+calls itself "a fifth entry" and M2's calls itself "the fifth time", so M3 reads "sixth"
+and M4 "seventh" where a consistent count says seventh and eighth. The running total is
+not the interesting number anyway. The interesting number is six, in four hours, in a
+repository whose suite was green throughout.
 
 ## Context and Orientation
 
