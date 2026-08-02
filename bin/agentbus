@@ -1134,9 +1134,21 @@ def follow_agent_cwd(rec, cwd, trusted=True):
 
     A cwd equal to the parent's is not evidence. It is what a subagent's payload
     says when it has never changed directory, whatever tree it was told to work
-    in — so treating it as an observation would overwrite what the agent
-    declared with `agentbus here` on its very next tool call, every time."""
+    in, so it says nothing about where the work is and nothing may move on it.
+
+    That guard used to be the whole of a subagent's protection. `agentbus here
+    --as <name>` wrote the same five location fields as `agentbus here` and no
+    flag, so a session's declaration was protected by `pinned` and a subagent's
+    only by the coincidence that its payload happened to name its parent's tree
+    — any *other* cwd overwrote what it had declared, on the next tool call. The
+    flag exists at both levels now, and a pinned agent is left alone here for
+    the reason `follow_cwd` leaves a pinned session alone."""
     if not rec or not cwd or cwd == rec.get("cwd"):
+        return rec
+    if rec.get("pinned"):
+        # Somebody said where this agent is working, with `agentbus here --as`.
+        # A declaration has to outlast the inference that contradicts it;
+        # `agentbus here` somewhere else moves it again.
         return rec
     parent = read_json(os.path.join(SESSIONS, "%s.json" % rec.get("sid"))) or {}
     if cwd == parent.get("cwd"):
@@ -4683,7 +4695,11 @@ def cli_here(args):
 
     Which party is speaking is settled by the hint the guard leaves, the same
     way `agentbus claim` is — so it must be run as its own command, not buried
-    in a script, and `--as <your name>` is the fallback when it cannot be."""
+    in a script, and `--as <your name>` is the fallback when it cannot be.
+
+    Either way the declaration is durable: it is recorded with a `pinned` flag,
+    on the session's record or on the agent's, and everything that infers a
+    location from a cwd steps over it until `here` is run somewhere else."""
     me = acting(need_me(), args)
     pos = positional(args)
     where = os.path.realpath(pos[0]) if pos else os.getcwd()
@@ -4698,8 +4714,12 @@ def cli_here(args):
             print("agent-bus: no record of that agent — `agentbus whois` lists "
                   "who is who.", file=sys.stderr)
             sys.exit(1)
+        # The same flag the session branch writes, because it is the same
+        # statement one level down. Without it `follow_agent_cwd` had nothing to
+        # read, and the declaration survived only until a payload arrived with a
+        # cwd that was neither the agent's record nor its parent's.
         rec.update({"cwd": where, "root": root, "repo_key": repo_key,
-                    "repo_label": label, "branch": branch})
+                    "repo_label": label, "branch": branch, "pinned": True})
         write_json(agent_path(me["sid"], aid), rec)
         who = rec.get("name")
     else:

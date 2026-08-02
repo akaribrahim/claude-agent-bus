@@ -472,10 +472,9 @@ free_all sess-sub
 
 # The conjunct that is easy to lose in a refactor: a cwd equal to the PARENT's
 # is not an observation. It is what a subagent's payload says when it has never
-# changed directory, whatever tree it was told to work in — so treating it as
-# evidence would overwrite the subagent's own root on its very next tool call,
-# every time, and `agentbus here --as` would never stick for longer than one
-# command.
+# changed directory, whatever tree it was told to work in — so it says nothing
+# about where the work is, and treating it as evidence would overwrite the
+# subagent's own root on its very next tool call, every time.
 out=$(apre sess-sub sub-w "$REPO" "git add -A" l-c2)
 assert_allow "$out" "subagent (c): a payload carrying its parent's cwd is allowed"
 assert_equal "$(wt_lock "$WT")" "$(held_locks)" \
@@ -508,6 +507,38 @@ out=$(apre sess-sub sub-w "$REPO" "git add -A" l-c4)
 assert_allow "$out" "subagent (c) vs pin (b): the parent pins itself elsewhere"
 assert_equal "$(wt_lock "$WT")" "$(held_locks)" \
   "subagent (c) vs pin (b): the subagent's own root still wins, over its parent's pin"
+
+free_all sess-sub
+
+# A subagent's DECLARATION, which is a different thing from the inferred root
+# above and is now as durable as the session's. Until M1 the `--as` branch of
+# `agentbus here` wrote the same five location fields as the session branch and
+# no flag, so the only thing standing between a stated root and a payload was
+# the guard above — a cwd equal to the parent's. Any OTHER cwd walked over it.
+# The arrangement here is exactly that: the agent declares the main checkout,
+# its parent is sitting in the main checkout, and the next payload names the
+# worktree — neither the record nor the parent's tree, so it used to be read as
+# an observation and the declaration lasted one tool call. A session's
+# declaration had a flag; a subagent's had a coincidence.
+SUBP=$(ab sess-sub name)
+SUBW="$SUBP/1"
+ab sess-sub here "$REPO" --as "$SUBW" > /dev/null
+out=$(apre sess-sub sub-w "$WT" "git add -A" l-c5)
+assert_allow "$out" "subagent (c): a subagent that declared its checkout is allowed"
+assert_equal "$(wt_lock "$REPO")" "$(held_locks)" \
+  "subagent (c): and locked where it DECLARED, not where the payload puts it"
+assert_equal "$REPO" "$(agent_field sess-sub sub-w root)" \
+  "subagent (c): the payload did not overwrite the declaration   [supporting]"
+
+free_all sess-sub
+
+# And it is a statement rather than a cage one level down too, the same way
+# `agentbus here` is for a session.
+ab sess-sub here "$WT" --as "$SUBW" > /dev/null
+out=$(apre sess-sub sub-w "$REPO" "git add -A" l-c6)
+assert_allow "$out" "subagent (c): declaring it somewhere else is allowed"
+assert_equal "$(wt_lock "$WT")" "$(held_locks)" \
+  "subagent (c): and the guard follows to the newly declared checkout"
 
 free_all sess-sub
 
