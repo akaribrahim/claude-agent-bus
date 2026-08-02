@@ -163,7 +163,11 @@ ab sess-b release simulator > /dev/null
 out=$(ab sess-b claim simulator --why "just the simulator" 2>&1)
 assert_contains "$out" "implies bundler" \
   "a deliberate claim is told what it has NOT taken"
-assert_contains "$out" "agentbus claim simulator,bundler" "and how to take it"
+# The line it prints is one that runs. It used to be `agentbus claim
+# simulator,bundler`, a comma list `explicit_resources` splits and `resolve_lock`
+# does not — so it wrote a lock called literally `simulator,bundler` and took
+# neither of them.
+assert_contains "$out" "agentbus claim bundler" "and how to take it"
 ab sess-b release simulator > /dev/null
 
 # ---- the log says what was taken, not only what was given back --------------

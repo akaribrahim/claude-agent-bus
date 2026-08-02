@@ -308,7 +308,22 @@ assert_equal "simulator" "$(ab sess-a run simulator -- "$LOCKDUMP" 2>/dev/null)"
 out=$(ab sess-a claim rig --why "just the rig" 2>&1)
 CLI_RIG=$(lock_keys)
 assert_contains "$out" "implies bundler" "a deliberate claim is told what it has NOT taken"
-assert_contains "$out" "agentbus claim rig,bundler" "and how to take it"
+assert_contains "$out" "agentbus claim bundler" "and how to take it"
+
+# The note is worth exactly what its line is worth, and this file's other half
+# is the rule that an advertised exit has to work. It advertised `agentbus claim
+# rig,bundler` until M1: `explicit_resources` splits a comma list and
+# `resolve_lock` does not, so the guard understood the line, the CLI wrote a
+# lock named literally `rig,bundler`, printed `claimed 'rig,bundler'` — and held
+# neither the rig nor the bundler. Success reported against a lock nothing was
+# contending for, one surface along from the instance block M1 had just fixed.
+assert_not_contains "$out" "rig,bundler" \
+  "so it no longer advertises the comma form, which writes a lock under that name"
+out=$(ab sess-a claim bundler --why "the bundler as well" 2>&1)
+assert_contains "$out" "claimed 'bundler'" "the line the note prints is one that runs"
+assert_equal "bundler rig" "$(lock_keys)" \
+  "and it takes what it names, rather than a third lock nobody wanted"
+ab sess-a release bundler > /dev/null
 ab sess-a release rig > /dev/null
 
 ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" "cmd=rigrun --all" id=a-rig)" > /dev/null

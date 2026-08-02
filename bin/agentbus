@@ -4083,10 +4083,24 @@ def cli_claim(args):
             # Not expanded silently: a claim is deliberate. But holding the
             # simulator while somebody else re-serves the bundler under you is
             # the trap this exists to prevent, so it is said out loud.
+            #
+            # And the line it prints has to be a line that works. It used to be
+            # `agentbus claim <res>,<implied>` — a comma form `explicit_resources`
+            # splits and `resolve_lock` does not, so the guard understood it and
+            # this verb wrote a lock named literally `rig,bundler`, printed
+            # `claimed 'rig,bundler'` and held neither of them. An exit reporting
+            # success against a lock nothing was contending for, which is the
+            # same defect as the block that advertised a bare `simulator` for a
+            # device held under `simulator@ABC123`.
+            #
+            # Teaching this verb the comma form was the other candidate and was
+            # not taken: it would be a second implementation of the split in
+            # `explicit_resources`, added to one of the five verbs M4 exists to
+            # stop deciding for themselves, and deleted again there.
             print("note: '%s' implies %s, which you have NOT taken. "
-                  "`agentbus claim %s` if the run needs them held too."
+                  "`%s` if the run needs them held too."
                   % (pos[0], ", ".join(implied),
-                     ",".join([pos[0]] + implied)))
+                     " && ".join("agentbus claim %s" % d for d in implied)))
         return
     print("'%s' is held by %s (%s, %s). %s" % (
         pos[0], holder.get("agent"), lock.get("mode"),
