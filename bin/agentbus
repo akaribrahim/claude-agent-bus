@@ -23,6 +23,21 @@ Three jobs:
   messages   an append-only stream, delivered into the other agents' context at
              their next turn — no polling, no file they have to remember to read
 
+Two questions run underneath all three, and each is answered in exactly one
+place — because for a long time neither was, and half of this plugin's defects
+came out of the disagreements:
+
+  resolve_party  who is acting and where they are working, as a precedence
+                 order written down in one function instead of inferred by
+                 thirteen
+  plan_for       what a Bash command touches, under what names it is locked,
+                 what is about to happen to it, and what the reader can run
+                 instead. The block message is rendered from that answer
+                 rather than written out beside it, so advice the guard would
+                 refuse is not something a message knows how to print
+
+`tests/check_syntax.py` fails if either spreads out again.
+
 State lives in ~/.claude/agent-bus (see LAYOUT below), never in this directory,
 so updating the plugin never loses it.
 """

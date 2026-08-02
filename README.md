@@ -191,7 +191,7 @@ machine and collaborator gets the same guards.
 | `scope: "worktree"` | Contended only by sessions in the *same* checkout. |
 | `ports` | `"per-worktree"` gives every checkout its own port for this resource, derived from its path. The repository's original checkout keeps the declared one, so nothing changes for whoever works there. Use `${PORT}` in `start` and `ready`. |
 | `env` | The shell variable `agentbus env` exports for this resource's port. |
-| `key` | A regex whose first group names *which one*: `"key": "--udid\\s+(\\S+)"` turns one simulator lock into one per device. A command naming no instance contends with all of them. |
+| `key` | A regex whose first group names *which one*: `"key": "--udid\\s+(\\S+)"` turns one simulator lock into one per device. A command naming no instance contends with all of them. On the command line, where there is no command to read a device off, name it yourself: `agentbus claim simulator@ABC123`. |
 | `why` / `hint` | Shown verbatim when blocking. `init-repo` leaves these empty on purpose: this is the part only you can write, and it is the part that stops an agent working around the block. |
 
 The cheap pre-filter the shell hook uses is **derived from the patterns**, so the
@@ -211,9 +211,9 @@ agentbus serves                       which checkout each service is answering f
 agentbus own "<glob>" [--why ".."] [--strict]   declare part of the tree yours
 agentbus own --list | disown "<glob>" | disown --all
 agentbus handoff [--note ".."]        summarise what you did, for the others
-agentbus claim <res> [--why ".."] [--steal] [--as <you>]
-agentbus wait <res> [--timeout 90]    queue for a held resource
-agentbus release <res> | --all
+agentbus claim <res>[,<res>] [--why ".."] [--steal] [--as <you>]
+agentbus wait <res>[,<res>] [--timeout 90]      queue for a held resource
+agentbus release <res>[,<res>] | --all
 agentbus doing "..."                  one line others see in their roster
 agentbus init-repo [--dry-run|--force|--local]
 agentbus here [<path>]                record which worktree you are working in
@@ -307,15 +307,21 @@ dead session's locks and declarations are released the next time anyone looks.
 
 ## What it costs
 
-Measured on an M-series Mac, best of three batches of twenty, machine quiet.
-Under load everything here roughly triples, so treat them as floors.
+Measured on an M-series Mac with `tests/perf/hook-cost.py`, median of fifteen,
+machine quiet. Under load everything here roughly triples, so treat them as
+floors.
 
 | | |
 |---|---|
 | Alone, any hook | ~5 ms — the fast path reads one small file and exits |
 | Two sessions, a tool batch that ran no command | ~5 ms |
-| Two sessions, a tool batch that ran a command | ~42 ms — one engine start per batch, not per command |
-| Two sessions, a guarded command | ~42 ms, and it takes the lock |
+| Two sessions, a tool batch that ran a command | ~46 ms — one engine start per batch, not per command |
+| Two sessions, a guarded command | ~48 ms, and it takes the lock |
+
+Nearly all of that ~46 ms is Python arriving: ~16 ms to start the interpreter
+and ~26 ms to read and compile the engine, which a hook script never gets to
+cache. The guard's own work — deciding, taking the lock — is the couple of
+milliseconds between the last two rows.
 
 There is no daemon and nothing runs between sessions. Alone, it is effectively
 free.

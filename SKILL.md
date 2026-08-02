@@ -248,8 +248,10 @@ If you must claim from inside a script, say who you are:
     agentbus claim simulator --as <your name> --why "batch 1, 7 flows"
     agentbus release simulator --as <your name>
 
-`--as` works on `claim`, `release`, `wait`, `run` and `serve`. Without it, one
-of your siblings can neither be stopped by your lock nor hand it back.
+`--as` works on `claim`, `release`, `wait`, `run` and `serve`. Without it your
+claim blocks every agent in the session, a `wait` queues for your sibling's lock
+instead of reporting a claim it did not make, and `agentbus release --all` is
+what gives an unattributable lock back.
 
 One thing does *not* separate them: file collisions and the interference note
 still work per session, so two subagents editing one file are not warned about
