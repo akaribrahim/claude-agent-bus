@@ -4078,7 +4078,20 @@ def cli_claim(args):
         if key.startswith("file:"):
             refresh_derived()
         print("claimed '%s'" % pos[0])
-        _, implied = expand_implied([pos[0]], me)
+        # The note is computed from what was typed, and what gets typed for a
+        # `key`-bearing resource is `<resource>@<instance>` — that is the name
+        # the block about one device advertises, so it is the name an agent
+        # reaches for. As a bare string it matches no resource, so the claim
+        # that most needs the warning was the one that lost it: you hold the
+        # device and not the bundler it is only meaningful against. Looked up
+        # in `resolve_lock`'s order, whole name first, so a resource genuinely
+        # called `a@b` is still itself.
+        named = pos[0]
+        if not find_resource(me, named):
+            base, at, _ = named.rpartition("@")
+            if at and not named.startswith("file:") and find_resource(me, base):
+                named = base
+        _, implied = expand_implied([named], me)
         if implied:
             # Not expanded silently: a claim is deliberate. But holding the
             # simulator while somebody else re-serves the bundler under you is

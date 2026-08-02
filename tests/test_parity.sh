@@ -178,6 +178,15 @@ json.dump({"resources": [
      "patterns": [r"\bmetro\b"]},
     {"name": "rig", "desc": "the whole rig", "implies": ["bundler"],
      "patterns": [r"\brigrun\b"]},
+    # Per instance AND implying something: the shape that shows whether a note
+    # computed from a typed name can see through `<resource>@<instance>`.
+    # `simulator` is deliberately not given an `implies` — it carries the
+    # instance divergence above and entangling the two would make either one
+    # unreadable when it failed.
+    {"name": "device", "desc": "one of the phones on the bench",
+     "why": "One phone, several of you.",
+     "key": r"--serial\s+(\S+)", "implies": ["bundler"],
+     "patterns": [r"\badb\b"]},
     # No port: `serving` answers from the record alone for a portless service,
     # so the "this is serving another checkout" block can be provoked on a host
     # with neither lsof nor netstat.
@@ -302,8 +311,10 @@ assert_equal "simulator" "$(ab sess-a run simulator -- "$LOCKDUMP" 2>/dev/null)"
 # only meaningful against the bundler serving your tree, `run` because it did
 # not and the careful command was the weaker one.
 #
-# Pinned. M1's expected outcome is that `claim` keeps refusing and keeps saying
-# so, but that is to be confirmed in its own commit rather than assumed here.
+# Confirmed in M1 rather than changed: `claim` keeps refusing to expand and
+# keeps saying so. What M1 did change is the note, twice — the line it prints
+# has to be a line that runs, and it has to see through `<resource>@<instance>`
+# to the resource, which is asserted below.
 
 out=$(ab sess-a claim rig --why "just the rig" 2>&1)
 CLI_RIG=$(lock_keys)
@@ -333,11 +344,25 @@ ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=a-rig)" > /dev/
 assert_equal "rig" "$CLI_RIG" "\`claim rig\` takes the rig and nothing else"
 assert_equal "bundler rig" "$GUARD_RIG" "while a guarded rigrun takes what it implies"
 assert_differ "$CLI_RIG" "$GUARD_RIG" \
-  "DIVERGENCE (pinned on purpose, M1 revisits): \`claim\` does not expand \`implies\` and the guard does"
+  "DIVERGENCE (deliberate, confirmed in M1): \`claim\` does not expand \`implies\` and the guard does"
 
 assert_equal "bundler rig" "$(ab sess-a run rig -- "$LOCKDUMP" 2>/dev/null)" \
   "\`run\`, unlike \`claim\`, expands it — the same answer as the guard"
 assert_equal "" "$(lock_keys)" "and gives every one of them back when the command ends"
+
+# The note is worth nothing where it is not printed, and it was not printed for
+# the one name an agent is most likely to type. It is computed from what was
+# typed; `<resource>@<instance>` is what the block about one device advertises,
+# and as a bare string it matches no declared resource — so `claim device@P1234`
+# said nothing at all where `claim device` said "you have not taken the
+# bundler". The warning went missing from exactly the claim that needs it.
+out=$(ab sess-a claim device@P1234 --why "one phone" 2>&1)
+assert_contains "$out" "claimed 'device@P1234'" "an instance is claimed by name"
+assert_contains "$out" "implies bundler" \
+  "and is told what it has NOT taken, like any other claim"
+assert_contains "$out" "agentbus claim bundler" "by the same line that runs"
+ab sess-a release device@P1234 > /dev/null
+assert_equal "" "$(lock_keys)" "and the instance is given back under that name too"
 
 
 # =============================================================================
