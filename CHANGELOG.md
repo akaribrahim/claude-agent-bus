@@ -2,6 +2,35 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.2.0 — 2026-08-02
+
+**`agentbus post --all`** reaches every live session on the machine, not just
+the ones in your repository.
+
+Presence was already machine-wide and messages were not. `agentbus status`
+lists every session in every project, so an agent could see somebody it had no
+way to speak to: a plain `post` stopped at the edge of the repository, and
+`--to` needed a name you might not have. There was no way to say a thing that
+is true of the *machine* — two projects driving the one simulator this plugin
+exists to serialise, a machine-wide database being reseeded, a reboot, or this
+plugin being replaced under everybody.
+
+That default is still right and is unchanged: another project's chatter does
+not arrive, which is what keeps a delivered message worth reading. `--all` is
+the deliberate, occasional exception, and it says so — the sender is told how
+many sessions will see it and how many of those are in another project, and the
+reader is told which project it came from, because a sentence from a codebase
+you are not in is noise until you know whose it is.
+
+`--to` and `--all` together are refused rather than guessed at.
+
+Found the way most things in this changelog were found: an agent updating this
+plugin posted three times to tell every session on the machine that the engine
+underneath them had just changed, read "posted to everyone on this repo" as the
+broadcast it is not, and reached nobody at all. Nothing failed and nothing was
+logged. The scopes now have a test file of their own — there was none, which is
+why that was possible.
+
 ## 2.1.0 — 2026-08-02
 
 Make the way out of a block a line you can actually run.

@@ -1473,9 +1473,20 @@ DELIVERED_KINDS = {"note", "serve", "handoff"}
 
 
 def interesting_to(rec, me):
-    """An event reaches a session when it is addressed to it, or when it happened
-    in the same repository and says something. Work in another project stays out
-    of the way entirely."""
+    """An event reaches a session when it is addressed to it, when it happened in
+    the same repository and says something, or when somebody deliberately said it
+    to the whole machine. Work in another project otherwise stays out of the way
+    entirely, which is what makes the rest of this readable.
+
+    The machine-wide case is narrow on purpose. Presence is already machine-wide
+    — `agentbus status` lists every live session, whatever project it is in —
+    while messages were repository-wide, so an agent could see somebody it had
+    no way to talk to. That gap is only worth crossing for things that are true
+    of the machine rather than of a repository: one simulator that two projects
+    both drive, a database being reseeded, a reboot, or this plugin itself being
+    replaced under everybody. `--all` is how that is said, and the reader is told
+    which project it came from, because a sentence from a codebase you are not in
+    is noise without it."""
     # Not `sid`: a subagent shares its parent's, and a message from one to the
     # other would be filtered out as the reader's own.
     if rec.get("sid") == me.get("sid") and rec.get("agent") == me.get("agent"):
@@ -1484,6 +1495,8 @@ def interesting_to(rec, me):
         return rec["to"] == me.get("agent")
     if rec.get("kind") not in DELIVERED_KINDS:
         return False
+    if rec.get("scope") == "machine":
+        return True
     return rec.get("repo") == me.get("repo_key")
 
 
@@ -1510,6 +1523,13 @@ def deliver(me, advance=True):
     for r in shown:
         who = r.get("agent", "?")
         direct = " → you" if r.get("to") else ""
+        # A machine-wide message is the one kind that can arrive from a codebase
+        # the reader is not in, so it has to say which — "the simulator is mine
+        # for an hour" means nothing until you know who else is on the machine
+        # saying it. Only when it really is another project: the sender's own
+        # repository already knows where it is.
+        if r.get("scope") == "machine" and r.get("repo") != me.get("repo_key"):
+            direct += " (in %s)" % (r.get("from_repo") or "another project")
         text = r.get("text", "")
         if "\n" in text:
             # A handoff is inherently several lines; folding it into the
@@ -5053,7 +5073,7 @@ def cli_post(args):
     pos = positional(args)
     text = " ".join(pos).strip()
     if not text:
-        print('usage: agentbus post [--to <agent>] [--as <you>] "message"',
+        print('usage: agentbus post [--to <agent> | --all] [--as <you>] "message"',
               file=sys.stderr)
         sys.exit(1)
     sender = speak_as(me, opt(args, "--as"))
@@ -5063,8 +5083,32 @@ def cli_post(args):
               file=sys.stderr)
         sys.exit(1)
     to = opt(args, "--to")
-    emit(me["sid"], sender, me["repo_key"], "note", text, to=to)
-    print("posted%s" % (" to %s" % to if to else " to everyone on this repo"))
+    everywhere = flag(args, "--all")
+    if to and everywhere:
+        print("agent-bus: --to names one agent and --all means every session on "
+              "the machine. Pick one.", file=sys.stderr)
+        sys.exit(1)
+    extra = None
+    if everywhere:
+        # Carried on the event because the reader needs it: `repo` is a digest,
+        # and the label is the only part of it a person recognises.
+        extra = {"scope": "machine",
+                 "from_repo": me.get("repo_label") or short_path(me.get("root"))}
+    emit(me["sid"], sender, me["repo_key"], "note", text, to=to, extra=extra)
+    if to:
+        print("posted to %s" % to)
+        return
+    if not everywhere:
+        print("posted to everyone on this repo")
+        return
+    # Say how many, and how many are elsewhere. A machine-wide message is the
+    # loud option and the sender should be able to see whether it was warranted:
+    # `--all` into a machine where everybody is already in your repository is
+    # just `post` with extra reach nobody used.
+    sessions = [s for s in load_sessions() if s.get("sid") != me.get("sid")]
+    away = len([s for s in sessions if s.get("repo_key") != me.get("repo_key")])
+    print("posted to every session on this machine — %d other%s, %d in another "
+          "project" % (len(sessions), "" if len(sessions) == 1 else "s", away))
 
 
 def watch_line(r, width=None):

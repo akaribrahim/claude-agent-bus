@@ -113,7 +113,17 @@ as you are done:
 
     agentbus post "reseeded the database — every fixture id changed"
     agentbus post --to feature-x "handing the API back, I am done"
+    agentbus post --all "the simulator is mine for the next hour"   # every project
     agentbus doing "backend work, short bursts on the server"   # shown in their roster
+
+A plain `post` reaches everybody **in your repository** and nobody outside it —
+another project's chatter never arrives, which is what keeps any of this worth
+reading. `--to <agent>` reaches that one agent wherever they are. `--all`
+reaches every live session on the machine, and is for things that are true of
+the machine rather than of your repository: one simulator two projects both
+drive, a machine-wide database being reseeded, a reboot. Use it when the reader
+in another codebase would be worse off not knowing; they are told which project
+it came from, but they still did not ask for it.
 
 Post *before* you do something that invalidates their assumptions, not after: a
 reseed, a destructive migration, taking a service for a long run, a change to

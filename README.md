@@ -203,7 +203,9 @@ two cannot drift apart.
 agentbus status                       who is live, what is held, what serves whom
 agentbus watch [--repo]               follow every agent on this machine, live
 agentbus board [--port 8787]          the same thing as a page in your browser
-agentbus post [--to <agent>] "..."    leave a message for the others
+agentbus post "..."                   leave a message for the others in this repo
+agentbus post --to <agent> "..."      ...for one agent, wherever they are working
+agentbus post --all "..."             ...for every session on the machine
 agentbus inbox                        everything addressed to this repo / to you
 agentbus run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
 agentbus serve <res>                  restart a service so it serves YOUR worktree
