@@ -67,12 +67,17 @@ that running one lifts the block.
       `tests/test_parity.sh` (265). 932 → 1322. Nine falsifications for the first,
       three for the second; two verified independently of the agents that wrote
       them. It found four live defects, recorded below.
-- [ ] (M1) Close the divergences the harness pins, one commit each, updating the
+- [x] (M1) Close the divergences the harness pins, one commit each, updating the
       harness in the same commit as each fix.
-      Half done 2026-08-02: three of the four pinned defects closed, one commit
-      each, 1322 → 1338. Still open: the two deliberate divergences to confirm
-      (`cli_claim` and `implies`), and the three `DIVERGENCE` precedence
-      questions, which belong with the identity spine.
+      Done 2026-08-02: one commit per decision, 1322 → 1360. Seven behaviour
+      changes; two prose corrections where the code was right and this plan was
+      wrong, which is the outcome M2's acceptance names as likeliest; one
+      confirmation kept as it stood. Every behaviour change was falsified in a
+      copied tree by reverting that change alone, both halves separately for the
+      one that has a write half and a read half. It found one further live
+      defect, recorded below. Every `DIVERGENCE` label in `test_identity.sh` is
+      gone and both precedence orders above now state what the engine does,
+      which is what M2 turns into `resolve_party`.
 - [ ] (M2) One resolver for who-and-where — `resolve_party`, replacing the inference
       functions, with the precedence order written down and tested directly.
 - [ ] (M3) One decision core for commands — `plan_for` plus `commit_plan`, with the
@@ -163,6 +168,33 @@ that running one lifts the block.
   with the caller no longer read as the session, `already yours` is unreachable for a
   party that cannot show the lock is its own, so there is nothing left to upgrade.
 
+- Observation (M1, 2026-08-02): **the note about implied resources advertised a command
+  that took neither of them.** `agentbus claim rig` says it has not taken the bundler and
+  offers `agentbus claim rig,bundler`. `explicit_resources` splits a comma list, so the
+  guard understands that form and lets it through; `resolve_lock` does not, so the verb
+  wrote a lock named literally `rig,bundler`, printed `claimed 'rig,bundler'` and held
+  neither. In an isolated bus:
+
+      $ agentbus claim rig,bundler --why probe
+      claimed 'rig,bundler'
+      $ ls locks/
+      repo_f7a1cd__rig_bundler.json
+      $ agentbus claim rig --why check
+      claimed 'rig'
+
+  The same shape as the instance block closed earlier in M1 — an exit reporting success
+  against a lock nothing was contending for — on a surface nobody had looked at, and
+  found only because the next commit was about to extend that note to
+  `<resource>@<instance>` and would have advertised `agentbus claim
+  simulator@ABC123,bundler`, which `resolve_lock` sanitises into
+  `simulator@ABC123_bundler` and reports as claimed. That is the typo lock the instance
+  form was taught to refuse, reintroduced one commit later through the note. Closed in
+  M1, `aaf5f21`, by printing one `agentbus claim <implied>` per implied resource. Note
+  for M4: teaching `cli_claim` the comma form was rejected only because it would be a
+  second copy of `explicit_resources`'s split inside a verb M4 makes call `plan_for` —
+  when it does, `plan_for(names=…)` should take the comma list and this note can go back
+  to naming one command.
+
 - Observation (M0, 2026-08-02): **three places where this plan's prose and the code
   disagree about precedence**, all pinned as `DIVERGENCE` and all for M1:
   `--as` beats the party hint, though the order above puts the hint first — the code
@@ -176,6 +208,20 @@ that running one lifts the block.
   swallows it; and `party_view` does not copy `pinned` — the subagent branch bypasses
   `caller_view` entirely, so the pin never gets a chance. `resolve_party` must apply
   `git -C` outside the pin check rather than through it.
+  All three settled in M1, one commit each. `122980c` moved the code so that `git -C`
+  beats a pin, through an `override_pin` argument the `stated` branch alone passes;
+  `199a805` and `dc2944b` moved this plan's prose for the other two, because a
+  declaration beats an inference and a subagent's record is about the subagent.
+  One correction to the sentence above, found while doing it: **`party_view` does copy
+  `pinned`.** It builds its view with `dict(me)`, so a pinned session's flag is on every
+  one of its subagents' views, and the subagent branch does reach `caller_view` — through
+  the `git -C` line in `hook_pre_tool`, which runs for both parties. That was the one
+  place any subagent path read the flag, and it is the place `override_pin` now bypasses,
+  so today nothing reads `pinned` on a subagent's path at all. `resolve_party` should
+  keep it that way: the agent's own pin lives on the agent record, where
+  `follow_agent_cwd` reads it off disk, and overlaying it into a view whose shape
+  `cli_name`, `cli_doing` and `follow_chat_title` write back to the session file is how a
+  subagent's declaration would end up pinning its parent.
 
 - Observation (M0, 2026-08-02): **`cli_here` records a pin for a session and not for a
   subagent.** The session branch writes `pinned: True`; the `--as` branch writes the
@@ -184,6 +230,11 @@ that running one lifts the block.
   field, indistinguishable — which is why the question above cannot be answered as the
   code stands. Whatever M1 decides, the flag has to exist at both levels for the
   decision to be expressible.
+  Closed in M1, `a8f58de`. Worse than "not expressible" as it turned out:
+  `follow_agent_cwd`'s docstring claimed the cwd-equals-parent guard existed so a payload
+  could not overwrite what the agent declared, and that guard covers only a cwd equal to
+  the parent's. Every other cwd walked over the declaration — which is the common case,
+  since a subagent told to work in a worktree reports that worktree.
 
 - Observation: the two spines were identified by classifying defects, not by reading
   code, and that is what makes this plan worth doing rather than a rewrite. Twenty-two
@@ -296,6 +347,48 @@ that running one lifts the block.
   already models. What is left is the truth: nobody can prove the lock is yours, so
   taking it is a takeover, and `--steal` already puts `took 'X' from Y (forced)` on the
   bus. Visible beats silent where the tool cannot know.
+  Date/Author: 2026-08-02, Ibrahim + Claude.
+
+- Decision (M1): `git -C <path>` beats a pin, and the code moved to say so.
+  Rationale: a pin is a statement about where a session is working; `git -C <path>` is a
+  statement about one command; the narrower, more specific statement wins, which is what
+  this plan's precedence order always said. The mechanism was not where it looked —
+  `hook_pre_tool` applies `command_worktree`'s answer by *calling* `caller_view`, whose
+  pin short-circuit returned before the path was read, so the function meant to apply
+  `git -C` was the function that discarded it. Fixed with an `override_pin` argument
+  passed only by the `stated` branch, rather than a restructure, because M2 absorbs all
+  of this into `resolve_party` and the shape there is not this one. It reaches subagents
+  as well, which is not incidental: `party_view` copies the session's `pinned` into every
+  subagent's view, so the short-circuit fired on their path too.
+  Date/Author: 2026-08-02, Ibrahim + Claude.
+
+- Decision (M1): `agentbus here --as <name>` writes `pinned` on the agent record, and
+  `follow_agent_cwd` leaves a pinned agent alone — the same check `follow_cwd` has.
+  Rationale: a session's declaration was protected by a flag and a subagent's by a
+  coincidence. `follow_agent_cwd` refuses to move on a cwd equal to the parent's, and its
+  docstring claimed that guard was what stopped a payload overwriting a declaration — but
+  it covers only that one cwd, and every other one walked straight over it, which is the
+  common case. The flag has to exist at both levels for the precedence order to be
+  expressible at all, and the decision above about a subagent's root beating its parent's
+  pin depends on the subagent having a way to declare. The *view* deliberately does not
+  carry it: nothing reads `pinned` on a subagent's path, `follow_agent_cwd` reads the
+  agent's own record off disk, and `party_view`'s output has the shape three functions
+  write back to the session file — one field with two meanings is how a subagent's
+  declaration would end up pinning its parent.
+  Date/Author: 2026-08-02, Ibrahim + Claude.
+
+- Decision (M1): the note about implied resources keeps refusing to expand, and both the
+  line it prints and the name it looks up were fixed instead.
+  Rationale: the reasoning for the divergence holds — a claim is a deliberate act, and
+  expanding it silently would hold more than the caller asked for, which is why `run` and
+  the guard expand and `claim` says so instead. But a warning is worth what its exit is
+  worth. It advertised `agentbus claim <res>,<implied>`, a comma list the guard splits and
+  the CLI does not, so the line wrote a junk lock and reported success; and it was
+  computed from the typed name, so `agentbus claim simulator@ABC123` — the form the block
+  about a device now advertises, and therefore the form an agent types — printed no
+  warning at all. Teaching `cli_claim` the comma form was rejected as a second copy of
+  `explicit_resources`'s split inside a verb M4 makes call `plan_for`; it belongs there,
+  with `plan_for(names=…)`.
   Date/Author: 2026-08-02, Ibrahim + Claude.
 
 - Decision (M1): `--as <name>` beats the party hint — again the code was right and this
@@ -474,8 +567,12 @@ silently normalised:
 - `resolve_lock` cannot resolve an instance key, because it is given a resource name and
   no command, and the `key` regex matches against a command.
 
-M0 pins both as intended behaviour. M1 decides, in a named commit each, whether either
-should change.
+M0 pinned both as intended behaviour and M1 decided each in a named commit. The first
+stands: `cli_claim` still refuses to expand and still says so. What changed is the note,
+which was wrong twice — it advertised a comma list the CLI cannot resolve, and it printed
+nothing at all for `<resource>@<instance>`. The second changed: `resolve_lock` learned
+the `<resource>@<instance>` form, because the block about one device has to advertise a
+line that acts on that device.
 
 ## Plan of Work
 
