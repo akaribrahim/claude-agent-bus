@@ -136,21 +136,69 @@ CASES = [
 ]
 
 
-def prefilter(mod):
-    """The exact string refresh_derived() writes to guard-tokens."""
-    tokens, unfilterable = set(), False
-    for res in CFG["resources"]:
-        if not res.get("patterns"):
-            continue
-        toks = mod.resource_tokens(res)
-        if not toks:
-            unfilterable = True
-            continue
-        for tok in toks:
-            tokens.add(re.escape(tok))
-    if unfilterable:
-        return "."
-    return "|".join(sorted(tokens)) if tokens else ""
+# The second fixture, for the superset invariant below. Between them the four
+# resources exercise every feature that can change what `resources_for`
+# matches: an `unless` that takes a resource away again, an `implies` that adds
+# one nothing in the command named, a `key` that splits one resource into
+# several, and `_explicit` — a resource named outright on an `agentbus` command
+# line, where none of the patterns' own literals appear anywhere in the payload.
+SUPERSET = {
+    "resources": [
+        {"name": "db", "desc": "the shared development database",
+         "patterns": [r"\bpsql\b", r"\balembic\b"],
+         # A `db` describing the local Postgres matches every psql there is,
+         # including one aimed at a staging server in another country.
+         "unless": [r"staging\.example", r"--host\s+\S*staging"]},
+        {"name": "bundler", "desc": "the bundler", "patterns": [r"\bmetro\b"]},
+        {"name": "simulator", "desc": "one of the simulators on this machine",
+         "key": r"--udid\s+(\S+)", "implies": ["bundler"],
+         "patterns": [r"\bmaestro\b", r"\bxcrun\s+simctl\b"]},
+        {"name": "worktree", "desc": "this checkout's tree and index",
+         "scope": "worktree",
+         "patterns": [r"\bgit\s+(add|commit|stash)\b"]},
+    ],
+}
+
+# (command, what the case is about). Every one of these must be matched by
+# `resources_for`, which is asserted here rather than assumed — a case that
+# stopped matching would otherwise satisfy the superset invariant vacuously.
+SUPERSET_CASES = [
+    ("psql -c 'select 1'", "a plain pattern"),
+    ("alembic upgrade head", "the second pattern of a resource, not the first"),
+    ("maestro --udid ABC123 test a.yaml", "a command naming one instance"),
+    ("maestro test a.yaml", "and one naming none"),
+    ("xcrun simctl list devices", "a two-word pattern"),
+    ("git add -A", "a pattern whose literal is outside its alternation"),
+    ("git stash", "and another branch of the same alternation"),
+    # The `_explicit` case, and the one that has no pattern literal in it at
+    # all: `metro` appears nowhere in this line. Only the `agentbus` token
+    # carries it, which is why `guard_token_line` adds one.
+    ("agentbus serve bundler", "a resource named outright on an agentbus line"),
+    ("agentbus run simulator -- ./flows.sh", "and one named on a run line"),
+]
+
+
+def prefilter(mod, cfg=None):
+    """The exact string refresh_derived() writes to guard-tokens.
+
+    Asked of the engine rather than rebuilt here. A test that reconstructs the
+    thing it is checking is the same defect it exists to catch, one level up —
+    and this one demonstrated it: the reconstruction left out the `agentbus`
+    token, so every `_explicit` case below would have failed against a
+    pre-filter that is in fact correct."""
+    return mod.guard_token_line([cfg or CFG])
+
+
+def superset(mod, alt, cmd, label):
+    """Whatever the engine would guard, the pre-filter must see first."""
+    if not re.search(alt, cmd, re.I):
+        return bad("the pre-filter is a superset: %s" % label,
+                   "guard-tokens /%s/ does not match:\n%s" % (alt, cmd))
+    if not bash_matches(alt, cmd):
+        return bad("the pre-filter is a superset: %s" % label,
+                   "python matched but bash did not — the fast path would exit "
+                   "before waking the engine:\n%s" % cmd)
+    ok("the pre-filter is a superset: %s" % label)
 
 
 def bash_matches(alternation, text):
@@ -178,15 +226,37 @@ def main():
     for cmd, expected, label in CASES:
         if not expected:
             continue
-        if not re.search(alt, cmd, re.I):
-            bad("pre-filter sees: %s" % label,
-                "guard-tokens /%s/ does not match:\n%s" % (alt, cmd))
-        elif not bash_matches(alt, cmd):
-            bad("pre-filter sees: %s" % label,
-                "python matched but bash did not — the fast path would exit "
-                "before waking the engine:\n%s" % cmd)
-        else:
-            ok("pre-filter sees: %s" % label)
+        superset(mod, alt, cmd, label)
+
+    # The invariant itself, over a configuration that uses every feature able
+    # to change what `resources_for` answers. The two questions are asked
+    # independently and in that order: what does the engine guard, and would
+    # the fast path ever have let the engine be asked?
+    #
+    # This is the check that fails silently in production. Both fast paths exit
+    # before starting the engine when nothing here matches, so a dropped token
+    # is a guard that never fires — indistinguishable, from the outside, from a
+    # resource nobody is contending for. It broke once already, in 768f183, and
+    # every other assertion in this suite calls the engine directly and would
+    # have gone on passing.
+    alt = prefilter(mod, SUPERSET)
+    for cmd, label in SUPERSET_CASES:
+        hit = {r["name"] for r in mod.resources_for(cmd, SUPERSET)}
+        if not hit:
+            bad("the pre-filter is a superset: %s" % label,
+                "nothing to be a superset OF — `resources_for` matches nothing "
+                "in:\n%s" % cmd)
+            continue
+        superset(mod, alt, cmd, label)
+
+    # And the exclusion, so that the fixture is not simply matching everything:
+    # `unless` takes the resource away again, and this is the shape that does
+    # it. A superset may of course still contain it — `psql` is in the token
+    # line either way — so what is asserted here is only that the engine's own
+    # answer is empty.
+    eq(set(), {r["name"] for r in mod.resources_for(
+        "psql --host db.staging.example -c 'select 1'", SUPERSET)},
+       "a command an `unless` excludes claims nothing")
 
     # The regression itself, stated directly: the literal chosen for a pattern
     # whose distinguishing words live inside an alternation must cover every

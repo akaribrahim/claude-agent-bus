@@ -509,29 +509,8 @@ def refresh_derived(sessions=None):
     # Union over every live session's root, not one arbitrary root per repo: all
     # worktrees share a repo_key, so reading only the first would let a worktree
     # whose branch predates the config file switch the guard off for everyone.
-    tokens, unfilterable = set(), False
-    for s in sessions:
-        cfg = repo_config(s.get("repo_key"), s.get("root"))
-        for res in cfg.get("resources", []):
-            if not res.get("patterns"):
-                continue
-            toks = resource_tokens(res)
-            if not toks:
-                unfilterable = True  # nothing mandatory to filter on
-                continue
-            for tok in toks:
-                tokens.add(re.escape(tok))
-    # Every `agentbus` command wakes the engine when this repository declares
-    # anything. `agentbus serve web` names its resource and nothing else, so
-    # none of the patterns' literals appear in it — and the guard has to see it,
-    # because deciding which subagent is asking can only be done in the hook.
-    if tokens or unfilterable:
-        tokens.add(re.escape("agentbus"))
-    # A resource whose patterns have no mandatory literal cannot be pre-filtered.
-    # Waking the engine on every command costs milliseconds; missing the guard
-    # costs a silently wrong test, so the gate opens for everything instead.
-    write_text(TOKENFILE, ("." if unfilterable
-                           else "|".join(sorted(tokens)) if tokens else "") + "\n")
+    write_text(TOKENFILE, guard_token_line(
+        [repo_config(s.get("repo_key"), s.get("root")) for s in sessions]) + "\n")
     sweep_locks(sessions)
     sweep_autoclaims()
     sweep_hints()
@@ -2644,6 +2623,49 @@ def resource_tokens(res):
     if res.get("port"):
         out.add(str(res["port"]))
     return {t for t in out if len(t) >= 2}
+
+
+def guard_token_line(configs):
+    """The one line both fast paths grep a hook payload against.
+
+    A second, lossy answer to "could this command touch a resource at all", and
+    the real third copy of the gate decision — the first two being the guard and
+    the five command-line verbs, which this plan collapses into `plan_for`. This
+    one cannot be collapsed with them: its whole purpose is to answer without
+    starting the engine that `resources_for` lives in.
+
+    So it is held to an invariant instead. It must remain a strict SUPERSET of
+    what `resources_for` matches: both fast paths exit before the engine runs
+    when nothing here matches, so a token that stops being generated makes the
+    guard never fire — silently, and looking exactly like a resource nobody is
+    contending for. That is what `git add -A` did until 768f183, and no test
+    that calls the engine directly would have noticed.
+
+    A function rather than four lines inside `refresh_derived` so that the
+    assertion pinning the superset can ask for the exact string the fast paths
+    read, rather than reconstructing it — which would be the same defect one
+    level up, in the test that exists to catch it."""
+    tokens, unfilterable = set(), False
+    for cfg in configs:
+        for res in cfg.get("resources", []):
+            if not res.get("patterns"):
+                continue
+            toks = resource_tokens(res)
+            if not toks:
+                unfilterable = True  # nothing mandatory to filter on
+                continue
+            for tok in toks:
+                tokens.add(re.escape(tok))
+    # Every `agentbus` command wakes the engine when this repository declares
+    # anything. `agentbus serve web` names its resource and nothing else, so
+    # none of the patterns' literals appear in it — and the guard has to see it,
+    # because deciding which subagent is asking can only be done in the hook.
+    if tokens or unfilterable:
+        tokens.add(re.escape("agentbus"))
+    # A resource whose patterns have no mandatory literal cannot be pre-filtered.
+    # Waking the engine on every command costs milliseconds; missing the guard
+    # costs a silently wrong test, so the gate opens for everything instead.
+    return "." if unfilterable else "|".join(sorted(tokens)) if tokens else ""
 
 
 def strip_heredocs(cmd):
