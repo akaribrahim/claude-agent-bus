@@ -31,7 +31,14 @@ FAILURES="$TEST_TMP/.failures"
 
 _ok() {
   printf '%s\n' "$1" >> "$PASSES"
-  [ -n "${VERBOSE:-}" ] && printf '    ok   %s\n' "$1"
+  # To stderr, like _bad, and for a harder reason than symmetry: almost every
+  # assertion in this suite is made inside `out=$(ab_hook …)`, so an `ok` line
+  # on stdout lands *inside* the captured hook output and `json_field` then
+  # parses the test harness's own chatter as the hook's JSON. VERBOSE=1 is
+  # documented as the way to inspect assertions; on stdout it was instead the
+  # way to make them lie — `VERBOSE=1 tests/run.sh test_subagents.sh` failed 22
+  # of 118 on a tree where the same file passed 118 of 118 without it.
+  [ -n "${VERBOSE:-}" ] && printf '    ok   %s\n' "$1" >&2
   return 0
 }
 

@@ -61,8 +61,12 @@ that running one lifts the block.
 
 ## Progress
 
-- [ ] (M0) Land the characterisation harness against today's behaviour, divergences
+- [x] (M0) Land the characterisation harness against today's behaviour, divergences
       included, asserting through the guard rather than the record.
+      Done 2026-08-02: `tests/test_identity.sh` (125 assertions) and
+      `tests/test_parity.sh` (265). 932 → 1322. Nine falsifications for the first,
+      three for the second; two verified independently of the agents that wrote
+      them. It found four live defects, recorded below.
 - [ ] (M1) Close the divergences the harness pins, one commit each, updating the
       harness in the same commit as each fix.
 - [ ] (M2) One resolver for who-and-where — `resolve_party`, replacing the inference
@@ -100,6 +104,72 @@ that running one lifts the block.
   Evidence: with a script-borne claim held and two subagents live, feeding the guard the
   exact advertised line returned `permissionDecision: deny`. Fixed the same day; `--as`
   now passes through with `--steal`.
+
+- Observation (M0, 2026-08-02): **`VERBOSE=1` made the assertions lie, in every file.**
+  `_ok` in `tests/lib.sh` printed to stdout while `_bad` printed to stderr, and almost
+  every assertion in this suite is made inside `out=$(ab_hook …)` — so under `VERBOSE=1`
+  the harness's own `ok` lines landed inside the captured hook output and `json_field`
+  parsed them as the hook's JSON. On the unmodified tree, `VERBOSE=1 tests/run.sh
+  test_subagents.sh` failed 22 of 118 where the same file passed 118 of 118 without it;
+  `test_serving.sh` failed 11 of 100. The documented way to inspect assertions was the
+  way to break them, which is a fifth entry in this repository's list of green
+  assertions that measured the wrong thing — and the one that would have made every
+  later milestone's debugging session lie to it. One character; fixed in the M0 commit.
+
+- Observation (M0, 2026-08-02): **the `--as` fix of 2026-08-02 was half a fix, in
+  exactly the way the pin fix was.** The unidentified-party block's *first* piece of
+  advice is `agentbus claim <res> --as <your name>`. The guard no longer refuses that
+  line — that half was fixed. But `do_claim` is then asked for a lock whose holder is an
+  unidentified party of the same session; `same_party` falls through to `siblings < 2`
+  and answers no, for precisely the reason the block exists; and the CLI exits 1. The
+  advice is now reachable and still useless. Naming yourself does not make an anonymous
+  lock yours, and nothing in the message says to add `--steal`. Pinned in
+  `test_parity.sh` as `DEFECT (pinned)`; M1 must decide whether `--as` should be
+  believed here or the advice should change. This is the third instance of this plan's
+  opening defect class and the second time it has been recorded as closed while live.
+
+- Observation (M0, 2026-08-02): **an instance block has no working exit at all.** The
+  block is about `simulator@ABC123`; its advice names the resource the way a person
+  types it, and `resolve_lock`, given a name and no command, cannot get back to the
+  instance. So `agentbus wait simulator` and `agentbus claim simulator --steal` both act
+  on a bare `simulator` lock that nothing was contending for: they take a lock that was
+  free, print `claimed`, exit 0, and the device is still somebody else's — the wait
+  leaving a second, unrelated lock behind it. Only `AGENTBUS_OFF=1` gets the reader
+  past. This is the same shape as the `scope: "worktree"` defect closed on 2026-07-29,
+  and it is why the plan's rule is "the block must lift" rather than "the exit must be
+  allowed" — every one of these exits is allowed by the guard, perfectly.
+
+- Observation (M0, 2026-08-02): **a wait the guard did not see reports a claim it did
+  not make, and leaks a lock doing it.** `agentbus wait <res>` from a shell with no
+  hint carries no `agent_id`, so `same_party` reads it as the session itself; a session
+  never contends with its own subagent, so `do_claim` answers "already yours", prints
+  `claimed`, and exits 0 while the sibling that read the advice stays blocked. Worse,
+  the wait asks for `mode="hard"`, which upgrades the sibling's one-command soft claim
+  in place — and `release_autoclaim` gives back only soft locks, so `PostToolUse` no
+  longer frees it. Any wording but the advertised one reaches this path, as does an
+  `agentbus wait` inside a script.
+
+- Observation (M0, 2026-08-02): **three places where this plan's prose and the code
+  disagree about precedence**, all pinned as `DIVERGENCE` and all for M1:
+  `--as` beats the party hint, though the order above puts the hint first — the code
+  looks right here and the prose wrong, since a declaration should beat an inference.
+  A pinned session ignores `git -C`, though the order puts `git -C` first — the code
+  looks wrong here, since `git -C` is a statement about one command and the pin about a
+  session, and the narrower should win. A subagent's own root beats its parent's pin,
+  which the order does not settle at all.
+  The mechanism is not where it looks: `command_worktree` is called in `hook_pre_tool`
+  and its answer is applied by *calling `caller_view`*, whose pin short-circuit is what
+  swallows it; and `party_view` does not copy `pinned` — the subagent branch bypasses
+  `caller_view` entirely, so the pin never gets a chance. `resolve_party` must apply
+  `git -C` outside the pin check rather than through it.
+
+- Observation (M0, 2026-08-02): **`cli_here` records a pin for a session and not for a
+  subagent.** The session branch writes `pinned: True`; the `--as` branch writes the
+  same five location fields to the agent record and no flag. So for a subagent the
+  root it *declared* and the root that was *inferred* from a payload cwd are the same
+  field, indistinguishable — which is why the question above cannot be answered as the
+  code stands. Whatever M1 decides, the flag has to exist at both levels for the
+  decision to be expressible.
 
 - Observation: the two spines were identified by classifying defects, not by reading
   code, and that is what makes this plan worth doing rather than a rewrite. Twenty-two
