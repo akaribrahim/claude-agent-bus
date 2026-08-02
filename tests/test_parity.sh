@@ -181,6 +181,15 @@ json.dump({"resources": [
      "patterns": [r"\bmetro\b"]},
     {"name": "rig", "desc": "the whole rig", "implies": ["bundler"],
      "patterns": [r"\brigrun\b"]},
+    {"name": "probe", "desc": "the probe harness",
+     "patterns": [r"\bprobetool\b"]},
+    # Two implied resources rather than one: the note about what a claim has
+    # NOT taken advertises a single command, and with one implied resource a
+    # comma list and a bare name are the same string — so only this shape can
+    # show whether the line it prints is one the verb can actually run.
+    {"name": "stack", "desc": "the whole stack",
+     "implies": ["bundler", "probe"],
+     "patterns": [r"\bstackrun\b"]},
     # Per instance AND implying something: the shape that shows whether a note
     # computed from a typed name can see through `<resource>@<instance>`.
     # `simulator` is deliberately not given an `implies` — it carries the
@@ -352,6 +361,26 @@ assert_differ "$CLI_RIG" "$GUARD_RIG" \
 assert_equal "bundler rig" "$(ab sess-a run rig -- "$LOCKDUMP" 2>/dev/null)" \
   "\`run\`, unlike \`claim\`, expands it — the same answer as the guard"
 assert_equal "" "$(lock_keys)" "and gives every one of them back when the command ends"
+
+# With two implied resources the note has to name a list, and until M4 no verb
+# could take one. M1 printed one command per resource joined with `&&` rather
+# than teach `cli_claim` a second copy of the split in `explicit_resources`;
+# `plan_for(names=…)` is where that split belongs, so the line is one command
+# again — and this is the shape that shows it, because with a single implied
+# resource a comma list and a bare name are the same string.
+out=$(ab sess-a claim stack --why "the stack" 2>&1)
+assert_contains "$out" "implies bundler, probe" "a claim is told about both"
+assert_contains "$out" "agentbus claim bundler,probe" "in one command, as a list"
+assert_not_contains "$out" "&&" "rather than two commands chained together"
+out=$(ab sess-a claim bundler,probe --why "both of them" 2>&1)
+assert_contains "$out" "claimed 'bundler'" "the advertised list claims the first"
+assert_contains "$out" "claimed 'probe'" "and the second"
+assert_equal "bundler probe stack" "$(lock_keys)" \
+  "so the line the note prints takes exactly what it names"
+ab sess-a release bundler > /dev/null
+ab sess-a release probe > /dev/null
+ab sess-a release stack > /dev/null
+assert_equal "" "$(lock_keys)" "and every one of them can be given back"
 
 # The note is worth nothing where it is not printed, and it was not printed for
 # the one name an agent is most likely to type. It is computed from what was
@@ -914,6 +943,53 @@ assert_equal "$MINE" "$out" "\`agentbus port api\` prints the same number on its
 
 guard b8-6 sess-b "$WT" "AGENTBUS_OFF=1 $WRONG"
 assert_equal allow "$VERDICT" "and saying you really do mean the other one gets you through"
+
+# ---- 9. a verb refusing, which is the ninth block and was the silent one ----
+#
+# The five command-line verbs decided for themselves until M4, and where they
+# refused they either composed advice of their own or offered none at all —
+# which is check B's property, unasserted, on the surface a person actually
+# types into. A verb's refusal now carries the Plan's exits, and the two rules
+# check B exists for hold here too: every line it prints has to run, and running
+# it has to lift the refusal.
+#
+# It also carries FEWER exits than a block does, deliberately. `AGENTBUS_OFF` is
+# read by the hooks and by nothing in the command-line tool, so
+# `AGENTBUS_OFF=1 agentbus claim db` would be an exit that quietly does nothing
+# — and an exit exists only if it would work.
+
+ab sess-a claim db --why "seeding the database" > /dev/null
+out=$(ab sess-b claim db --why "me too" 2>&1)
+assert_contains "$out" "is held by $A" "a verb refused by a lock names who holds it"
+assert_contains "$out" "seeding the database" "and what they said they were doing"
+assert_contains "$out" 'agentbus wait db --why' "and offers the wait the block offers"
+assert_contains "$out" "agentbus claim db --steal" "and the steal"
+assert_contains "$out" "agentbus status" "and the first of the two that only tell you more"
+assert_contains "$out" "agentbus post --to $A" "and the second, aimed at the holder"
+assert_not_contains "$out" "AGENTBUS_OFF" \
+  "and no bypass, because nothing in the CLI reads that variable"
+assert_equal "db" "$(lock_keys)" "a refused claim takes nothing"
+
+out=$(ab sess-b claim db --steal --why "they said they were done" 2>&1)
+assert_contains "$out" "claimed 'db'" "the steal the refusal advertises takes it"
+out=$(ab sess-a claim db --why "back please" 2>&1)
+assert_contains "$out" "is held by $B" "and the refusal changes hands with the lock"
+ab sess-b release db > /dev/null
+
+# Refused before anything is taken, not after. A hard claim speaks on the bus,
+# so taking what is free and handing it back would leave a take and a release
+# behind it for a claim that never happened — the wall of half-conversations
+# `announce_locks` exists to stop.
+ab sess-a claim bundler --why "packing" > /dev/null
+before=$(lock_lines | wc -l | tr -d ' ')
+out=$(ab sess-b claim probe,bundler --why "both" 2>&1)
+assert_contains "$out" "is held by $A" "a list one of whose names is held is refused"
+assert_not_contains "$out" "claimed 'probe'" "without claiming the one that was free"
+assert_equal "bundler" "$(lock_keys)" "so nothing of the list is left behind"
+assert_equal "$before" "$(lock_lines | wc -l | tr -d ' ')" \
+  "and nothing about it reaches the stream"
+ab sess-a release bundler > /dev/null
+assert_equal "" "$(lock_keys)" "the bus is clear again"
 
 
 # =============================================================================

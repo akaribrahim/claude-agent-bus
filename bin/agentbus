@@ -3962,6 +3962,16 @@ def _exit_when(plan, eid):
     return e["when"] if e else ""
 
 
+def _named(res):
+    """What to call one of a Plan's resources back to whoever typed it.
+
+    The instance when the caller named one — `simulator@ABC123` is both the key
+    it is filed under and the word the block told them to type, so echoing it
+    back is answering in their vocabulary. Otherwise the plain name: nobody
+    types `worktree@3f9c1a` and it is not what anyone calls their checkout."""
+    return res["lock"] if res.get("instance") else res["name"]
+
+
 def _exit_line(plan, eid, indent="  ", width=36, mark=""):
     """One exit as a line of the message: the command, then what it is for."""
     e = _exit_of(plan, eid)
@@ -4456,6 +4466,34 @@ def render_block(plan):
     return "\n".join(lines)
 
 
+def render_refusal(plan, note=""):
+    """A command-line verb saying no, in the CLI's voice, with the Plan's exits.
+
+    Not `render_block`. That is a session's screen-wide banner about a Bash
+    command the guard stopped, and almost none of it is true of `agentbus claim
+    db` typed by a person: there is no tool call to explain, no "do not work
+    around this by editing the command", and no `AGENTBUS_OFF` to put in front
+    of anything. What the two do share is the part that kept being wrong — the
+    runnable lines underneath. Those come out of `plan["exits"]` here as well,
+    so a verb cannot advertise a command the tool would refuse any more than a
+    block can, which before this milestone is exactly what `agentbus serve`
+    did: it composed an `agentbus post --to <holder>` line of its own."""
+    b = plan.get("blocker") or {}
+    if plan.get("reason") != "lock-held":
+        return render_block(plan)
+    lock = b["lock"]
+    lines = ["'%s' is held by %s (%s, %s)%s"
+             % (b["exit_name"], b["who"], lock.get("mode", "soft"),
+                held_for(lock.get("acquired_at")), note or ".")]
+    if lock.get("why"):
+        lines.append('  doing: "%s"' % lock["why"])
+    if b["also"]:
+        lines.append("  Also in use: %s" % ", ".join(b["also"]))
+    lines.append("")
+    lines += [_exit_line(plan, e["id"]) for e in plan.get("exits", [])]
+    return "\n".join(lines)
+
+
 def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
     """Decide one Bash command: plan it, commit it, and say no if it comes to
     that.
@@ -4728,62 +4766,73 @@ def cli_claim(args):
     me = acting(need_me(), args)
     pos = positional(args)
     if not pos:
-        print("usage: agentbus claim <resource> [--why \"...\"] [--steal] [--as <you>]",
-              file=sys.stderr)
+        print("usage: agentbus claim <resource>[,<resource>] [--why \"...\"] "
+              "[--steal] [--as <you>]", file=sys.stderr)
         sys.exit(1)
-    key = resolve_lock(me, pos[0])
-    ok, lock, holder, reason = do_claim(me, key, why=opt(args, "--why", ""),
-                                        mode="hard", steal=flag(args, "--steal"))
-    if ok:
+    steal, why = flag(args, "--steal"), opt(args, "--why", "")
+    plan = plan_for(me, names=pos[0])
+    if plan["reason"] == "no-such-resource":
+        print(render_block(plan), file=sys.stderr)
+        sys.exit(1)
+    if plan["verdict"] == "deny" and not steal:
+        # Refused before anything is taken, from the same optimistic check the
+        # guard makes. Taking what is free and handing it back on the way out
+        # would be correct and still wrong: a hard claim speaks on the bus, so
+        # `claim rig,bundler` that cannot have the bundler would leave "took
+        # 'rig'" and "released 'rig'" behind it for a claim that never happened.
+        print(render_refusal(plan), file=sys.stderr)
+        sys.exit(1)
+    taken = []
+    for res in plan["resources"]:
+        ok, lock, holder, reason = do_claim(me, res["lock"], why=why,
+                                            mode="hard", steal=steal)
+        if not ok:
+            for name in taken:
+                do_release(me, name, quiet=True)
+            if not holder:
+                print("agent-bus: could not claim '%s': %s"
+                      % (_named(res), reason), file=sys.stderr)
+                sys.exit(1)
+            # The check above ran outside the mutex and lost the race to it.
+            # `do_claim`'s answer is the one that counts — the rule
+            # `commit_plan` states for the guard — and the refusal is built by
+            # the same constructor rather than written out a second time here.
+            print(render_refusal(_lock_block(me, "", res, lock, holder,
+                                             plan["resources"])),
+                  file=sys.stderr)
+            sys.exit(1)
+        taken.append(res["lock"])
         # The shell fast path filters an Edit against hot-for, and a file claim
         # is neither a recent write nor a declared glob — so without this the
         # block it exists to produce does not start until somebody's next turn.
         # Same argument as `own`: a claim the others learn about later is not a
         # claim. See rebuild_hot.
-        if key.startswith("file:"):
+        if res["lock"].startswith("file:"):
             refresh_derived()
-        print("claimed '%s'" % pos[0])
-        # The note is computed from what was typed, and what gets typed for a
-        # `key`-bearing resource is `<resource>@<instance>` — that is the name
-        # the block about one device advertises, so it is the name an agent
-        # reaches for. As a bare string it matches no resource, so the claim
-        # that most needs the warning was the one that lost it: you hold the
-        # device and not the bundler it is only meaningful against. Looked up
-        # in `resolve_lock`'s order, whole name first, so a resource genuinely
-        # called `a@b` is still itself.
-        named = pos[0]
-        if not find_resource(me, named):
-            base, at, _ = named.rpartition("@")
-            if at and not named.startswith("file:") and find_resource(me, base):
-                named = base
-        _, implied = expand_implied([named], me)
-        if implied:
-            # Not expanded silently: a claim is deliberate. But holding the
-            # simulator while somebody else re-serves the bundler under you is
-            # the trap this exists to prevent, so it is said out loud.
-            #
-            # And the line it prints has to be a line that works. It used to be
-            # `agentbus claim <res>,<implied>` — a comma form `explicit_resources`
-            # splits and `resolve_lock` does not, so the guard understood it and
-            # this verb wrote a lock named literally `rig,bundler`, printed
-            # `claimed 'rig,bundler'` and held neither of them. An exit reporting
-            # success against a lock nothing was contending for, which is the
-            # same defect as the block that advertised a bare `simulator` for a
-            # device held under `simulator@ABC123`.
-            #
-            # Teaching this verb the comma form was the other candidate and was
-            # not taken: it would be a second implementation of the split in
-            # `explicit_resources`, added to one of the five verbs M4 exists to
-            # stop deciding for themselves, and deleted again there.
-            print("note: '%s' implies %s, which you have NOT taken. "
-                  "`%s` if the run needs them held too."
-                  % (pos[0], ", ".join(implied),
-                     " && ".join("agentbus claim %s" % d for d in implied)))
-        return
-    print("'%s' is held by %s (%s, %s). %s" % (
-        pos[0], holder.get("agent"), lock.get("mode"),
-        held_for(lock.get("acquired_at")), reason), file=sys.stderr)
-    sys.exit(1)
+        print("claimed '%s'" % _named(res))
+    # Asked of the resources the Plan resolved, not of the string that was
+    # typed. `<resource>@<instance>` is what the block about one device
+    # advertises and therefore what an agent reaches for, and as a bare string
+    # it matches no declared resource — so the claim that most needs this
+    # warning was the one that lost it: you hold the device and not the bundler
+    # it is only meaningful against.
+    _, implied = expand_implied([r["name"] for r in plan["resources"]], me)
+    if implied:
+        # Not expanded silently: a claim is deliberate, and expanding it would
+        # hold more than the caller asked for. But holding the simulator while
+        # somebody else re-serves the bundler under you is the trap this exists
+        # to prevent, so it is said out loud instead.
+        #
+        # One command, which is what it advertised before M1 and could not
+        # honour: `explicit_resources` splits a comma list and no verb did, so
+        # the guard understood `agentbus claim rig,bundler` while this one wrote
+        # a single lock named after the list and held neither of them. M1 broke
+        # the line into one command per resource rather than teach this verb a
+        # second copy of that split; `plan_for(names=…)` is where it belongs and
+        # the line is one command again.
+        print("note: '%s' implies %s, which you have NOT taken. "
+              "`agentbus claim %s` if the run needs them held too."
+              % (pos[0], ", ".join(implied), ",".join(implied)))
 
 
 def cli_release(args):
