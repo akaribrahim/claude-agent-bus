@@ -5586,42 +5586,6 @@ def find_resource(me, name):
     return next((r for r in cfg.get("resources", []) if r["name"] == name), None)
 
 
-def resolve_lock(me, name):
-    """The key a resource is really locked under, from the name a person typed.
-
-    A `scope: "worktree"` resource is one lock per checkout, so the guard takes
-    it as `worktree@<digest of the root>`. Every CLI verb used the bare name
-    instead, and the two therefore never met: `agentbus claim worktree` wrote a
-    lock nothing consulted, a `git add` in the same checkout sailed past it, and
-    `agentbus wait worktree` returned "claimed" instantly while the block it was
-    queueing for stayed exactly where it was. The deny message's own last-resort
-    advice — `agentbus claim <res> --steal` — was a no-op for these.
-
-    A resource with a `key` is one lock per instance, and the instance is read
-    off the command with a regex — which there is none of here. So the caller
-    says which: `<resource>@<instance>`, the same name the lock is filed under
-    and the name the block about it now advertises. It resolved before this was
-    written, by falling through the pass-through below, which also meant
-    `agentbus claim simulatr@ABC` cheerfully wrote a lock under the typo,
-    reported success and left the device somebody else's — the defect the
-    instance form exists to close, one keystroke away. So an `@` name whose base
-    is not declared is refused instead.
-
-    A name that is not a declared resource is otherwise passed through
-    untouched, because `agentbus claim 'file:/abs/path.py'` is how somebody
-    takes a single file and that key is deliberately literal — `@` and all, since
-    a path may contain one.
-
-    All of that now lives in `_named_resources`, and this is a shim over
-    `plan_for` while the verbs move across it one at a time. It goes when the
-    last of them has."""
-    plan = plan_for(me, names=name)
-    if plan["reason"] == "no-such-resource":
-        print(render_block(plan), file=sys.stderr)
-        sys.exit(1)
-    return plan["resources"][0]["lock"] if plan["resources"] else name
-
-
 def cli_serve(args):
     """Point a declared service at this worktree, restarting it if it is serving
     another one. This is the half `sim-lock.sh` had and a lock alone cannot do."""
