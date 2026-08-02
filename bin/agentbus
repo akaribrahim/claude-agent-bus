@@ -2997,6 +2997,17 @@ def roster_text(me, sessions):
 
 
 def locks_text(me, sessions, with_serving=True):
+    """Every declared resource and who has it, for `status` and the banner.
+
+    The one place that cannot ask `plan_for`: there is no command and no name,
+    only the whole config, so there is nothing for a Plan to be about. It calls
+    `lock_name` directly and it is the only caller left that does apart from
+    `plan_for` itself.
+
+    Which is why the instance defect outlived M1 here. With no command,
+    `lock_name` answers with the bare resource — so a machine where somebody
+    held `simulator@ABC123` reported `simulator` as free, on the screen an
+    agent reads before deciding whether it needs to wait for anything."""
     cfg = repo_config(me.get("repo_key", ""), me.get("root"))
     resources = cfg.get("resources", [])
     if not resources:
@@ -3004,14 +3015,25 @@ def locks_text(me, sessions, with_serving=True):
     mine = os.path.realpath(me.get("root") or "")
     held, free, serves = [], [], []
     for res in resources:
-        lock = load_lock(me.get("repo_key"), lock_name(me, res))
-        holder, stealable, _ = lock_state(lock, sessions)
-        if lock and holder and not stealable:
+        shown = []
+        for lock in contending_locks(me, res, lock_name(me, res)):
+            holder, stealable, _ = lock_state(lock, sessions)
+            if not holder or stealable:
+                continue
+            # The instance when there is one, because that is what a person
+            # types and what a block about one device advertises. Not the
+            # `scope: "worktree"` digest, which nobody typed and which is not
+            # what anyone calls their checkout — the same rule the exits use.
+            name = lock.get("resource") or res["name"]
+            if not (res.get("key") and name.startswith(res["name"] + "@")):
+                name = res["name"]
             yours = " (yours)" if lock.get("sid") == me.get("sid") else ""
-            held.append("  - %s → %s%s, %s%s" % (
-                res["name"], lock.get("agent"), yours,
+            shown.append("  - %s → %s%s, %s%s" % (
+                name, lock.get("agent"), yours,
                 held_for(lock.get("acquired_at")),
                 (', "%s"' % lock["why"]) if lock.get("why") else ""))
+        if shown:
+            held.extend(shown)
         else:
             free.append(res["name"])
         if with_serving and (res.get("port") or res.get("start")):

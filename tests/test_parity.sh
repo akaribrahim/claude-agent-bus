@@ -484,6 +484,40 @@ assert_contains "$(plan_names rig,rig)" "locks rig" "and a name repeated is one 
 assert_contains "$(plan_names rig)" "locks rig" \
   "a Plan built from a name does not expand what that name implies"
 
+# ---- the one display path, which had the same blind spot --------------------
+#
+# `locks_text` is what `status` and the session-start banner print, and it is
+# the one caller that cannot ask `plan_for` anything: no command, no name, just
+# the whole config. So it asked `lock_name` with no command, got the bare
+# resource back, found nothing under it and reported a device somebody was
+# actually holding as free — on the screen an agent reads before deciding
+# whether it needs to wait for anything at all.
+
+ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" "cmd=$MAESTRO" id=a-st)" > /dev/null
+assert_equal "simulator@ABC123" "$(lock_keys)" "one session is holding one device"
+out=$(ab sess-b status)
+assert_contains "$out" "simulator@ABC123 → $A" \
+  "\`status\` sees a resource held under an instance"
+assert_not_contains "$(printf '%s\n' "$out" | grep '^Free:')" "simulator" \
+  "and stops calling it free while somebody has it"
+ab_hook post-bash "$(payload post-bash sid=sess-a "cwd=$REPO" id=a-st)" > /dev/null
+assert_contains "$(printf '%s\n' "$(ab sess-b status)" | grep '^Free:')" "simulator" \
+  "and calls it free again when the device goes back"
+
+# The other half of the display rule, which must not have moved with it: a
+# per-checkout lock is shown by the name a person types, not by the digest it
+# is filed under. Asked of the checkout that holds it, since that is the only
+# one for which it is held at all.
+ab sess-a claim worktree --why "long rebase" > /dev/null
+out=$(ab sess-a status)
+assert_contains "$out" "  - worktree → $A (yours)" \
+  "a per-checkout lock is shown by its plain name"
+assert_not_contains "$out" "worktree@" "and never by the digest it is filed under"
+assert_contains "$(ab sess-b status)" "Free: " \
+  "while the other checkout, for which it is not held, still says so"
+ab sess-a release worktree > /dev/null
+assert_equal "" "$(lock_keys)" "nothing is held going out of the display checks"
+
 
 # =============================================================================
 # Check B — every advertised exit lifts the block
