@@ -660,8 +660,13 @@ def recent_writes(sid, cutoff, compact=False):
     return out
 
 
-def follow_cwd(rec, cwd, trusted=True):
+def _follow_cwd(rec, cwd, trusted=True):
     """Keep a session's recorded worktree in step with where it is working.
+
+    Private to `resolve_party`, which is the only place the order these clauses
+    sit in is written down. This one is clause (c) and (d) of *where they are
+    working* for a session's own call: a pin holds, and otherwise the cwd wins
+    and moves the record.
 
     Claude Code can move a session into a worktree it creates under
     `.claude/worktrees/`, and the record's root is derived once, at SessionStart.
@@ -710,8 +715,13 @@ def follow_cwd(rec, cwd, trusted=True):
     return rec
 
 
-def caller_view(me, cwd, override_pin=False):
+def _caller_view(me, cwd, override_pin=False):
     """`me`, but rooted where this particular call is actually running.
+
+    Private to `resolve_party`. It carries two clauses of *where they are
+    working*: (d) for the command-line tool, whose shell cwd is followed within
+    the same repository, and (a) for `git -C <path>`, which is the one caller
+    that passes `override_pin`.
 
     A session has one worktree; a session running parallel subagents in two
     worktrees does not, and the guards need an answer per call rather than per
@@ -723,22 +733,22 @@ def caller_view(me, cwd, override_pin=False):
     worse: two subagents dragged the session's root back and forth between them
     on every tool call, so the record was not even consistently wrong.
 
-    A pinned session is left alone, for the same reason `follow_cwd` leaves it
+    A pinned session is left alone, for the same reason `_follow_cwd` leaves it
     alone: `agentbus here` is a statement about where the work is, and the cwd
     on the payload is what Claude Code reset the shell to. Honouring the pin in
     the record but not here made the declaration cosmetic — the roster showed
     the declared tree while the guard went on locking, and comparing services
     against, the tree the payload named.
 
-    `override_pin` is the single exception, and only one caller passes it: the
-    guard, when the command names a checkout outright. A pin is a statement
-    about where a session is working; `git -C <path>` is a statement about one
-    command, and the narrower, more specific statement wins. The parameter has
-    to exist because the guard applies `command_worktree`'s answer by *calling
-    this function* — so the pin check above swallowed `git -C` on its way
-    through the very function that was meant to apply it, and a pinned session
-    was judged in its pinned tree while running a command about another one. A
-    pin still governs every command that names no path."""
+    `override_pin` is the single exception, and `resolve_party` passes it from
+    exactly one block: `git -C <path>`, where the command names a checkout
+    outright. A pin is a statement about where a session is working; `git -C
+    <path>` is a statement about one command, and the narrower, more specific
+    statement wins. The parameter has to exist because the answer is applied by
+    *calling this function* — so the pin check above swallowed `git -C` on its
+    way through the very function that was meant to apply it, and a pinned
+    session was judged in its pinned tree while running a command about another
+    one. A pin still governs every command that names no path."""
     if not cwd or cwd == me.get("cwd"):
         return me
     if me.get("pinned") and not override_pin:
@@ -750,57 +760,241 @@ def caller_view(me, cwd, override_pin=False):
     return view
 
 
-def current_session(payload=None):
-    """Which session am I? Hooks are told on stdin; the CLI reads the environment
-    Claude Code exports into every Bash call."""
-    sid = None
-    if payload:
-        sid = payload.get("session_id")
-    sid = sid or os.environ.get("AGENTBUS_SESSION") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+_PARTY_HINT = []
+
+
+def _party_hint(record):
+    """The hint the guard left for this exact command line, taken once.
+
+    `take_party_hint` consumes the entry and unlinks the file, deliberately: a
+    hint answers for one command, and one left lying about would attribute the
+    next command to the same subagent. That was safe while a single function
+    asked for it. `resolve_party` is what every verb goes through now, and a
+    verb that resolved twice would be told "party unknown" the second time —
+    which writes a lock nothing can attribute, and an unidentified lock blocks
+    the caller's own siblings once there are two of them. That is the failure
+    `same_party` exists to catch, and M1 made it stricter still by giving an
+    unidentified CALLER the same treatment. Memoised for the life of the
+    process, which for the command-line tool is one command."""
+    if not _PARTY_HINT:
+        _PARTY_HINT.append(take_party_hint(record) or {})
+    return _PARTY_HINT[0]
+
+
+def resolve_party(payload=None, cmd=""):
+    """Who is acting and where they are working.
+
+    Returns (record, view). `record` is the session's own dict, safe to write
+    back; `view` is that dict rooted where this particular call is running, and
+    must never be persisted. Callers that write use the record; callers that
+    decide use the view. `payload` is a hook payload or None for the
+    command-line tool; `cmd` is the Bash command being guarded, for `git -C`.
+
+    Thirteen functions used to answer these two questions between them, each
+    added to close one defect and none of them removing another. Six of the
+    twenty-two defects this plugin has produced came from that, and the most
+    recent was half a fix: `agentbus here` pinned the record `status` prints
+    while the guard went on locking, and comparing services against, the tree
+    the payload named. So both orders are applied here, once, in order, each
+    clause a named block below. `tests/test_identity.sh` pins them rule by rule
+    through decisions the guard actually made rather than through the record —
+    which is exactly how that shipped pin assertion passed while the guard was
+    wrong.
+
+      WHO IS ACTING
+        (a) the `agent_id` on the payload
+        (b) an explicit `--as <name>` — applied by the verb, not here
+        (c) the party hint the guard left for this exact command line, if the
+            caller is the command-line tool and a hint exists
+        (d) otherwise the session
+
+      WHERE THEY ARE WORKING
+        (a) a path the command itself names (`git -C <path>`), for that command
+            only, without moving any record, and above every declaration below
+        (b) the acting subagent's own recorded root — the tree it declared with
+            `agentbus here --as <name>`, or else the tree inferred for it
+        (c) the root pinned by `agentbus here`, until `here` is run elsewhere
+        (d) the payload's cwd, which for an unpinned session is authoritative
+            and moves the record; for the command-line tool, the shell's cwd,
+            followed only within the same repository and not written back
+        (e) the record as it stands
+
+    There is no `as_name` parameter, though the plan drafted one. `--as` is
+    clause (b) of the first order and it is deliberately applied by the verb:
+    it means different things to different verbs — `agentbus post --as X` signs
+    a message without adopting X's cursor or lock ownership, `agentbus claim
+    --as X` adopts the identity outright — and `acting` exits 1 on a name that
+    is not one of this session's own subagents, which in a universal resolver
+    would make `agentbus status --as <stale>` exit non-zero. It could not be
+    passed in even if that were wanted: validating the name needs
+    `load_agents(me["sid"])`, so a caller has to have resolved already before it
+    has anything to hand over."""
+    # ---- which session -------------------------------------------------------
+    #
+    # Hooks are told on stdin; the command-line tool reads the environment
+    # Claude Code exports into every Bash call. A session with no record is not
+    # invented here. The two hooks that may not take no for an answer call
+    # `register` and ask again; nothing else creates one, because a
+    # PostToolBatch that registered would resurrect a session just reaped.
+    sid = (payload.get("session_id") if payload else None) \
+        or os.environ.get("AGENTBUS_SESSION") \
+        or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid:
         return None, None
-    rec = read_json(os.path.join(SESSIONS, "%s.json" % sid))
-    if rec:
-        rec["sid"] = sid
-        # A hook is told who is acting; the CLI has to be told or guess. Which
-        # of the two this is decides whether a lock taken here can name its
-        # party or has to admit it cannot — see `same_party`.
-        rec["party_known"] = bool(payload)
-        if payload:
-            # A subagent's tool call carries its own cwd and an `agent_id`. That
-            # cwd is the subagent's, not the session's, so it must not move the
-            # session: two subagents working in two worktrees would drag the
-            # root back and forth between them on every tool call, which is
-            # worse than a stale root because it is not even consistently wrong.
-            # The guards still decide from the caller's own tree — see
-            # caller_view in hook_pre_tool.
-            if not payload.get("agent_id"):
-                rec = follow_cwd(rec, payload.get("cwd"))
-        else:
-            # The CLI runs from wherever the caller is standing — a moved
-            # session, or a subagent in its own worktree. That is the right
-            # answer for `serve` and `run`, and it must not be written back:
-            # the caller may be one of several subagents in several worktrees.
-            here = caller_view(rec, os.getcwd())
-            if here.get("repo_key") == rec.get("repo_key"):
-                rec = here
-            # The guard saw this same command a moment ago and knew which
-            # subagent was running it. That is the only place the answer exists.
-            hint = take_party_hint(rec)
+    record = read_json(os.path.join(SESSIONS, "%s.json" % sid))
+    if not record:
+        return None, None
+    record["sid"] = sid
+    # A hook is told who is acting; the CLI has to be told or guess. Which of
+    # the two this is decides whether a lock taken here can name its party or
+    # has to admit it cannot — see `same_party`.
+    record["party_known"] = bool(payload)
+
+    # ---- where (c) and (d), for the session itself ---------------------------
+    #
+    # The part of "where" that belongs to the session rather than to this call,
+    # and therefore the part that persists. `_follow_cwd` leaves a pinned
+    # session alone — clause (c) — and otherwise takes the payload's cwd as
+    # authoritative and writes it back — clause (d). Claude Code can move a
+    # session into a worktree it creates under `.claude/worktrees/`, and a root
+    # derived once at SessionStart then stays wrong for the rest of the session
+    # while `serve` starts services from it and `serving_check` compares against
+    # it. That is the silent wrong-checkout failure this plugin exists to
+    # prevent, produced by the plugin itself, on 2026-07-27.
+    if payload is not None:
+        if not payload.get("agent_id"):
+            record = _follow_cwd(record, payload.get("cwd"))
+        # A subagent's payload deliberately does not reach that. Its cwd is its
+        # own, not the session's, and two subagents in two worktrees would drag
+        # the session's single root back and forth between them on every tool
+        # call — worse than a stale root, because it is not even consistently
+        # wrong. Where the subagent itself is, is clause (b) below.
+    else:
+        # The same two clauses for the command-line tool, whose cwd is only
+        # wherever somebody happened to run the command from — a human in
+        # another terminal could be anywhere — so a move is followed only within
+        # the same repository, which still covers every worktree of one project.
+        # Not written back from here: the caller may be one of several subagents
+        # in several worktrees. `agentbus name` and `agentbus doing` do persist
+        # it, which is why they are handed the record and not the view.
+        here = _caller_view(record, os.getcwd())
+        if here.get("repo_key") == record.get("repo_key"):
+            record = here
+
+    # ---- who (a): the `agent_id` on the payload ------------------------------
+    #
+    # First because it is the only answer that cannot be guessed or faked:
+    # Claude Code puts it on every hook a subagent causes and on none the
+    # session itself causes. A hook is TOLD who is acting, so nothing below may
+    # overrule it — a hint left under the same command line least of all.
+    aid = payload.get("agent_id") if payload else None
+    if aid:
+        # Where (b) arrives with it. `_party_view` roots the subagent in its own
+        # record: the tree it declared with `agentbus here --as <name>`, which
+        # is pinned and which no inference moves, or else the tree inferred for
+        # it. That record outranks the session's pin (c) — a pin is a statement
+        # about the session, and one session with two parties in two checkouts
+        # is exactly what a single per-session root cannot express. On
+        # 2026-07-29 an agent that had pointed a service at its own worktree was
+        # refused permission to use it and turned the plugin off for the rest of
+        # its turn, which is the one outcome this plugin cannot afford.
+        view = _party_view(record, payload)
+    else:
+        view = dict(record)
+        # ---- who (b): an explicit `--as <name>` ------------------------------
+        #
+        # Applied by the verb, through `acting`, on top of what is returned
+        # here — and therefore above the hint below, which is the order M1
+        # settled: a hint is an inference the guard made from a command line and
+        # `--as` is a declaration by the caller, checked against that session's
+        # own subagents. It is also the only thing that makes the block advice
+        # work, since the unidentified-party block tells a blocked agent to name
+        # itself. See this function's docstring for why it is not applied here.
+        if payload is None:
+            # ---- who (c): the party hint -------------------------------------
+            #
+            # A subagent's Bash environment is byte-identical to its parent's,
+            # so by the time `agentbus` is executing nothing in it knows which
+            # subagent is calling. The guard saw the same command a few
+            # milliseconds earlier and did know; the hint under a digest of the
+            # argv is the only place that answer exists. Hooks never look: they
+            # were told.
+            hint = _party_hint(record)
             if hint:
-                rec = dict(rec)
-                rec["agent_id"] = hint.get("agent_id")
-                rec["agent"] = hint.get("agent") or rec.get("agent")
-                rec["party_known"] = True
+                view["agent_id"] = hint.get("agent_id")
+                view["agent"] = hint.get("agent") or view.get("agent")
+                view["party_known"] = True
                 if hint.get("agent_id"):
                     # A shell is the one place a subagent's real directory can
                     # be seen. One that only ever `cd`s inside its commands has
-                    # a record still saying it is where it was launched, and
-                    # every hook payload agrees with that record — so this is
-                    # the only chance anything has to correct it.
-                    follow_agent_cwd(read_json(agent_path(sid, hint["agent_id"])),
-                                     os.getcwd(), trusted=False)
-    return sid, rec
+                    # a record still saying where it was launched, and every
+                    # hook payload agrees with that record — so this is the only
+                    # chance anything has to correct it. Only the record is
+                    # corrected: the identity is adopted here and the root is
+                    # not, because the caller's own shell is measured now and
+                    # the agent's record was written when it started.
+                    _follow_agent_cwd(read_json(agent_path(sid, hint["agent_id"])),
+                                      os.getcwd(), trusted=False)
+        # ---- who (d): otherwise the session ----------------------------------
+        #
+        # Which is what `view` already is.
+
+    # ---- where (a): a path the command itself names --------------------------
+    #
+    # Applied last so that it is applied on top of every answer above, which is
+    # what puts it first in the order. `git -C <path>` and `git
+    # --git-dir=<path>` name a checkout outright, and a chat that works on
+    # another worktree that way never changes directory — so everything that
+    # infers a tree from a cwd places it in the repository it was launched in,
+    # permanently. Reported from Windows on 2026-07-31, where four chats
+    # rendered on one branch in one worktree and one of them was somewhere else
+    # entirely.
+    #
+    # `override_pin` is what makes it beat a pin, and it reaches a subagent as
+    # well because a subagent's view carries its parent's `pinned`. Until M1 the
+    # guard applied this answer by calling `_caller_view`, whose pin check
+    # returned before the path was looked at, so the function meant to apply
+    # `git -C` was the function that discarded it. It moves this one command and
+    # no record: the next command that names no path is judged by the pin again.
+    stated = _command_worktree(cmd) if cmd else ""
+    if stated:
+        view = _caller_view(view, stated, override_pin=True)
+
+    # ---- where (e): otherwise the record as it stands ------------------------
+    #
+    # No code, by construction: every clause above has a `not cwd` guard, so a
+    # payload with nothing to infer from leaves the last established answer
+    # alone. Without those guards the guard would ask git about the empty string
+    # and place the session wherever the hook process happened to start.
+
+    # What tells the two apart at the four places that write `me` straight back
+    # to the session file — see `require_record`.
+    view["_view"] = True
+    return record, view
+
+
+def require_record(rec, who):
+    """`rec`, if it is a session's own record rather than one party's view of it.
+
+    Four places write what they are handed straight to the session file:
+    `rename_session`, `follow_chat_title` — which `hook_prompt_submit` hands its
+    own argument to — `cli_name` and `cli_doing`. A view is `me` as one *party*
+    sees it: a subagent's identity, a subagent's root, or a tree named by a
+    single `git -C`. Persisting one was the first thing tried and it was worse
+    than a stale record — two subagents dragged the session's root back and
+    forth between them on every tool call — and a subagent's `agentbus here --as
+    <name>` would end up pinning its parent, one field carrying two meanings.
+
+    `resolve_party` returns the two distinguishably so that this can be checked
+    rather than remembered. An exception on stderr is louder than a silent
+    persist, and `__main__`'s catch-all keeps it from being the reason a session
+    breaks."""
+    if rec.get("_view"):
+        sys.stderr.write("agent-bus: %s was given a party view where the "
+                         "session's own record is required — not persisting "
+                         "it\n" % who)
+        raise RuntimeError("%s: a party view must never be persisted" % who)
+    return rec
 
 
 # -------------------------------------------------------------- subagents ----
@@ -1117,8 +1311,12 @@ def name_hint_once(me):
             "  agentbus post --as %s \"...\"" % (rec["name"], rec["name"]))
 
 
-def follow_agent_cwd(rec, cwd, trusted=True):
+def _follow_agent_cwd(rec, cwd, trusted=True):
     """Keep a subagent's recorded worktree in step with where it is working.
+
+    Private to `resolve_party`, and the inferring half of clause (b) of *where
+    they are working*. The declaring half is `agentbus here --as <name>`, which
+    writes the `pinned` flag this function refuses to move.
 
     Its record is written at SubagentStart from whatever directory it was
     launched in, which for a subagent is its parent's rather than the tree it
@@ -1142,7 +1340,7 @@ def follow_agent_cwd(rec, cwd, trusted=True):
     only by the coincidence that its payload happened to name its parent's tree
     — any *other* cwd overwrote what it had declared, on the next tool call. The
     flag exists at both levels now, and a pinned agent is left alone here for
-    the reason `follow_cwd` leaves a pinned session alone."""
+    the reason `_follow_cwd` leaves a pinned session alone."""
     if not rec or not cwd or cwd == rec.get("cwd"):
         return rec
     if rec.get("pinned"):
@@ -1168,11 +1366,20 @@ def follow_agent_cwd(rec, cwd, trusted=True):
     return rec
 
 
-def party_view(me, payload):
+def _party_view(me, payload):
     """`me`, seen as whichever party is actually acting.
 
     A subagent gets its own name and its own worktree; everything else — the
-    repo, the session id — it shares with its parent."""
+    repo, the session id — it shares with its parent.
+
+    Private to `resolve_party`, where it carries clause (a) of *who is acting*
+    and clause (b) of *where they are working* together, because for a subagent
+    they are one lookup. Note what it does NOT copy back out: the view is built
+    with `dict(me)`, so the parent's `pinned` rides along, and that flag must
+    never be read as the subagent's own declaration — the agent's own pin lives
+    on the agent record, where `_follow_agent_cwd` reads it off disk. One field
+    with two meanings is how a subagent's `agentbus here --as` would end up
+    pinning its parent."""
     aid = payload.get("agent_id") if payload else None
     if not aid:
         return me
@@ -1181,7 +1388,7 @@ def party_view(me, payload):
     view["agent_type"] = payload.get("agent_type") or "agent"
     rec = read_json(agent_path(me.get("sid"), aid))
     if rec:
-        rec = follow_agent_cwd(rec, payload.get("cwd"))
+        rec = _follow_agent_cwd(rec, payload.get("cwd"))
     else:
         # SubagentStart was missed — the plugin was installed or reloaded while
         # this subagent was already running. Record it now rather than leaving
@@ -2611,8 +2818,12 @@ def command_opts_out(cmd):
     return False
 
 
-def command_worktree(cmd):
+def _command_worktree(cmd):
     """The tree a command says it is operating on, when it says so.
+
+    Private to `resolve_party`, which applies the answer as clause (a) of
+    *where they are working* — last, so that it lands on top of every other
+    clause, which is what puts it first in the order.
 
     `git -C <path>` and `git --git-dir=<path>` name a checkout outright, and a
     chat that works on another worktree that way never changes directory — so
@@ -3013,6 +3224,7 @@ def rename_session(rec, new_name, sessions=None, why="renamed"):
     A subagent is called `<parent>/1`, so a parent that renames and leaves them
     behind produces a roster where nothing looks related to anything — and the
     names are addresses, so the stale ones stop working."""
+    require_record(rec, "rename_session")
     old = rec.get("agent")
     if not new_name or new_name == old:
         return False
@@ -3042,6 +3254,7 @@ def follow_chat_title(rec, payload):
     Only a title the human set is adopted. The plugin writes one itself when a
     chat has none, and adopting that would mean renaming a session after its own
     name — so what we wrote is remembered and skipped."""
+    require_record(rec, "follow_chat_title")
     title = transcript_title(payload.get("transcript_path"))
     if not title or title == rec.get("title_set"):
         return False
@@ -3113,12 +3326,18 @@ def hook_session_start(payload):
 def hook_prompt_submit(payload):
     if os.environ.get("AGENTBUS_OFF"):
         return
-    sid, me = current_session(payload)
+    # The record, not the view: `follow_chat_title` writes what it is given
+    # straight to the session file. A prompt is submitted by the session and by
+    # nothing else, so the two are the same thing here — but that is a fact
+    # about UserPromptSubmit, not a property of the call, and the write site
+    # checks rather than trusts it.
+    me, _ = resolve_party(payload)
     if not me:
-        me, _ = register(payload)
+        register(payload)       # missing SessionStart is not an exemption
+        me, _ = resolve_party(payload)
         if not me:
             return
-        sid = me["sid"]
+    sid = me["sid"]
     touch_beat(sid)
     # Every turn, because a chat is renamed after it has already registered —
     # which is when its human has seen enough of it to know what to call it.
@@ -3188,11 +3407,10 @@ def hook_post_batch(payload):
     # there is nothing, which is the usual case and is cheap.
     if os.environ.get("AGENTBUS_OFF"):
         return
-    sid, me = current_session(payload)
-    if not me:
+    record, me = resolve_party(payload)
+    if not record:
         return
-    touch_beat(sid)
-    me = party_view(me, payload)
+    touch_beat(record["sid"])
     release_batch_claims(me, payload)
     blocks = []
     hint = name_hint_once(me)
@@ -3241,38 +3459,20 @@ def hook_pre_tool(payload):
         return
     if read_int(LIVEFILE, 0) < 2:
         return  # alone: nothing to collide with, and Windows calls us directly
-    sid, me = current_session(payload)
-    if not me:
-        me, _ = register(payload)  # missing SessionStart is not an exemption
-        if not me:
-            return
     tool = payload.get("tool_name")
     ti = payload.get("tool_input") or {}
-    # A subagent is rooted by its own record, which `party_view` keeps in step
-    # with wherever it demonstrably is. `caller_view` must not run on top of
-    # that: it would take the payload's cwd as the answer, and for a subagent
-    # that has never changed directory the payload says its parent's tree —
-    # overwriting, on the very next tool call, whatever the agent declared with
-    # `agentbus here`. The session's own calls have no such ambiguity.
-    if payload.get("agent_id"):
-        me = party_view(me, payload)
-    else:
-        me = caller_view(me, payload.get("cwd"))
+    # The command goes in because `git -C <path>` is part of the answer to
+    # "where is this call running", and only a Bash command can carry one.
+    cmd = ti.get("command", "") if tool == "Bash" else ""
+    # The view: this hook decides, it does not write the session's record.
+    record, me = resolve_party(payload, cmd)
+    if not record:
+        register(payload)          # missing SessionStart is not an exemption
+        record, me = resolve_party(payload, cmd)
+        if not record:
+            return
     sessions = load_sessions()
     if tool == "Bash":
-        cmd = ti.get("command", "")
-        # A command that names a checkout outright is better evidence than the
-        # directory the session happens to be sitting in — `git -C <path>` is
-        # how a chat works on a worktree it never changes into. It is better
-        # evidence than a pin as well, which is what `override_pin` says: the
-        # pin is about a session and this is about one command. Without it the
-        # pin check inside `caller_view` swallowed the answer this line exists
-        # to apply, for a subagent too — `party_view` copies the session's
-        # `pinned` into the view, so a pinned session's agents were caught by it
-        # as well.
-        stated = command_worktree(cmd)
-        if stated:
-            me = caller_view(me, stated, override_pin=True)
         # Before anything can deny it: this is the last moment at which who is
         # running an `agentbus` command is still known.
         leave_party_hint(me, cmd)
@@ -3433,10 +3633,10 @@ def hook_post_bash(payload):
     lives in PostToolBatch, where the output arrives whatever the outcome, and
     where the same batch's claims are released again for the commands that
     failed and never reached this hook at all."""
-    sid, me = current_session(payload)
-    if not me:
+    record, me = resolve_party(payload)
+    if not record:
         return
-    release_autoclaim(party_view(me, payload), payload.get("tool_use_id"))
+    release_autoclaim(me, payload.get("tool_use_id"))
 
 
 def instance_of(res, cmd):
@@ -3964,9 +4164,15 @@ def hook_record_write(payload):
     """Fallback only: the shell fast path normally records writes itself."""
     if read_int(LIVEFILE, 0) < 2:
         return
-    sid, me = current_session(payload)
-    if not me:
+    # Only the session id is wanted, and only from a session that has a record:
+    # a write log filed under a session nobody has ever heard of is read by
+    # nothing. The party does not come into it — a write is filed against the
+    # session, because `handoff_text` and the ownership guard are about the
+    # checkout, not about which of its agents touched the file.
+    record, _ = resolve_party(payload)
+    if not record:
         return
+    sid = record["sid"]
     ti = payload.get("tool_input") or {}
     path = ti.get("file_path") or ti.get("notebook_path")
     if not path:
@@ -3980,20 +4186,38 @@ def hook_record_write(payload):
 
 # ------------------------------------------------------------------- cli ----
 
-def need_me():
-    sid, me = current_session()
-    if not me:
+def need_party():
+    """(record, view) for a command-line verb, or the not-attached message.
+
+    Two answers rather than one because they are used for opposite things.
+    `agentbus claim --as X` decides as a subagent; `agentbus name` writes what
+    it is handed to the session file. Handing one value to both is how a
+    subagent's identity would end up in its parent's record."""
+    record, view = resolve_party()
+    if not record:
         print("agent-bus: this shell is not attached to a registered session.\n"
               "Start a new Claude Code session, or run `agentbus register`.",
               file=sys.stderr)
         sys.exit(1)
-    return me
+    return record, view
+
+
+def need_me():
+    """The party running this command, rooted where its shell is standing."""
+    return need_party()[1]
+
+
+def need_record():
+    """This session's own dict, for the two verbs that write it straight back."""
+    return need_party()[0]
 
 
 def cli_status(_args):
     sessions = load_sessions(reap=True)
     refresh_derived(sessions)
-    sid, me = current_session()
+    # Read-only: the view, because "which of these rows is me" is a question
+    # about the caller, and nothing here is written back.
+    _, me = resolve_party()
     if not me:
         # Run from a shell that is not a registered session: report on whatever
         # repository the caller is standing in.
@@ -4300,7 +4524,7 @@ def cli_watch(args):
     tail = int(opt(args, "-n", "15"))
     me = None
     if only_repo:
-        _, me = current_session()
+        _, me = resolve_party()     # read-only: only `repo_key` is wanted
         if not me:
             root, repo_key, label, _ = git_facts(os.getcwd())
             me = {"repo_key": repo_key}
@@ -4726,8 +4950,18 @@ def cli_here(args):
 
     Either way the declaration is durable: it is recorded with a `pinned` flag,
     on the session's record or on the agent's, and everything that infers a
-    location from a cwd steps over it until `here` is run somewhere else."""
-    me = acting(need_me(), args)
+    location from a cwd steps over it until `here` is run somewhere else.
+
+    This is the *writer* of that flag, and it has to be read next to its
+    readers, which are all in `resolve_party`: clause (c) of *where they are
+    working* for the session's pin, and the declaring half of clause (b) for an
+    agent's. Two levels, two records, one flag with one meaning — a session's
+    pin never reaches an agent's record and an agent's never reaches the
+    session's, which is what stops a subagent's declaration pinning its parent.
+    The one statement that still beats both is `git -C <path>`, clause (a),
+    because that is about a single command."""
+    record, me = need_party()
+    me = acting(me, args)
     pos = positional(args)
     where = os.path.realpath(pos[0]) if pos else os.getcwd()
     if not os.path.isdir(where):
@@ -4742,19 +4976,22 @@ def cli_here(args):
                   "who is who.", file=sys.stderr)
             sys.exit(1)
         # The same flag the session branch writes, because it is the same
-        # statement one level down. Without it `follow_agent_cwd` had nothing to
-        # read, and the declaration survived only until a payload arrived with a
-        # cwd that was neither the agent's record nor its parent's.
+        # statement one level down. Without it `_follow_agent_cwd` had nothing
+        # to read, and the declaration survived only until a payload arrived
+        # with a cwd that was neither the agent's record nor its parent's.
         rec.update({"cwd": where, "root": root, "repo_key": repo_key,
                     "repo_label": label, "branch": branch, "pinned": True})
         write_json(agent_path(me["sid"], aid), rec)
         who = rec.get("name")
     else:
-        rec = read_json(os.path.join(SESSIONS, "%s.json" % me["sid"])) or me
-        rec["sid"] = me["sid"]
+        # The session file, so the record — never `me`, which by this point may
+        # be a subagent that failed to find its own record above.
+        rec = read_json(os.path.join(SESSIONS, "%s.json" % record["sid"])) or record
+        rec["sid"] = record["sid"]
         rec.update({"cwd": where, "root": root, "repo_key": repo_key,
                     "repo_label": label, "branch": branch, "pinned": True})
-        write_json(os.path.join(SESSIONS, "%s.json" % me["sid"]), rec)
+        write_json(os.path.join(SESSIONS, "%s.json" % record["sid"]),
+                   require_record(rec, "cli_here"))
         who = rec.get("agent")
     refresh_derived()
     print("%s is working in %s (%s)" % (who, short_path(root), branch or "-"))
@@ -5017,7 +5254,11 @@ def cli_run(args):
 
 
 def cli_name(args):
-    me = need_me()
+    # The record: this mutates what it is given and writes it to the session
+    # file. A session is named, not a party — `agentbus name` run by a subagent
+    # renames its parent, deliberately, and must not persist the subagent's
+    # identity while doing it.
+    me = require_record(need_record(), "cli_name")
     pos = positional(args)
     if not pos:
         print(me.get("agent"))
@@ -5031,7 +5272,7 @@ def cli_name(args):
 
 
 def cli_doing(args):
-    me = need_me()
+    me = require_record(need_record(), "cli_doing")   # written back, as above
     me["doing"] = " ".join(positional(args))[:160]
     write_json(os.path.join(SESSIONS, "%s.json" % me["sid"]), me)
     print("noted")
@@ -5767,7 +6008,7 @@ def cli_doctor(_args):
     print("events       : %d" % read_int(SEQFILE, 0))
     print("guard tokens : %s" % (open(TOKENFILE).read().strip()[:200]
                                  if os.path.exists(TOKENFILE) else "-"))
-    sid, me = current_session()
+    _, me = resolve_party()     # read-only: the name this caller answers to
     print("this session : %s" % (me.get("agent") if me else "NOT REGISTERED"))
     root, repo_key, label, _ = git_facts(os.getcwd())
     shared = os.path.join(root, ".claude", "agent-bus.json")
