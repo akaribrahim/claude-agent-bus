@@ -53,11 +53,12 @@ a denial, into a command-line action, and into the advice printed at the bottom 
 block. Advice the guard would refuse becomes structurally impossible for the command
 surface, because the advice is generated from the same object that decides.
 
-You can see it working by running `make test` — 888 assertions today, more after — and by
-the two adversarial checks this plan adds: a test that walks every command-line verb and
-asserts it locks the identical name the guard would *for the same command*, and a test
-that takes each block the plugin can emit, runs the exits it advertises, and requires
-that running one lifts the block.
+You can see it working by running `make test` — 1571 assertions, up from the 932 this
+plan started against; the "888" this line carried until M5 was stale when it was written
+— and by the two adversarial checks this plan adds: a test that walks every command-line
+verb and asserts it locks the identical name the guard would *for the same command*, and
+a test that takes each block the plugin can emit, runs the exits it advertises, and
+requires that running one lifts the block.
 
 ## Progress
 
@@ -435,7 +436,10 @@ that running one lifts the block.
   three call sites, not nine. `lock_name`, `resolve_lock` and `file_lock_name` have
   twelve, which is correct and is where spine two's duplication actually lives. The
   first draft also credited `tests/live/acceptance.sh` with "32 assertions"; it contains
-  no `assert` at all and 36 `ok`/`check` calls.
+  no `assert` at all. The review said 36 `ok`/`check` calls and this plan repeated it
+  until M4 ran the file and counted 39 — the number moved when the subagent section was
+  added and nobody re-counted. Counting call sites in the source gives neither, because
+  several checks are an `ok`/`bad` pair around one `if`; the run is the count.
 
 ## Decision Log
 
@@ -447,7 +451,7 @@ that running one lifts the block.
   the chat title is on no payload but the transcript path is; `hooks.json` is the only
   wiring Claude Code reads. Those live in the test suite and in comments. A rewrite either
   carries them across, in which case it is not a rewrite, or rediscovers them expensively.
-  The 888 assertions are also the only safety net that makes a change of this size
+  The 932 assertions are also the only safety net that makes a change of this size
   survivable, and a rewrite discards it exactly when it is needed.
   Date/Author: 2026-08-02, Ibrahim + Claude.
 
@@ -753,15 +757,21 @@ doing the editing. That is the single most important operational fact in this pl
 ### The files
 
     .claude-plugin/plugin.json   name, version, description
-    bin/agentbus                 the engine and the command-line tool, ~5500 lines
+    bin/agentbus                 the engine and the command-line tool, ~6700 lines
+                                 (~5800 before this plan; the growth is M5's
+                                 problem and is measured in Artifacts and Notes)
     bin/ab-hook                  the bash fast path, ~177 lines
-    bin/hook.py                  the Python fast path (Windows), ~259 lines
+    bin/hook.py                  the Python fast path (Windows), ~264 lines
     hooks/hooks.posix.json       wiring that calls bin/ab-hook
     hooks/hooks.python.json      wiring that calls bin/hook.py; __PYTHON__ substituted
     hooks/hooks.json             the file Claude Code actually reads; committed
     tests/run.sh                 the runner; isolates AGENTBUS_HOME
     tests/lib.sh                 assertions and fixture builders
-    tests/test_*.sh|py           fourteen files, 888 assertions
+    tests/test_*.sh|py           sixteen files, 1556 assertions; with the
+                                 structural checks `make test` reports
+                                 17 files, 1571
+    tests/check_syntax.py        15 structural checks, three of them the AST
+                                 checks this plan added
     tests/live/acceptance.sh     39 checks against real Claude Code sessions
     tests/perf/hook-cost.py      where a hook's time goes, per platform
     SKILL.md / README.md         the agent-facing and human-facing documentation
@@ -1195,11 +1205,73 @@ The cost of a hook before this refactor, measured 2026-08-02 on this Mac with
 
 The gate for M5 is the delta: 43.7 − 41.5 = 2.2 ms.
 
+After it, 2026-08-02, the same Mac and the same tool, Python 3.14.3 on darwin. Each
+figure below is that tool's own median of fifteen; the whole tool was then run five
+times over, which is where the spreads come from:
+
+    bare interpreter start                             15.9 ms
+    earliest possible return (AGENTBUS_OFF=1)     45.1 – 46.1 ms   (five runs)
+    a PreToolUse that takes a lock                47.3 – 50.0 ms   (five runs)
+    read + compile 6732 lines                          41.9 ms
+    the shell fast path, alone on the bus               5.1 ms
+    the Python fast path, nothing to do                17.4 ms
+
+    delta (lock minus floor), six samples: 1.4, 1.9, 2.4, 3.2, 3.4, 4.4 ms
+      median 2.8, min 1.4, max 4.4
+
+**The gate does not resolve, and this is a fact about the instrument.** The gate was
+moved off the two absolutes because they are five per cent apart and a ten per cent band
+on either cannot see a regression against that background. But the delta is the
+difference of two nearly-equal noisy numbers and it inherits both noises: its own spread
+here, 1.4 to 4.4 ms, is three times the width of the ±10 % band around 2.2 ms it is being
+judged against. The median moved from 2.2 to 2.8, which is inside that noise; so would a
+move the same distance the other way. The correct statement is neither that the gate
+passed nor that it failed — it is that **this measurement cannot answer the question the
+gate asks**, and no amount of reading it more carefully will change that.
+
+What a gate that could answer it would need. The delta has to be measured as a *paired*
+difference — the same process, one run with `AGENTBUS_OFF=1` and one without, alternating
+so that whatever the machine is doing is common to both halves of each pair — and
+reported as a distribution over pairs rather than as the difference of two independently
+taken medians. At two milliseconds against a forty-five millisecond floor the thing being
+measured is a four per cent effect, so pairing is not a refinement; it is the only way
+the measurement exists at all. n on the order of a few hundred pairs, an interval quoted
+rather than a median, and the run pinned to one interpreter. Until `hook-cost.py` does
+that, the honest form of this gate is the weaker claim the numbers do support: the
+guard's own work — resolve, plan, claim, release — is single-digit milliseconds against a
+floor that is an order of magnitude larger.
+
+**The engine got bigger and every hook that wakes it pays for that.** `bin/agentbus` went
+from 5816 lines to 6732, +916, and the floor a hook cannot go below moved with it: 41.5 →
+45.1–46.1 ms. The same tool attributes it — "read + compile 6732 lines, 41.9 ms", of
+which 15.9 is the interpreter, so roughly 26 ms of every woken hook is this file being
+compiled from source. A hook script is never bytecode-cached: Python writes a `.pyc` for
+a module it imports and not for a file it is handed as a script, so that recompile
+happens on every single invocation. That is a real, measured cost of this refactor. It is
+an order of magnitude larger than the guard's own work, and larger than the change the
+gate above was built to detect and cannot.
+
+The same run says what the remedy would be worth: "saved by caching the bytecode: 24.7
+ms, 56 % of a hook". **Out of scope here and not a promise.** Collecting it means making
+the engine an importable module with a thin script in front of it, on three platforms,
+with `hooks.json`, `bin/ab-hook` and `bin/hook.py` all pointed at the new entry point and
+the `._pth` trap on the Windows embeddable Python handled. It is recorded because the
+number is large and because the measurement that would justify the work has now been
+taken twice, before and after.
+
 On the Windows 10 host, 2026-07-31, before `bin/hook.py` existed:
 
     bare interpreter start                            103.5 ms
     earliest possible return (AGENTBUS_OFF=1)         281.0 ms
     a PreToolUse that takes a lock                    420.3 ms
+
+**Those are pre-refactor figures and they have not been re-taken.** M5's acceptance asks
+for both platforms; the Windows measurement needs the author's machine and nobody has run
+the tool there since. Nothing in this section should be read as a Windows result. What
+can be said without one: `bin/hook.py` now answers the common case there without waking
+the engine at all, so the +916 lines land only on the calls that do wake it — and they
+land harder, because on 2026-07-31 the gap between a bare interpreter start and the floor
+was already 178 ms, most of it the same read-and-compile this Mac measures at 26.
 
 The two live defects the review found, reproduced before they were fixed:
 
@@ -1263,8 +1335,8 @@ Four factual errors were corrected: `resources_for` and `expand_implied` have th
 sites, not nine (verified); the eleven cited "block message" lines included four that are
 not block messages and omitted at least thirteen that are, and the corrected census is
 what forced the scope decision about `guard_file`; the spine-two and milestone tables now
-give definition lines consistently; `tests/live/acceptance.sh` has 36 checks and no
-`assert`.
+give definition lines consistently; `tests/live/acceptance.sh` has no `assert` at all
+(and 39 checks, not the 36 the review counted — see above).
 
 Nine design problems changed the design: `plan_for` is now pure with a separate
 `commit_plan`, because the deny decision is deliberately made twice; the service probe is
