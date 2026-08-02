@@ -9,11 +9,11 @@
 # refactor which collapses the thirteen into one resolver either keeps every
 # rule or fails here by name.
 #
-#   WHO IS ACTING.  The `agent_id` on the payload, if there is one. Otherwise
-#   the party hint the guard left for this exact command line, if the caller is
-#   the command-line tool and a hint exists. Otherwise an explicit `--as <name>`
-#   naming one of this session's own subagents, honoured by the verb rather than
-#   by the resolver. Otherwise the session.
+#   WHO IS ACTING.  The `agent_id` on the payload, if there is one. Otherwise an
+#   explicit `--as <name>` naming one of this session's own subagents, honoured
+#   by the verb rather than by the resolver. Otherwise the party hint the guard
+#   left for this exact command line, if the caller is the command-line tool and
+#   a hint exists. Otherwise the session.
 #
 #   WHERE THEY ARE WORKING.  A path the command itself names (`git -C <path>`),
 #   for that command only, without moving any record, and above every
@@ -42,23 +42,27 @@
 # where somebody is working therefore shows up as a different file in
 # `locks/` — which is the only place the guard's answer is visible from outside.
 #
-# One case below still contradicts the order above. It is marked DIVERGENCE and
-# it pins what the code does today, which is the whole point of M0: the
-# behaviour is characterised first and changed afterwards, in a commit that says
-# which of the two was wrong.
+# Three cases here contradicted the order above when this file was written, and
+# M0 pinned all three as DIVERGENCE — the behaviour characterised first and
+# changed afterwards, in a commit saying which of the two was wrong. M1 settled
+# them, one commit each, and the label is gone from all three. One went the
+# code's way and two went the prose's:
 #
-#   `--as` overrides the party hint, though the order puts the hint above it.
+#   A pinned session used to ignore `git -C`. The pin was applied inside
+#   `caller_view`, which is also the function the guard calls to apply `git -C`,
+#   so the pin swallowed it on the way through. `git -C <path>` is a statement
+#   about one command and a pin is a statement about a session, and the narrower
+#   one wins — which is what the order above said all along, so the CODE moved.
 #
-# Two were settled in M1. A pinned session used to ignore `git -C`, and no
-# longer does: the pin was applied inside `caller_view`, which is also the
-# function the guard calls to apply `git -C`, so the pin swallowed it on the way
-# through. `git -C <path>` is a statement about one command and a pin is a
-# statement about a session, and the narrower one wins — which is what the order
-# above said all along, so the code moved.
+#   A subagent's own root beats its parent's pin, and the ORDER now says so.
 #
-# The other went the other way. A subagent's own root beats its parent's pin,
-# and the order now says so; nothing in the engine changed. The reasoning is at
-# the case itself.
+#   `--as` beats the party hint, and the ORDER now says that too.
+#
+# The reasoning for each is at the case that pins it, not here.
+#
+# The lettered sections below are in the order they were written, which is no
+# longer the order above: the hint is (b) and `--as` is (c), and the case that
+# settles which of the two wins is at the end of (c).
 
 . "$AB_ROOT/tests/lib.sh"
 
@@ -267,10 +271,12 @@ free_all sess-a
 
 # ---- (c) an explicit `--as <name>`, honoured by the verb --------------------
 #
-# The last resort. An `agentbus claim` buried in a runner script never reaches
-# the guard, so there is no hint to pick up and no agent_id anywhere — and on
-# 2026-07-29 three subagents of one session each took the simulator that way and
-# each was told it held it alone. Saying the name outright is what is left.
+# The last resort in the sense that nothing else can identify this caller. An
+# `agentbus claim` buried in a runner script never reaches the guard, so there
+# is no hint to pick up and no agent_id anywhere — and on 2026-07-29 three
+# subagents of one session each took the simulator that way and each was told it
+# held it alone. Saying the name outright is what is left. Last in the file, but
+# not last in the order: where a hint also exists, this is what wins.
 
 ab sess-a claim simulator --as "$ONE" --why "batch 1: 7 flows" > /dev/null
 out=$(apre sess-a sub-one "$REPO" "maestro test flows/five.yaml" w-c1)
@@ -283,23 +289,29 @@ assert_contains "$(reason_of "$out")" "$ONE" \
 
 free_all sess-a
 
-# DIVERGENCE from the order above. The order puts the hint ABOVE `--as`; the
-# code applies the hint first and then lets `acting` overwrite it, so `--as`
-# wins. Pinned as it stands. Whether the order or the code is wrong is an M1
-# decision — note that `acting` is what a reader of the deny message runs, and
-# the message tells them to name themselves, which only helps if it overrides.
+# Where the two meet, and the case the order used to get backwards. The hint is
+# applied in `current_session` and `acting` then overwrites it, so `--as` wins.
+# M1 settled it by correcting the order rather than the code: a hint is an
+# inference the guard made from a command line — two subagents running the
+# identical line can already swap hints, which `take_party_hint` accepts as the
+# smaller error — and `--as <name>` is a declaration by the caller, checked
+# against that session's own subagents. A declaration beats an inference.
+#
+# It is also the only thing that makes the block advice work. The
+# unidentified-party block tells a blocked agent to name itself, and naming
+# yourself is worth nothing if a hint sitting under the same argv outranks it.
 out=$(apre sess-a sub-one "$REPO" "agentbus wait simulator --as $TWO --why over" w-c3)
 assert_allow "$out" "--as (c): the guard leaves a hint naming the caller"
 ab sess-a wait simulator --as "$TWO" --why over > /dev/null
 
 out=$(apre sess-a sub-two "$REPO" "maestro test flows/seven.yaml" w-c4)
 assert_allow "$out" \
-  "--as (c) DIVERGENCE: --as overrides the hint, so the lock is the named agent's"
+  "--as (c) vs hint (b): --as overrides the hint, so the lock is the named agent's"
 out=$(apre sess-a sub-one "$REPO" "maestro test flows/eight.yaml" w-c5)
 assert_deny "$out" \
-  "--as (c) DIVERGENCE: and the agent the hint named is the one refused"
+  "--as (c) vs hint (b): and the agent the hint named is the one refused"
 assert_contains "$(reason_of "$out")" "$TWO" \
-  "--as (c) DIVERGENCE: by the name on the command line"
+  "--as (c) vs hint (b): by the name on the command line"
 
 free_all sess-a
 

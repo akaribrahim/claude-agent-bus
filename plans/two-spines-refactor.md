@@ -298,6 +298,18 @@ that running one lifts the block.
   bus. Visible beats silent where the tool cannot know.
   Date/Author: 2026-08-02, Ibrahim + Claude.
 
+- Decision (M1): `--as <name>` beats the party hint — again the code was right and this
+  plan's prose was wrong, so the prose changed and no code did.
+  Rationale: a hint is an inference. The guard saw a command line, worked out which
+  subagent was about to run it, and left the answer under a digest of the argv; two
+  subagents running the identical line can already swap hints, which `take_party_hint`
+  records as an acceptable error. `--as <name>` is a declaration by the caller, checked
+  against that session's own subagents, and a declaration beats an inference for the same
+  reason it does everywhere else in this order. It is also the only thing that makes the
+  block advice work: the unidentified-party block tells a blocked agent to name itself,
+  and naming yourself is useless if a hint left under the same argv outranks it.
+  Date/Author: 2026-08-02, Ibrahim + Claude.
+
 - Decision (M1): a subagent's own recorded root beats its parent's pin — the code was
   right and this plan's prose was wrong, so the prose changed and no code did.
   Rationale: a subagent's record tracks where that subagent demonstrably is.
@@ -415,10 +427,12 @@ above:
 Stated as a precedence order — which is what M2 makes literal — the intended behaviour,
 now that the pin binds both paths, is:
 
-*Who is acting.* The `agent_id` on the payload, if there is one. Otherwise the party hint
-the guard left for this exact command line, if the caller is the command-line tool and a
-hint exists. Otherwise an explicit `--as <name>` naming one of this session's own
-subagents, honoured by the verb rather than by the resolver. Otherwise the session.
+*Who is acting.* The `agent_id` on the payload, if there is one. Otherwise an explicit
+`--as <name>` naming one of this session's own subagents, honoured by the verb rather
+than by the resolver. Otherwise the party hint the guard left for this exact command
+line, if the caller is the command-line tool and a hint exists. Otherwise the session.
+This order used to put the hint above `--as`, which is the opposite of what the code
+does; the prose was the half that was wrong, and the reasoning is in the Decision Log.
 
 *Where they are working.* A path the command itself names (`git -C <path>`), for that
 command only, without moving any record — and above every declaration below it, because
