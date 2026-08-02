@@ -134,7 +134,12 @@ def main():
     if os.environ.get("AGENTBUS_OFF"):
         return 0
     event = sys.argv[1] if len(sys.argv) > 1 else ""
-    if not event or not os.path.exists(ENGINE):
+    # Executable, not merely present, because that is what `bin/ab-hook` asks
+    # and the two must decide alike — an engine that lost its mode bits would
+    # otherwise stop guarding on macOS and go on guarding on Windows, which is
+    # worse than either. `os.X_OK` has no effect on Windows, where any existing
+    # file answers yes, so this is the same test there as before.
+    if not event or not os.access(ENGINE, os.X_OK):
         return 0
 
     if event in UNGATED:
