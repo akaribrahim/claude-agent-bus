@@ -362,6 +362,15 @@ assert_equal "bundler rig" "$(ab sess-a run rig -- "$LOCKDUMP" 2>/dev/null)" \
   "\`run\`, unlike \`claim\`, expands it — the same answer as the guard"
 assert_equal "" "$(lock_keys)" "and gives every one of them back when the command ends"
 
+# And it expands through an instance name, which it could not while the
+# expansion was computed from the string that was typed: `device@P1234` matches
+# no declared resource as a bare string, so the run that most needs the bundler
+# held under it was the run that took the device alone.
+assert_equal "bundler device@P1234" \
+  "$(ab sess-a run device@P1234 -- "$LOCKDUMP" 2>/dev/null)" \
+  "\`run\` on one device takes what that device implies"
+assert_equal "" "$(lock_keys)" "and hands both back at the end"
+
 # With two implied resources the note has to name a list, and until M4 no verb
 # could take one. M1 printed one command per resource joined with `&&` rather
 # than teach `cli_claim` a second copy of the split in `explicit_resources`;

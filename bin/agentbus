@@ -4482,7 +4482,7 @@ def render_refusal(plan, note=""):
     if plan.get("reason") != "lock-held":
         return render_block(plan)
     lock = b["lock"]
-    lines = ["'%s' is held by %s (%s, %s)%s"
+    lines = ["agent-bus: '%s' is held by %s (%s, %s)%s"
              % (b["exit_name"], b["who"], lock.get("mode", "soft"),
                 held_for(lock.get("acquired_at")), note or ".")]
     if lock.get("why"):
@@ -5706,36 +5706,51 @@ def cli_run(args):
         print("usage: agentbus run <res>[,<res>] [--why \"...\"] -- <command>",
               file=sys.stderr)
         sys.exit(1)
-    names, implied = expand_implied([x for x in pos[0].split(",") if x], me)
+    # Under the keys the guard uses, not the names typed: a worktree-scoped
+    # resource is one lock per checkout and an instance one lock per device, and
+    # taking the bare name would write a lock that nothing consults.
+    plan = plan_for(me, names=pos[0])
+    if plan["reason"] == "no-such-resource":
+        print(render_block(plan), file=sys.stderr)
+        sys.exit(1)
+    # Asked of the resources rather than of the string, so that `agentbus run
+    # simulator@ABC123` pulls in what the simulator implies exactly as
+    # `agentbus run simulator` does. Unlike `claim`, `run` expands: the careful
+    # command was the weaker one, and another session re-serving a bundler
+    # mid-run would silently switch the run to its bundle.
+    _, implied = expand_implied([r["name"] for r in plan["resources"]], me)
     if implied:
         print("agent-bus: also taking %s — %s implies %s."
               % (", ".join(implied), pos[0], ", ".join(implied)), file=sys.stderr)
+        plan = plan_for(me, names=[pos[0]] + implied)
     why = opt(head, "--why", " ".join(cmd)[:120])
     taken = []
     try:
-        for res in names:
-            # Under the key the guard uses, not the name typed: a worktree-scoped
-            # resource is one lock per checkout, and taking the bare name would
-            # write a lock that nothing consults.
-            key = resolve_lock(me, res)
-            ok, lock, holder, reason = do_claim(me, key, why=why, mode="hard")
+        for res in plan["resources"]:
+            ok, lock, holder, reason = do_claim(me, res["lock"], why=why,
+                                                mode="hard")
             if not ok:
-                print("agent-bus: '%s' is held by %s (%s). Not running."
-                      % (res, holder.get("agent"), held_for(lock.get("acquired_at"))),
-                      file=sys.stderr)
+                if not holder:
+                    print("agent-bus: could not take '%s': %s"
+                          % (_named(res), reason), file=sys.stderr)
+                    sys.exit(75)
+                print(render_refusal(
+                    _lock_block(me, "", res, lock, holder, plan["resources"]),
+                    " — not running."), file=sys.stderr)
                 sys.exit(75)
-            taken.append((res, key))
+            taken.append(res)
         # Holding the lock is not enough: make the services actually answer with
         # this worktree's code before the command runs.
-        for res in names:
-            declared = find_resource(me, res)
+        for res in plan["resources"]:
+            declared = find_resource(me, res["name"])
             if declared and declared.get("start"):
                 good, detail = ensure_serving(me, declared)
                 if not good:
                     print("agent-bus: %s" % detail, file=sys.stderr)
                     sys.exit(75)
                 if "restarted" in (detail or ""):
-                    print("agent-bus: '%s' %s" % (res, detail), file=sys.stderr)
+                    print("agent-bus: '%s' %s" % (res["name"], detail),
+                          file=sys.stderr)
         # cmd is already word-split by the calling shell, so run it directly:
         # joining it back into a shell string would destroy the quoting in
         # forms like `-- bash -c 'cd x && maestro test'`.
@@ -5743,10 +5758,11 @@ def cli_run(args):
         sys.exit(rc)
     finally:
         spoken = []
-        for res, key in taken:
-            lock = load_lock(me.get("repo_key"), key)
-            if do_release(me, key, quiet=True) and (lock or {}).get("announced"):
-                spoken.append(res)
+        for res in taken:
+            lock = load_lock(me.get("repo_key"), res["lock"])
+            if do_release(me, res["lock"], quiet=True) \
+                    and (lock or {}).get("announced"):
+                spoken.append(res["lock"])
         announce_locks(me, "released", spoken)
 
 
