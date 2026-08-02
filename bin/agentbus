@@ -3735,15 +3735,29 @@ def forget_autoclaim(tool_use_id):
         pass
 
 
-def serving_check(me, hits):
+def serving_check(plan, me):
     """Is the service this command is about to talk to actually serving MY tree?
 
     Holding the lock does not make :8082 answer with your code. This is the check
     that turns "nobody else has it booked" into "the answer you get is yours",
     and it has to run even when the lock is free — the dangerous case is a
-    session that ended while its detached server kept answering."""
+    session that ended while its detached server kept answering.
+
+    The one part of a Plan that shells out: `serving` runs `lsof`, and on some
+    paths twice. That is why it is behind `plan_for`'s `probe_services` and off
+    by default — the five command-line verbs M4 routes through `plan_for` are
+    pure file operations today and must not each grow a probe. `guard_bash`
+    leaves the flag off as well and calls this itself, after `commit_plan`,
+    because where it runs is load-bearing: a command touching both a held
+    resource and a mis-served one reports the lock, since that is the one
+    somebody else is actually using.
+
+    There is no `bypass` among the exits it builds, and no branch here that
+    could grow one. "I really do mean the other checkout's server" is not a
+    thing anybody means: a green result belonging to another worktree is the
+    founding failure this plugin exists for, not a preference."""
     mine = os.path.realpath(me.get("root") or "")
-    for res in hits:
+    for res in plan["resources"]:
         if res.get("_explicit"):
             continue   # `agentbus serve`/`run` are how a service gets moved
         if not res.get("start") and not res.get("port"):
@@ -3753,38 +3767,29 @@ def serving_check(me, hits):
             continue
         if root and os.path.realpath(root) == mine:
             continue
+        out = dict(plan)
+        out["blocker"] = {"resource": res, "serving": root,
+                          "mine": me.get("root", "")}
         if how == "unknown":
-            return "warn", (
-                "agent-bus: something is listening on %s that agent-bus did not "
-                "start, so which checkout it serves is unknown — the result you "
-                "get may belong to another worktree. `agentbus serve %s` restarts "
-                "it from yours." % (res.get("port") or res["name"], res["name"]))
-        rec = read_json(serve_path(me.get("repo_key"), res["name"])) or {}
-        note_block(me, "'%s'" % res["name"],
-                   "it is serving %s" % short_path(root or "?"))
-        lines = [
-            'agent-bus: BLOCKED. "%s" (%s) is serving a different checkout, so '
-            "this command would exercise that code and report it as yours."
-            % (res["name"], res.get("desc", "shared service")),
-            "",
-            "  serving   : %s" % short_path(root or "?"),
-            "  you are in: %s" % short_path(me.get("root", "")),
+            out["verdict"] = "warn"
+            out["reason"] = "service-unknown"
+            out["exits"] = [_exit("serve", "through",
+                                  "agentbus serve %s" % res["name"],
+                                  "restarts it from your worktree")]
+            return out
+        out["blocker"]["started"] = read_json(
+            serve_path(me.get("repo_key"), res["name"])) or {}
+        out["verdict"] = "deny"
+        out["reason"] = "service-elsewhere"
+        out["exits"] = [
+            _exit("serve", "through", "agentbus serve %s" % res["name"],
+                  "stops the current one, starts yours, tells the others"),
+            _exit("run", "through",
+                  "agentbus run %s -- <your command>" % res["name"],
+                  "one command against your own tree, left there"),
         ]
-        if rec.get("by"):
-            lines.append("  started by: %s, %s" % (rec["by"], ago(rec.get("started"))))
-        if res.get("why"):
-            lines += ["", "  " + res["why"]]
-        lines += [
-            "",
-            "Point it at your worktree — this stops the current one and starts",
-            "yours, and tells the other sessions it moved:",
-            "  agentbus serve %s" % res["name"],
-            "",
-            "Or run one command against your own tree and leave it there:",
-            "  agentbus run %s -- <your command>" % res["name"],
-        ]
-        return "deny", "\n".join(lines)
-    return "", ""
+        return out
+    return plan
 
 
 def wrong_port_check(me, cfg, cmd, sessions=None):
@@ -3798,16 +3803,21 @@ def wrong_port_check(me, cfg, cmd, sessions=None):
     and isolation cannot prevent it, only notice it.
 
     Only ports this machine has actually allocated are treated as somebody
-    else's. An unknown port is somebody's business but not ours."""
+    else's. An unknown port is somebody's business but not ours.
+
+    Returns a Plan, or None when there is nothing to say. Its exits are the
+    only `correct` ones in the plugin: they do not lift the block and do not
+    claim to — they hand over the port that is this checkout's, and the command
+    the reader runs afterwards is a different command from the one refused."""
     ports = set()
     for text in command_targets(cmd):
         for m in re.finditer(r"(?::|--port[= ]|-p\s+)(\d{2,5})\b", text):
             ports.add(int(m.group(1)))
     if not ports:
-        return "", ""
+        return None
     isolated = [r for r in cfg.get("resources", []) if r.get("_declared_port")]
     if not isolated:
-        return "", ""
+        return None
     mine = os.path.realpath(me.get("root") or "")
     ours = {r.get("port") for r in isolated}
     # Only this repository's allocations. Another project's port is somebody's
@@ -3832,72 +3842,252 @@ def wrong_port_check(me, cfg, cmd, sessions=None):
                        isolated[0])
             whose = (short_path(owner["root"]) if elsewhere
                      else "the repository's original checkout")
-            note_block(me, ":%d" % port, "it belongs to %s" % whose)
-            return "deny", "\n".join([
-                'agent-bus: BLOCKED. This command is aimed at :%d, which is not '
-                'this checkout\'s.' % port,
-                "",
-                "  :%d belongs to : %s" % (port, whose),
-                "  you are in    : %s" % short_path(mine),
-                "  yours is      : %d" % res.get("port", 0),
-                "",
-                "  Each checkout runs its own '%s' so that a request answers "
-                "with the code you" % res["name"],
-                "  are looking at. Reaching another one gives you a green "
-                "result for somebody",
-                "  else's tree — the exact failure per-worktree ports exist to "
-                "remove.",
-                "",
-                "Use yours:",
-                "  eval \"$(agentbus env)\"      # then :%d" % res.get("port", 0),
-                "  agentbus port %s            # just the number" % res["name"],
-                "",
-                "(If you really do mean another checkout's, say so: "
-                "AGENTBUS_OFF=1 <your command>.)",
+            return _plan(cmd, "deny", "wrong-port",
+                         {"port": port, "whose": whose, "mine": mine,
+                          "resource": res}, [], [
+                _exit("env", "correct", 'eval "$(agentbus env)"',
+                      "then :%d" % res.get("port", 0)),
+                _exit("port", "correct", "agentbus port %s" % res["name"],
+                      "just the number"),
+                _exit("off", "bypass", "AGENTBUS_OFF=1 <your command>",
+                      "if you really do mean another checkout's"),
             ])
-    return "", ""
+    return None
 
 
-def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
+# ------------------------------------------------------------------ plan ----
+#
+# A Plan is what one command means for the shared resources of one repository:
+# which of them it touches, under which names they are locked, what is going to
+# happen to it, and — the part that keeps being wrong — what the reader can run
+# instead when the answer is no.
+#
+#     cmd        the command the plan is about
+#     resources  the declared resources it touches, each a copy of the config
+#                entry with `lock` (from `lock_name`) and `instance` (from
+#                `instance_of`) added
+#     verdict    "allow" | "deny" | "warn"
+#     reason     which decision this is, as a tag and not a sentence: "" for
+#                nothing in the way, "opted-out", "lock-held", "wrong-port",
+#                "service-elsewhere", "service-unknown"
+#     blocker    the facts a refusal is about — the lock and who holds it, the
+#                port and whose it is, the service and what it serves. Facts
+#                only: English is `render_block`'s business, and a Plan that
+#                carried prose would be the second copy again
+#     exits      what to run instead; see `_exit`
+#     taken      what `commit_plan` actually claimed, so a later deny can give
+#                it back
+#
+# Six of this plugin's twenty-two defects came from "what does this command
+# touch and under what name is it locked" being answered in more than one
+# place, and the place that hurt was the English at the bottom of a block
+# message, which hard-coded its advice as format strings. `agentbus wait <res>`
+# was advertised and refused by the guard that printed it. `agentbus claim
+# worktree` was advertised, allowed, and wrote a lock nothing ever read. A block
+# about one simulator advertised the bare resource, so the exit took a lock
+# nothing was contending for and left the device exactly where it was. Building
+# the advice out of the same object that produced the verdict is what makes
+# that class of defect unavailable rather than merely absent.
+
+
+def _exit(eid, kind, cmd, when):
+    """One line the reader can run, and what running it does.
+
+    `cmd` is fully substituted: the lock actually in the way, the agent actually
+    holding it, the port actually allocated. Never a format string — an exit
+    exists only because `plan_for` had the facts to build it, so there is
+    nothing left for it to get wrong. The single thing never substituted is
+    `<your command>`, which is the reader's own command line: it is already on
+    their screen, and inlining a shell pipeline twice into a block message reads
+    worse than the placeholder does.
+
+    `kind` is what running it achieves. That is the distinction a blocked agent
+    needs and the one the plan for this refactor did not name; these four came
+    out of walking every block the command surface can emit:
+
+        through   run it and the block lifts — you hold what you were refused,
+                  or the service is yours now
+        ask       run it and you know more, or somebody else does. The block is
+                  exactly where it was, and the line does not pretend otherwise
+        correct   the command you ran is aimed at something that is not yours,
+                  and this is how to aim it at what is. The block stays, and
+                  should: it is not the same command any more
+        bypass    steps over the decision instead of resolving it, and says so
+                  on the bus
+
+    They are not interchangeable, and flattening them is how `agentbus status`
+    came to be printed beside `agentbus wait` with nothing to tell them apart.
+    Note also which blocks have which: the serving block has no `bypass` at all,
+    because "I really do mean the other checkout's server" is not a thing
+    anybody means.
+
+    `eid` is which exit this is — `wait`, `steal`, `off` — so that
+    `render_block` can place it in the prose and a test can ask for it by name.
+    It is the mechanism where `kind` is the effect, and both are needed: two
+    exits of one kind sit in different sentences.
+
+    `when` is one short line saying when this exit is the right one, or what
+    running it gives you. It is rendered beside the command wherever the message
+    has room for it."""
+    return {"id": eid, "kind": kind, "cmd": cmd, "when": when}
+
+
+def _plan(cmd="", verdict="allow", reason="", blocker=None,
+          resources=None, exits=None):
+    return {"cmd": cmd or "", "resources": list(resources or []),
+            "verdict": verdict, "reason": reason, "blocker": blocker,
+            "exits": list(exits or []), "taken": []}
+
+
+def _exit_of(plan, eid):
+    return next((e for e in plan.get("exits", []) if e.get("id") == eid), None)
+
+
+def _exit_cmd(plan, eid):
+    """The command line of one of a Plan's exits, or "" when it has no such
+    exit — which is how the unidentified block's `--as` line simply disappears
+    for a caller nothing can name, instead of being printed with a hole in it."""
+    e = _exit_of(plan, eid)
+    return e["cmd"] if e else ""
+
+
+def _exit_when(plan, eid):
+    e = _exit_of(plan, eid)
+    return e["when"] if e else ""
+
+
+def _exit_line(plan, eid, indent="  ", width=36, mark=""):
+    """One exit as a line of the message: the command, then what it is for."""
+    e = _exit_of(plan, eid)
+    if not e:
+        return ""
+    return "%s%-*s  %s%s" % (indent, width, e["cmd"], mark, e["when"])
+
+
+def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
+    """The Plan for a command refused because another party holds what it needs.
+
+    The only constructor for this verdict, and deliberately the only one: it is
+    reached twice, once from the optimistic check `plan_for` makes outside the
+    mutex and once from `commit_plan` when `do_claim` re-tests inside the mutex
+    and loses that race. Two constructors one function apart is exactly the
+    defect this refactor exists to remove."""
+    held = lock.get("resource") or res["name"]
+    # The name to put in a line the reader is meant to run. For a `key`-bearing
+    # resource that is the instance in the way, not the resource: `agentbus wait
+    # simulator` resolves to a bare `simulator` lock nothing was contending for,
+    # takes it, prints "claimed" and leaves the device exactly where it was.
+    # Only the runnable lines use it — the prose keeps the plain name, which is
+    # what a person calls the thing and, for a worktree-scoped resource, the
+    # only half of the key anyone typed.
+    exit_name = held if (res.get("key")
+                         and held.startswith(res["name"] + "@")) else res["name"]
+    # The lock's own name, not the session's: a lock taken by a subagent is held
+    # by that subagent, and telling the reader to go and talk to the session
+    # would point them at the wrong agent.
+    who = lock.get("agent") or holder.get("agent")
+    blocker = {
+        "resource": res, "lock": lock, "holder": holder,
+        "held": held, "exit_name": exit_name, "who": who,
+        "also": [r["name"] for r in also],
+        "same_tree": (os.path.realpath(holder.get("root") or "")
+                      == os.path.realpath(me.get("root") or "")),
+        # Two subagents of one session. A parent and its own subagent never
+        # contend; these two do.
+        "sibling": bool(lock.get("sid") == me.get("sid")
+                        and (lock.get("agent_id") or "")
+                        and (me.get("agent_id") or "")),
+        # Taken by somebody in this session through a path where the caller
+        # could not be identified — an `agentbus claim` inside a runner script,
+        # where the guard never saw the command line and a subagent's shell is
+        # indistinguishable from its parent's. Treating that as "the session
+        # itself" is what let three agents drive one simulator at once.
+        "unidentified": bool(lock.get("sid") == me.get("sid")
+                             and not lock.get("party_known", True)
+                             and (me.get("agent_id") or "")),
+    }
+    wait = _exit("wait", "through", 'agentbus wait %s --why "..."' % exit_name,
+                 "queue; takes it the moment it frees")
+    exits = []
+    if blocker["unidentified"]:
+        # `--steal` is part of this advice rather than an afterthought. Naming
+        # yourself does not make an anonymous lock yours — `same_party` refuses
+        # it for exactly the reason this block exists, and believing `--as` here
+        # would let one subagent adopt another's lock in silence, which is the
+        # three-agents-one-simulator failure. Taking it anyway is a takeover, so
+        # it is called one: `--steal` puts "took 'X' from Y (forced)" on the bus
+        # and the other agent can see what happened.
+        exits.append(_exit(
+            "adopt", "through",
+            'agentbus claim %s --as <your name> --steal --why "..."' % exit_name,
+            "yours is in the message that named you"))
+        exits.append(wait)
+        exits.append(_exit("release", "through", "agentbus release --all",
+                           "from whichever agent took it"))
+    exits.append(_exit("status", "ask", "agentbus status", "what is going on"))
+    exits.append(_exit("ask", "ask", 'agentbus post --to %s "..."' % who,
+                       "ask them"))
+    if not blocker["unidentified"]:
+        exits.append(wait)
+    exits.append(_exit("off", "bypass", "AGENTBUS_OFF=1 <your command>",
+                       "when the command does not touch %s at all" % res["name"]))
+    exits.append(_exit("steal", "through",
+                       'agentbus claim %s --steal --why "..."' % exit_name,
+                       "only when you know they have finished"))
+    return _plan(cmd, "deny", "lock-held", blocker,
+                 resources if resources is not None else [res], exits)
+
+
+def plan_for(me, cmd, sessions=None, probe_services=False):
+    """What this command touches. Pure: reads state, takes nothing.
+
+    Returns a Plan: `resources` (each with its resolved lock name and
+    instance), `verdict` ("allow" | "deny" | "warn"), `reason`, `blocker`,
+    and `exits`. With probe_services False — the default, and what the
+    command-line verbs use — the service-ownership check is not run and no
+    subprocess is started.
+
+    Pure matters twice over. It is what lets the guard ask the question before
+    deciding whether to answer it, and it is what will let the five
+    command-line verbs ask the same question in M4 without each of them
+    growing an `lsof`: they are pure file operations today. Nothing here
+    writes, claims, or emits. `commit_plan` does all three, and `guard_bash`
+    emits the block.
+
+    The verdict is deliberately provisional. It is made outside the mutex, so
+    it can lose a race to another session between here and `do_claim`;
+    `commit_plan` re-tests inside the mutex and its answer is the one that
+    counts."""
     if command_opts_out(cmd):
-        # Said out loud, because a guard everybody can step over quietly is not
-        # a guard. This is the only place the plugin lets a command past a
+        # Nothing is touched, deliberately. Said out loud by whoever commits
+        # this plan, because a guard everybody can step over quietly is not a
+        # guard — this is the only place the plugin lets a command past a
         # decision it would otherwise have made.
-        emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
-             "ran past the guard with AGENTBUS_OFF — %s" % cmd.strip()[:120])
-        return
+        return _plan(cmd, "allow", "opted-out")
     cfg = repo_config(me.get("repo_key", ""), me.get("root"))
-    # `agentbus wait`, `agentbus release` and `agentbus claim --steal` are the
-    # three commands whose entire purpose is to act on a lock somebody else
-    # holds. Guarding them means refusing the way out of the block, which is
-    # what the block message itself tells the reader to do.
+    sessions = sessions if sessions is not None else load_sessions()
     # Before anything else, and regardless of whether a pattern matched: a
     # command aimed at another checkout's port is wrong however the config is
     # written, and the port that catches it may not be in this checkout's
-    # patterns at all — each worktree's patterns name only its own.
-    verdict, text = wrong_port_check(me, cfg, cmd, sessions)
-    if verdict == "deny":
-        deny(text)
-        return
+    # patterns at all — each worktree's patterns name only its own. It comes
+    # before the resources are even worked out because claiming first would
+    # leave a lock behind a command that is not going to run.
+    wrong = wrong_port_check(me, cfg, cmd, sessions)
+    if wrong:
+        return wrong
     hits = [h for h in resources_for(cmd, cfg) if not h.get("_passthrough")]
     if not hits:
-        return
-    # Before anything is claimed: a command aimed at another checkout's port is
-    # wrong whoever holds what, and claiming first would leave a lock behind.
-
-    # A resource whose patterns stop matching — a port moved, a script was
-    # renamed — fails silently and looks exactly like a resource nobody is
-    # using. Recording the last match lets `doctor` say so.
+        return _plan(cmd)
+    resources = []
     for res in hits:
-        try:
-            open(os.path.join(MATCHED, re.sub(r"[^A-Za-z0-9_.-]", "_", "%s__%s" % (
-                me.get("repo_key"), res["name"]))), "w").close()
-        except OSError:
-            pass
+        res = dict(res)
+        res["instance"] = instance_of(res, cmd)
+        res["lock"] = lock_name(me, res, cmd)
+        resources.append(res)
     # Check every resource before taking any. A command that is going to be
     # denied must not leave half the rig claimed behind it.
     blocked = []
-    for res in hits:
+    for res in resources:
         for lock in contending_locks(me, res, cmd):
             if same_party(lock, me):
                 continue
@@ -3905,65 +4095,158 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
             if holder and not stealable:
                 blocked.append((res, lock, holder))
                 break
+    if blocked:
+        res, lock, holder = blocked[0]
+        return _lock_block(me, cmd, res, lock, holder, resources,
+                           [b[0] for b in blocked[1:]])
+    plan = _plan(cmd, resources=resources)
+    if probe_services:
+        plan = serving_check(plan, me)
+    return plan
+
+
+def commit_plan(plan, me, sessions, tool_use_id=None):
+    """Take what the Plan says to take, inside the mutex, and return the
+    authoritative Plan. The optimistic verdict from plan_for can lose a
+    race; do_claim's answer inside the mutex is the one that counts, and
+    ignoring it is how two sessions both proceeded before c95399c."""
+    # A resource whose patterns stop matching — a port moved, a script was
+    # renamed — fails silently and looks exactly like a resource nobody is
+    # using. Recording the last match lets `doctor` say so. Recorded whatever
+    # the verdict, because a command that was refused still touched the thing.
+    for res in plan["resources"]:
+        try:
+            open(os.path.join(MATCHED, re.sub(r"[^A-Za-z0-9_.-]", "_", "%s__%s" % (
+                me.get("repo_key"), res["name"]))), "w").close()
+        except OSError:
+            pass
+    if plan["verdict"] != "allow" or not plan["resources"]:
+        return plan
     # A command that named its resources outright is a deliberate act and worth
     # a line; a pattern match is one command's worth of housekeeping and is not.
-    explicit = any(h.get("_explicit") for h in hits)
-    if not blocked:
-        taken = []
-        for res in hits:
-            ok, lock, holder, _ = do_claim(me, lock_name(me, res, cmd),
-                                           mode="soft", sessions=sessions,
-                                           announced=explicit)
-            if ok:
-                taken.append(lock_name(me, res, cmd))
-                continue
-            # The check above ran outside the mutex; do_claim re-tested inside it
-            # and lost. Ignoring that answer is how two sessions both proceed.
-            for name in taken:
-                do_release(me, name, quiet=True)
-            blocked = [(res, lock, holder)]
-            break
-        if not blocked:
-            remember_autoclaim(me, payload_tool_use_id, taken)
-            if taken:
-                bump_guarded(me)
-                if explicit:
-                    announce_locks(me, "took", taken, cmd.strip()[:90])
-            verdict, text = serving_check(me, hits)
-            if verdict == "deny":
-                for name in taken:
-                    do_release(me, name, quiet=True)
-                forget_autoclaim(payload_tool_use_id)
-                deny(text)
-            elif verdict == "warn":
-                note_ctx(text)
-            return
-    res, lock, holder = blocked[0]
-    # The name to put in a line the reader is meant to run. For a `key`-bearing
-    # resource that is the instance in the way, not the resource: `agentbus wait
-    # simulator` resolves to a bare `simulator` lock nothing was contending for,
-    # takes it, prints "claimed" and leaves the device exactly where it was.
-    # Only the runnable lines use it — the prose keeps the plain name, which is
-    # what a person calls the thing and, for a worktree-scoped resource, the only
-    # half of the key anyone typed.
-    held = lock.get("resource") or res["name"]
-    exit_name = held if (res.get("key")
-                         and held.startswith(res["name"] + "@")) else res["name"]
-    note_block(me, "'%s'" % res["name"],
-               "held by %s" % (lock.get("agent") or holder.get("agent")))
-    same_tree = (os.path.realpath(holder.get("root") or "")
-                 == os.path.realpath(me.get("root") or ""))
+    explicit = any(r.get("_explicit") for r in plan["resources"])
+    taken = []
+    for res in plan["resources"]:
+        ok, lock, holder, _ = do_claim(me, res["lock"], mode="soft",
+                                       sessions=sessions, announced=explicit)
+        if ok:
+            taken.append(res["lock"])
+            continue
+        # The check in `plan_for` ran outside the mutex; `do_claim` re-tested
+        # inside it and lost. Ignoring that answer is how two sessions both
+        # proceed. Answering it by building a second Plan here by hand is how
+        # the two answers drift apart, so it is the same constructor.
+        for name in taken:
+            do_release(me, name, quiet=True)
+        return _lock_block(me, plan["cmd"], res, lock, holder, plan["resources"])
+    remember_autoclaim(me, tool_use_id, taken)
+    if taken:
+        bump_guarded(me)
+        if explicit:
+            announce_locks(me, "took", taken, plan["cmd"].strip()[:90])
+    plan["taken"] = taken
+    return plan
+
+
+def note_plan_block(me, plan):
+    """Put this Plan's refusal on the bus.
+
+    One place rather than three: the blocks differ only in what they name, and
+    they were each emitting their own line from inside the function that
+    detected them — which is why the serving one fired before the locks the
+    same command had just taken were given back."""
+    b = plan.get("blocker") or {}
+    if plan.get("reason") == "lock-held":
+        note_block(me, "'%s'" % b["resource"]["name"], "held by %s" % b["who"])
+    elif plan.get("reason") == "wrong-port":
+        note_block(me, ":%d" % b["port"], "it belongs to %s" % b["whose"])
+    elif plan.get("reason") == "service-elsewhere":
+        note_block(me, "'%s'" % b["resource"]["name"],
+                   "it is serving %s" % short_path(b["serving"] or "?"))
+
+
+def render_block(plan):
+    """A Plan whose verdict is 'deny' as the text a session reads.
+
+    A 'warn' too — the one the service probe raises when something is listening
+    that agent-bus did not start. It is a sentence rather than a block, but it
+    carries an exit like every other refusal and there is no reason for a second
+    function to compose it.
+
+    Every runnable line in here comes out of `plan["exits"]`. Nothing in this
+    function builds a command, and that is the whole of what this milestone
+    changes: advice the guard would refuse is no longer something this function
+    is able to print, because it does not know how to write one down."""
+    b = plan.get("blocker") or {}
+    reason = plan.get("reason")
+
+    if reason == "wrong-port":
+        res = b["resource"]
+        return "\n".join([
+            'agent-bus: BLOCKED. This command is aimed at :%d, which is not '
+            'this checkout\'s.' % b["port"],
+            "",
+            "  :%d belongs to : %s" % (b["port"], b["whose"]),
+            "  you are in    : %s" % short_path(b["mine"]),
+            "  yours is      : %d" % res.get("port", 0),
+            "",
+            "  Each checkout runs its own '%s' so that a request answers "
+            "with the code you" % res["name"],
+            "  are looking at. Reaching another one gives you a green "
+            "result for somebody",
+            "  else's tree — the exact failure per-worktree ports exist to "
+            "remove.",
+            "",
+            "Use yours:",
+            _exit_line(plan, "env", width=26, mark="# "),
+            _exit_line(plan, "port", width=26, mark="# "),
+            "",
+            "(If you really do mean another checkout's, say so: %s.)"
+            % _exit_cmd(plan, "off"),
+        ])
+
+    if reason == "service-unknown":
+        res = b["resource"]
+        return ("agent-bus: something is listening on %s that agent-bus did not "
+                "start, so which checkout it serves is unknown — the result you "
+                "get may belong to another worktree. `%s` restarts it from yours."
+                % (res.get("port") or res["name"], _exit_cmd(plan, "serve")))
+
+    if reason == "service-elsewhere":
+        res, started = b["resource"], b.get("started") or {}
+        lines = [
+            'agent-bus: BLOCKED. "%s" (%s) is serving a different checkout, so '
+            "this command would exercise that code and report it as yours."
+            % (res["name"], res.get("desc", "shared service")),
+            "",
+            "  serving   : %s" % short_path(b["serving"] or "?"),
+            "  you are in: %s" % short_path(b["mine"]),
+        ]
+        if started.get("by"):
+            lines.append("  started by: %s, %s"
+                         % (started["by"], ago(started.get("started"))))
+        if res.get("why"):
+            lines += ["", "  " + res["why"]]
+        lines += [
+            "",
+            "Point it at your worktree — this stops the current one and starts",
+            "yours, and tells the other sessions it moved:",
+            "  %s" % _exit_cmd(plan, "serve"),
+            "",
+            "Or run one command against your own tree and leave it there:",
+            "  %s" % _exit_cmd(plan, "run"),
+        ]
+        return "\n".join(lines)
+
+    res, lock, holder = b["resource"], b["lock"], b["holder"]
     lines = [
         'agent-bus: BLOCKED. "%s" (%s) is in use by another live Claude Code '
         'session.' % (res["name"], res.get("desc", "shared resource")),
         "",
-        # The lock's own name, not the session's: a lock taken by a subagent is
-        # held by that subagent, and telling the reader to go and talk to the
-        # session would point them at the wrong agent.
-        "  holder    : %s   branch %s" % (lock.get("agent") or holder.get("agent"),
-                                          holder.get("branch") or "-"),
+        "  holder    : %s   branch %s" % (b["who"], holder.get("branch") or "-"),
         "  worktree  : %s%s" % (short_path(holder.get("root", "")),
-                                "   (the same one you are in)" if same_tree else ""),
+                                "   (the same one you are in)"
+                                if b["same_tree"] else ""),
         "  held for  : %s   (%s lock)" % (held_for(lock.get("acquired_at")),
                                           lock.get("mode", "soft")),
         "  last seen : %s" % ago(holder.get("beat")),
@@ -3976,26 +4259,7 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         lines += ["", "  Your command drives '%s', which is only meaningful against "
                       "the '%s' serving your worktree — so it needs that too."
                   % (res["_implied_by"], res["name"])]
-    sibling = (lock.get("sid") == me.get("sid")
-               and (lock.get("agent_id") or "") and (me.get("agent_id") or ""))
-    unidentified = (lock.get("sid") == me.get("sid")
-                    and not lock.get("party_known", True)
-                    and (me.get("agent_id") or ""))
-    if unidentified:
-        # Taken by somebody in this session through a path where the caller
-        # could not be identified — an `agentbus claim` inside a runner script,
-        # where the guard never sees the command line and a subagent's shell is
-        # indistinguishable from its parent's. Treating that as "the session
-        # itself" is what let three agents drive one simulator at once, so it
-        # blocks instead; this is how whoever took it says who they are.
-        #
-        # `--steal` is part of the advice rather than an afterthought. Naming
-        # yourself does not make an anonymous lock yours — `same_party` refuses
-        # it for exactly the reason this block exists, and believing `--as` here
-        # would let one subagent adopt another's lock in silence, which is the
-        # three-agents-one-simulator failure. Taking it anyway is a takeover, so
-        # it is called one: `--steal` puts "took 'X' from Y (forced)" on the bus
-        # and the other agent can see what happened.
+    if b["unidentified"]:
         lines += ["", "  One of this session's agents took this through a shell, "
                       "where nothing can",
                   "  tell one agent from another — so agent-bus cannot say "
@@ -4003,16 +4267,17 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
                   "  If it is yours, say so and take it. Nothing here can "
                   "confirm that it is, so",
                   "  this goes on the bus as a takeover and whoever holds it "
-                  "sees that it moved:",
-                  "    agentbus claim %s --as <your name> --steal --why \"...\"   "
-                  "(yours is in the message that named you)" % exit_name,
-                  "  If it is not, wait for it, or give it back if you know it "
+                  "sees that it moved:"]
+        lines.append("    %s   (%s)" % (_exit_cmd(plan, "adopt"),
+                                        _exit_when(plan, "adopt")))
+        lines += ["  If it is not, wait for it, or give it back if you know it "
                   "is finished:",
-                  "    agentbus wait %s --why \"...\"" % exit_name,
-                  "    agentbus release --all   (from whichever agent took it)"]
+                  "    %s" % _exit_cmd(plan, "wait"),
+                  "    %s   (%s)" % (_exit_cmd(plan, "release"),
+                                     _exit_when(plan, "release"))]
         if res.get("why"):
             lines += ["", "  " + res["why"]]
-    elif sibling:
+    elif b["sibling"]:
         # Two subagents of one session. Nothing here is about checkouts — they
         # share one — so the same-checkout wording below would be answering a
         # question nobody asked, while the resource's own `why` is exactly the
@@ -4023,7 +4288,7 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
                       "you are not both driving it."]
         if res.get("why"):
             lines += ["", "  " + res["why"]]
-    elif same_tree:
+    elif b["same_tree"]:
         # The configured `why` explains cross-worktree damage. Two sessions in
         # ONE checkout are running the same code, so quoting it here would state
         # something the agent can see is false — and an agent that catches the
@@ -4034,18 +4299,16 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
                       "automatic claims last only as long as the command."]
     elif res.get("why"):
         lines += ["", "  " + res["why"]]
-    if len(blocked) > 1:
-        lines.append("  Also in use: %s" % ", ".join(b[0]["name"] for b in blocked[1:]))
+    if b["also"]:
+        lines.append("  Also in use: %s" % ", ".join(b["also"]))
     lines += [
         "",
         "Do not work around this by editing the command: a different port, a",
         "direct binary path or a subshell all reach the same service.",
         "",
-        "  agentbus status                       what is going on",
-        '  agentbus post --to %s "..."   ask them'
-        % (lock.get("agent") or holder.get("agent")),
-        '  agentbus wait %s --why "..."  queue; takes it the moment it frees'
-        % exit_name,
+        _exit_line(plan, "status"),
+        _exit_line(plan, "ask"),
+        _exit_line(plan, "wait"),
     ]
     if res.get("hint"):
         lines += ["", "  " + res["hint"]]
@@ -4055,15 +4318,59 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         % res["name"],
         "or staging server, a throwaway container — then it is not what this",
         "guard is for. Say so and it runs:",
-        "  AGENTBUS_OFF=1 <your command>",
+        "  %s" % _exit_cmd(plan, "off"),
         "That is recorded on the bus, so use it when it is true and not to get",
         "past a queue. Worth telling whoever maintains the config, too: an",
         '"unless" pattern on the resource stops it matching next time.',
         "",
-        '(Last resort, only when you know they have finished: '
-        '`agentbus claim %s --steal --why "..."`.)' % exit_name,
+        "(Last resort, %s: `%s`.)" % (_exit_when(plan, "steal"),
+                                      _exit_cmd(plan, "steal")),
     ]
-    deny("\n".join(lines))
+    return "\n".join(lines)
+
+
+def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
+    """Decide one Bash command: plan it, commit it, and say no if it comes to
+    that.
+
+    Four steps and no fifth. Everything that used to live here — which resources
+    a command touches, under what names they are locked, who is in the way, and
+    the hundred lines of English that told the reader what to run instead — is
+    in the Plan now, and this function's whole remaining job is the order those
+    steps happen in.
+
+    `agentbus wait`, `agentbus release` and `agentbus claim --steal` are the
+    three commands whose entire purpose is to act on a lock somebody else holds.
+    Guarding them would mean refusing the way out of a block, which is what the
+    block itself tells the reader to do; `explicit_resources` marks them
+    `_passthrough` and `plan_for` drops them."""
+    plan = plan_for(me, cmd, sessions)
+    if plan["reason"] == "opted-out":
+        # Said out loud, because a guard everybody can step over quietly is not
+        # a guard. This is the only place the plugin lets a command past a
+        # decision it would otherwise have made.
+        emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
+             "ran past the guard with AGENTBUS_OFF — %s" % cmd.strip()[:120])
+        return
+    plan = commit_plan(plan, me, sessions, payload_tool_use_id)
+    if plan["verdict"] == "allow":
+        # After the claim, and undone below if it denies. The precedence is
+        # load-bearing and was undocumented: a command touching both a held
+        # resource and a mis-served one reports the lock, because the lock is
+        # the one another session is actually using. `plan_for` can fold this in
+        # itself with `probe_services=True`; the guard does not use that, so
+        # that a command refused here has already taken and given back what it
+        # asked for, exactly as it did before.
+        plan = serving_check(plan, me)
+        if plan["verdict"] == "deny":
+            for name in plan["taken"]:
+                do_release(me, name, quiet=True)
+            forget_autoclaim(payload_tool_use_id)
+    if plan["verdict"] == "deny":
+        note_plan_block(me, plan)
+        deny(render_block(plan))
+    elif plan["verdict"] == "warn":
+        note_ctx(render_block(plan))
 
 
 def file_lock_name(path):

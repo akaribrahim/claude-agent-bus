@@ -209,12 +209,65 @@ def check_one_resolver():
     ok(what)
 
 
+def check_exits_are_planned():
+    """A block message may not compose a command line of its own.
+
+    Six of this plugin's twenty-two defects came from "what does this command
+    touch and under what name is it locked" being answered in more than one
+    place, and the place that hurt was the English at the bottom of a block. It
+    gave a different answer from the guard that printed it three times:
+    `agentbus wait <res>` was advertised and then refused; `agentbus claim
+    worktree` was advertised, allowed, and wrote a lock nothing read; a block
+    about one simulator advertised the bare resource, so its exit took a lock
+    nothing was contending for and left the device where it was.
+
+    `render_block` places `plan["exits"]` and composes nothing, which is what
+    makes advice the guard would refuse unavailable rather than merely absent.
+    This is what keeps it that way. The mistake is not made deliberately — it is
+    made by somebody adding one more helpful line to a message — so a grep in a
+    review would not catch it and a rename would not slip past this.
+
+    The second half is about one block in particular. The serving block offers
+    no way of stepping over the decision, because "I really do mean the other
+    checkout's server" is not something anybody means: a green result belonging
+    to another worktree is the founding failure this plugin exists for. A
+    message that merely happens not to say AGENTBUS_OFF today is one exit away
+    from saying it tomorrow, so the check is on the exits."""
+    import ast
+    tree = ast.parse(open(os.path.join(ROOT, "bin", "agentbus")).read())
+    what = "block messages are rendered from a Plan's exits, not written out"
+    fns = {t.name: t for t in tree.body if isinstance(t, ast.FunctionDef)}
+    wanted = ("render_block", "serving_check", "_exit")
+    missing = [n for n in wanted if n not in fns]
+    if missing:
+        # Renaming one would make this check pass by having nothing to look for.
+        return bad(what, "no such function in the engine: %s" % ", ".join(missing))
+    offenders = []
+    for sub in ast.walk(fns["render_block"]):
+        if not isinstance(sub, ast.Constant) or not isinstance(sub.value, str):
+            continue
+        if "agentbus " in sub.value or "AGENTBUS_OFF" in sub.value:
+            offenders.append("line %d: render_block() spells out a command — %r"
+                             % (sub.lineno, sub.value.strip()[:60]))
+    for sub in ast.walk(fns["serving_check"]):
+        if not isinstance(sub, ast.Call) or getattr(sub.func, "id", "") != "_exit":
+            continue
+        kind = sub.args[1] if len(sub.args) > 1 else None
+        if isinstance(kind, ast.Constant) and kind.value == "bypass":
+            offenders.append("line %d: serving_check() offers a bypass"
+                             % sub.lineno)
+    if offenders:
+        return bad(what, "\n".join(offenders))
+    ok(what)
+
+
 def main():
     check_engine_compiles()
     check_fastpath_parses()
     check_hook_wiring()
     check_no_stray_output()
     check_one_resolver()
+    check_exits_are_planned()
     return 1 if failed else 0
 
 
