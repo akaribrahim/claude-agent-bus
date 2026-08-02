@@ -103,8 +103,25 @@ that running one lifts the block.
       purity snapshot was blind to a write that changes no contents.
       The exit `kind` set is `through | ask | correct | bypass`, not the six
       the plan drafted — reasoning below.
-- [ ] (M4) Retire the duplicate paths: the five command-line verbs call the core; the
+- [x] (M4) Retire the duplicate paths: the five command-line verbs call the core; the
       two fast paths are pinned to each other and to the token pre-filter by tests.
+      Done 2026-08-02: eleven commits, 1433 → 1571. `plan_for` takes `names`;
+      `resolve_lock` became a shim in the first commit, its four callers moved
+      one per commit, and the shim was deleted in the sixth — `git log` shows
+      that order. `cli_serve` came off `lock_name` last, since it never called
+      `resolve_lock`. The verbs do *not* call `commit_plan`; reasoning below.
+      A comma list now works end to end, which is three defects of one shape
+      closed at once — `claim`, `release` and `wait` each wrote a single lock
+      named after the list. `locks_text`'s instance blindness is fixed and
+      pinned. `tests/test_pyhook.sh` puts both fast paths through every branch
+      of the gate against a stand-in engine and found one divergence.
+      `guard_token_line` is extracted so the superset assertion reads the
+      string the fast paths read; extracting it found the test's own copy had
+      already drifted. Falsified seven times in a copied tree.
+      `tests/live/acceptance.sh all` passes: 39 of 39, no failures, on the
+      isolated bus, with the live one untouched. It is 39 checks and not the
+      36 this plan says — the count moved when the subagent section was added
+      and nobody updated the prose.
 - [ ] (M5) Re-measure cost, update the documentation that describes the old shape, and
       write the retrospective.
 
@@ -361,6 +378,51 @@ that running one lifts the block.
   resource is free, let another session claim it, then commit — so the branch has one
   assertion that fails by its own name.
 
+- Observation (M4, 2026-08-02): **the comma list was three defects of one shape, not
+  one.** M1 found that `agentbus claim rig,bundler` wrote a single lock named
+  `rig,bundler` and held neither. `release` and `wait` took the same string through the
+  same `resolve_lock`, so `agentbus release rig,bundler` answered "not yours" about a
+  lock that was never taken, and `agentbus wait rig,bundler` found nothing contending
+  for a name nobody uses, took it, and printed `claimed 'rig,bundler'` — a wait
+  reporting success against two resources it had not looked at, which is the exact
+  shape of the instance defect closed in M1 and of the `scope: "worktree"` one closed
+  on 2026-07-29. All three closed together here, because they were one line of code.
+
+- Observation (M4, 2026-08-02): **the test that pins the pre-filter had itself
+  drifted.** `test_matcher.py` rebuilt `refresh_derived`'s token line rather than
+  asking for it, and the rebuild was four lines short of the original: it omitted the
+  `agentbus` token that `refresh_derived` adds. Nothing failed, because the fixture's
+  only `agentbus` case expected no resources and was skipped. The moment a case was
+  added that `resources_for` DOES match through an `agentbus` line — `agentbus serve
+  bundler`, which contains none of the configured literals anywhere — the test failed
+  against an engine that is correct. A test that reconstructs the thing it is checking
+  is the plan's own opening defect, one level up; `guard_token_line` exists so that it
+  reads the string the fast paths read. This is the seventh time in this repository
+  that a green assertion was measuring the wrong thing, and the second found by
+  extending a fixture rather than by a defect.
+
+- Observation (M4, 2026-08-02): **the two fast paths disagreed about an engine without
+  its mode bits.** `bin/ab-hook` tests `[ -x "$ENGINE" ]`; `bin/hook.py` tested
+  `os.path.exists`. A checkout that lost the executable bit would therefore stop
+  guarding on macOS and go on guarding on Windows — the divergence that is worse than
+  either answer, because nobody looks for a guard that fires on one platform only. It
+  was invisible to every assertion in the suite, all of which compare decisions, and
+  most of the gate never reaches a decision: it exists to answer "nothing to do here"
+  without starting the engine. Found by putting both files through every branch
+  against a stand-in engine that records being woken, and closed with
+  `os.access(ENGINE, os.X_OK)` — which has no effect on Windows, where any existing
+  file answers yes, so nothing changes there.
+
+- Observation (M4, 2026-08-02): **`plan_for(names=…)` cannot round-trip through a
+  command, and `_lock_block` cannot offer a bypass to a verb.** The first was
+  predicted by the review and is why `names` exists. The second was not: `_lock_block`
+  builds `AGENTBUS_OFF=1 <your command>` for every lock refusal, and `AGENTBUS_OFF` is
+  read by the three hook entry points and by nothing in the command-line tool — so
+  `AGENTBUS_OFF=1 agentbus claim db` behaves exactly like `agentbus claim db`. A verb
+  rendering the full exit set would have advertised it, which is the rule this
+  milestone rests on broken by the milestone itself. The exit is now built only when
+  the Plan has a command.
+
 - Observation: the two spines were identified by classifying defects, not by reading
   code, and that is what makes this plan worth doing rather than a rewrite. Twenty-two
   defects, root causes assigned by hand: identity/location 6, one-decision-twice 6,
@@ -615,6 +677,64 @@ that running one lifts the block.
   command surface now and the file surface later.
   Date/Author: 2026-08-02, Claude.
 
+- Decision (M4): the five verbs take the Plan's lock names and its exits, and do not
+  call `commit_plan`.
+  Rationale: `commit_plan` is the guard's committer and every one of its side effects
+  is wrong for a verb. It claims `mode="soft"`, which is a one-command claim that
+  `PostToolUse` gives back, where `agentbus claim` is a deliberate hard lock that
+  outlives the command. It calls `remember_autoclaim` under a tool-call id a verb does
+  not have, so the record would be filed under `none` and released by somebody else's
+  next `post-bash`. It calls `bump_guarded`, which counts "commands this session took
+  a shared resource for" and is read by the handoff — `agentbus claim db` is not a
+  command that took a resource, it is a person taking one. And it writes the
+  `matched/` markers, which record that a resource's *patterns* still match something;
+  a verb names its resource outright and matched no pattern, so a marker written here
+  would tell `doctor` that a stale pattern is healthy. What the verbs do share is the
+  rule `commit_plan` states: the optimistic verdict is checked first so that a refusal
+  takes nothing, and `do_claim`'s answer inside the mutex is the one that counts — and
+  when it disagrees, the refusal is built by `_lock_block`, the same constructor, not
+  written out again. `note_plan_block` stays in `guard_bash`: a verb emits no block
+  event today, `announce_locks` already speaks for a deliberate claim, and a `claim`
+  that both announced itself and filed a block would be two lines for one act.
+  Date/Author: 2026-08-02, Claude.
+
+- Decision (M4): an exit that would not work is not built, which is why a Plan with no
+  command offers no `AGENTBUS_OFF`.
+  Rationale: the rule the whole milestone rests on, applied to itself. `AGENTBUS_OFF`
+  is read by `hook_pre_tool`, `hook_post_batch`, `hook_post_bash` and both fast paths,
+  and by nothing in the command-line tool. Putting it in front of `agentbus claim db`
+  changes nothing at all — it is not even a bypass, it is a no-op — so a verb that
+  rendered the block's full exit set would be advertising a line the tool ignores.
+  That is the same defect as `agentbus claim worktree`, which was advertised, allowed,
+  and wrote a lock nothing read. `_lock_block` builds the exit only when the Plan has
+  a command.
+  Date/Author: 2026-08-02, Claude.
+
+- Decision (M4): `render_refusal` is a second renderer, deliberately, and shares the
+  exits rather than the prose.
+  Rationale: `render_block` is a screen-wide banner about a Bash call the guard
+  stopped — "BLOCKED", the holder's branch and worktree, "do not work around this by
+  editing the command", the resource's `why`. Almost none of it is true of `agentbus
+  claim db` typed by a person, who already knows what they asked for and got one line
+  of answer before this. Generalising one renderer to cover both would mean a
+  paragraph-by-paragraph flag set, which is the shape that makes a message impossible
+  to read the next time somebody edits it. What must not be duplicated is the part
+  that kept being wrong, and that is the runnable lines: both take theirs from
+  `plan["exits"]` and neither composes a command. `agentbus serve` was the last thing
+  on the command surface writing its own advice — an `agentbus post --to <holder>`
+  line of its own — and it is gone.
+  Date/Author: 2026-08-02, Claude.
+
+- Decision (M4): `guard_token_line` becomes a function so the superset assertion can
+  read what the fast paths read.
+  Rationale: the pre-filter is the third copy of the gate decision and the one that
+  cannot be collapsed into `plan_for`, because its whole purpose is to answer without
+  starting the engine `resources_for` lives in. So it is held to an invariant instead.
+  A test that rebuilt the token line to check it would be the same defect one level
+  up — and was: the rebuild in `test_matcher.py` had already lost the `agentbus`
+  token, so the first `_explicit` case added to it failed against a correct engine.
+  Date/Author: 2026-08-02, Claude.
+
 ## Outcomes & Retrospective
 
 To be written at the end of M5.
@@ -642,7 +762,7 @@ doing the editing. That is the single most important operational fact in this pl
     tests/run.sh                 the runner; isolates AGENTBUS_HOME
     tests/lib.sh                 assertions and fixture builders
     tests/test_*.sh|py           fourteen files, 888 assertions
-    tests/live/acceptance.sh     36 checks against real Claude Code sessions
+    tests/live/acceptance.sh     39 checks against real Claude Code sessions
     tests/perf/hook-cost.py      where a hook's time goes, per platform
     SKILL.md / README.md         the agent-facing and human-facing documentation
     plans/publish-agent-bus-1.0.md  the plan this one continues from; read it
@@ -736,6 +856,12 @@ view: `rename_session` (2818), `follow_chat_title` (2850), `cli_name` (4593), `c
 (4602). `hook_prompt_submit` passes what it receives to `follow_chat_title`.
 
 ### Spine two as it stands: what does this command touch
+
+**Superseded by M3 and M4 as of 2026-08-02.** What follows is the shape the two
+milestones started from. `plan_for` answers the whole of it now, from a command or
+from a name; `resolve_lock` is gone; `lock_name` has two callers, `plan_for` and the
+display path `locks_text`, and an AST check keeps it that way. The two divergences
+below are still the specification and `tests/test_parity.sh` still pins them.
 
 `resources_for(cmd, cfg)` answers "which declared resources does this command touch",
 combining `explicit_resources` (a resource named outright on an `agentbus
@@ -958,7 +1084,7 @@ configuration exercising `unless`, `implies`, `key` and `_explicit`, every comma
 `resources_for` matches also matches `guard-tokens`. That is the superset invariant, it
 is the one that fails silently, and it broke once before in commit `768f183`.
 
-Acceptance: `tests/live/acceptance.sh all` passes — 36 checks against real Claude Code
+Acceptance: `tests/live/acceptance.sh all` passes — 39 checks against real Claude Code
 sessions on an isolated bus, costing real model calls, and the only check that verifies
 the payloads are real rather than what this plan assumes. Plus an AST check, added to
 `tests/check_syntax.py`, that `lock_name` is called only from `plan_for`, `locks_text`
@@ -1097,11 +1223,17 @@ New in `bin/agentbus`:
     def plan_for(me, cmd=None, names=None, sessions=None, probe_services=False) -> Plan
     def commit_plan(plan, me, sessions, tool_use_id=None) -> Plan
     def render_block(plan) -> str
+    def render_refusal(plan, note="") -> str      # M4; a verb, not the guard
+    def guard_token_line(configs) -> str          # M4; the pre-filter, extracted
 
 Removed: `resolve_lock`, last. Made private to `resolve_party`: `follow_cwd`,
-`caller_view`, `party_view`, `follow_agent_cwd`, `command_worktree`. Unchanged:
-`take_party_hint`, `leave_party_hint`, `act_as`, `acting`, `party_key`, `same_party`,
-`may_release`, `find_resource`, `locks_text`.
+`caller_view`, `party_view`, `follow_agent_cwd`, `command_worktree`. Made private to
+`plan_for`: `_named_resources`, `_named`. Changed in M4: `contending_locks` takes the
+lock name rather than a command, which is what let `locks_text` use it; `lock_name`
+honours an instance already on the resource, which is how a caller says which device
+when there is no command to read one off. Unchanged: `take_party_hint`,
+`leave_party_hint`, `act_as`, `acting`, `party_key`, `same_party`, `may_release`,
+`find_resource`, `expand_implied`, `locks_text`.
 
 New files:
 
