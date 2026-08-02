@@ -384,6 +384,17 @@ assert_equal "stack" "$(lock_keys)" "leaving only what was claimed on its own"
 ab sess-a release stack > /dev/null
 assert_equal "" "$(lock_keys)" "which goes back by name, as it always did"
 
+# And `wait`, which is the one of the three that a block message advertises.
+# `--timeout 0` because nothing is holding either of these: what is being
+# measured is the list, not the queue.
+out=$(ab sess-a wait bundler,probe --timeout 0 --why "both" 2>&1)
+assert_contains "$out" "claimed 'bundler'" "\`wait\` takes the first of a list"
+assert_contains "$out" "claimed 'probe'" "and then the second"
+assert_equal "bundler probe" "$(lock_keys)" \
+  "under their own names, not one lock named after the list"
+ab sess-a release bundler,probe > /dev/null
+assert_equal "" "$(lock_keys)" "and the bus is clear again"
+
 # The note is worth nothing where it is not printed, and it was not printed for
 # the one name an agent is most likely to type. It is computed from what was
 # typed; `<resource>@<instance>` is what the block about one device advertises,

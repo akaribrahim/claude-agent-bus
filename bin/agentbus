@@ -4876,39 +4876,50 @@ def cli_wait(args):
     me = acting(need_me(), args)
     pos = positional(args)
     if not pos:
-        print("usage: agentbus wait <resource> [--timeout 300] [--why \"...\"] "
-              "[--as <you>]", file=sys.stderr)
+        print("usage: agentbus wait <resource>[,<resource>] [--timeout 300] "
+              "[--why \"...\"] [--as <you>]", file=sys.stderr)
         sys.exit(1)
-    # The key is what the lock lives under; the name is what a person typed and
-    # what every message says back to them. For a worktree-scoped resource these
-    # differ, and showing the key would be answering in the plugin's private
-    # vocabulary. For an instance they are the same string — `simulator@ABC123`
-    # is the key and it is also what the block told the reader to type, so
-    # echoing it back is answering in theirs.
-    name, why = pos[0], opt(args, "--why", "")
-    res = resolve_lock(me, name)
+    why = opt(args, "--why", "")
+    plan = plan_for(me, names=pos[0])
+    if plan["reason"] == "no-such-resource":
+        print(render_block(plan), file=sys.stderr)
+        sys.exit(1)
     # Below the Bash tool's own default timeout, so the wait reports back rather
-    # than being killed with its queue entry left behind.
-    timeout = int(opt(args, "--timeout", "90"))
-    deadline = time.time() + timeout
-    announced = False
-    while True:
-        ok, lock, holder, _ = do_claim(me, res, why=why, mode="hard")
-        if ok:
-            print("claimed '%s'" % name)
-            return
-        if not announced:
-            enqueue(me, res)
-            emit(me["sid"], me["agent"], me["repo_key"], "note",
-                 "waiting for '%s'%s" % (name, (' — ' + why) if why else ""),
-                 to=holder.get("agent"))
-            announced = True
-            print("'%s' is held by %s; queued." % (name, holder.get("agent")),
-                  file=sys.stderr)
-        if time.time() > deadline:
-            print("timed out waiting for '%s'" % name, file=sys.stderr)
-            sys.exit(1)
-        time.sleep(3)
+    # than being killed with its queue entry left behind. One deadline for the
+    # whole list rather than one each: a caller waiting for three things has a
+    # command to run after them, and three timeouts in a row is four and a half
+    # minutes of a tool call that was told to take ninety seconds.
+    deadline = time.time() + int(opt(args, "--timeout", "90"))
+    for res in plan["resources"]:
+        # The key is what the lock lives under; `_named` is what a person typed
+        # and what every message says back to them. For a worktree-scoped
+        # resource these differ, and showing the key would be answering in the
+        # plugin's private vocabulary. For an instance they are the same string
+        # — `simulator@ABC123` is the key and it is also what the block told the
+        # reader to type, so echoing it back is answering in theirs.
+        key, name = res["lock"], _named(res)
+        announced = False
+        while True:
+            ok, lock, holder, _ = do_claim(me, key, why=why, mode="hard")
+            if ok:
+                print("claimed '%s'" % name)
+                break
+            if not announced:
+                enqueue(me, key)
+                emit(me["sid"], me["agent"], me["repo_key"], "note",
+                     "waiting for '%s'%s" % (name, (' — ' + why) if why else ""),
+                     to=holder.get("agent"))
+                announced = True
+                print("'%s' is held by %s; queued." % (name, holder.get("agent")),
+                      file=sys.stderr)
+            if time.time() > deadline:
+                # Whatever earlier names in the list were taken stay taken, the
+                # same way `agentbus claim` leaves a partial list alone once it
+                # has spoken for it. Giving them back would race the session
+                # that is about to be told this one is queueing.
+                print("timed out waiting for '%s'" % name, file=sys.stderr)
+                sys.exit(1)
+            time.sleep(3)
 
 
 def enqueue(me, res):
