@@ -9,7 +9,22 @@
 
 . "$AB_ROOT/tests/lib.sh"
 
-BUDGET_MS="${AGENTBUS_SOLO_BUDGET_MS:-400}"
+# Both cost checks below are RATIOS against a floor measured in the same run,
+# not wall-clock budgets. They used to be budgets, and on 2026-08-02 one of them
+# failed once in five suite runs with nothing wrong: this Mac had six Claude Code
+# sessions on eight cores, load average 10, and 20 calls took 517 ms against a
+# 400 ms budget. Two days later it failed two runs in three under the same load.
+#
+# The mitigation already here — best of three batches — is not enough, because
+# under real load every batch is slow. A budget measured in milliseconds on a
+# machine whose whole purpose is running several agents at once is measuring the
+# machine. The property is a ratio, and a ratio survives load because the floor
+# inflates with it. Same lesson as the plugin's own performance gate, which was
+# moved off absolute figures for exactly this reason and then turned out not to
+# resolve on the delta either.
+#
+# `AGENTBUS_SOLO_MAX_X100` overrides the multiple, in hundredths.
+MAX_X100="${AGENTBUS_SOLO_MAX_X100:-500}"
 ROUNDS=20
 
 REPO=$(make_repo solorepo)
@@ -70,23 +85,37 @@ assert_equal 0 "$(locks_held)" "alone, nothing is ever claimed"
 
 now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
 
-best=""
-for _batch in 1 2 3; do
-  started=$(now_ms)
-  for _ in $(seq 1 "$ROUNDS"); do
-    printf '%s' "$PAYLOAD" | bash "$AB_ROOT/bin/ab-hook" pre-tool > /dev/null 2>&1
+# The best of three batches, not one or an average: noise can only make a batch
+# slower, so the fastest is the closest estimate of what the thing itself costs.
+fastest() {   # <command, run $ROUNDS times> → milliseconds
+  local best="" started elapsed
+  for _batch in 1 2 3; do
+    started=$(now_ms)
+    for _ in $(seq 1 "$ROUNDS"); do
+      eval "$1" > /dev/null 2>&1
+    done
+    elapsed=$(( $(now_ms) - started ))
+    if [ -z "$best" ] || [ "$elapsed" -lt "$best" ]; then
+      best="$elapsed"
+    fi
   done
-  elapsed=$(( $(now_ms) - started ))
-  if [ -z "$best" ] || [ "$elapsed" -lt "$best" ]; then
-    best="$elapsed"
-  fi
-done
+  printf '%d' "${best:-0}"
+}
 
-if [ "$best" -le "$BUDGET_MS" ]; then
-  _ok "$ROUNDS fast-path calls in ${best}ms (budget ${BUDGET_MS}ms)"
+# The floor: starting bash $ROUNDS times and doing nothing. A fast path that
+# short-circuits is that plus one small file read. One that wakes the engine is
+# that plus a Python start and a 6700-line recompile — an order of magnitude,
+# not a percentage — so the multiple separates the two however busy the laptop is.
+floor=$(fastest "bash -c :")
+[ "$floor" -lt 1 ] && floor=1
+
+fast=$(fastest 'printf "%s" "$PAYLOAD" | bash "$AB_ROOT/bin/ab-hook" pre-tool')
+ratio=$(( 100 * fast / floor ))
+if [ "$ratio" -le "$MAX_X100" ]; then
+  _ok "the fast path costs ${ratio}% of a bare bash start (limit ${MAX_X100}%)"
 else
-  _bad "$ROUNDS fast-path calls in ${best}ms (budget ${BUDGET_MS}ms)" \
-    "the gate that makes a solo session free is not short-circuiting"
+  _bad "the fast path costs ${ratio}% of a bare bash start (limit ${MAX_X100}%)" \
+    "the gate that makes a solo session free is not short-circuiting: ${fast}ms against a ${floor}ms floor for $ROUNDS calls"
 fi
 
 # post-batch is the one event that does NOT simply give up when alone: a session
@@ -99,25 +128,23 @@ fi
 # payload a gate that short-circuits and one that reads the whole thing and
 # gives up two checks later are indistinguishable — 109 ms against 113 ms for
 # twenty calls. At 128 KB the same pair is 109 ms against roughly 800 ms.
-BATCH=$(payload batch sid=sess-solo "cwd=$REPO" pad=131072)
-best=""
-for _batch in 1 2 3; do
-  started=$(now_ms)
-  for _ in $(seq 1 "$ROUNDS"); do
-    printf '%s' "$BATCH" | bash "$AB_ROOT/bin/ab-hook" post-batch > /dev/null 2>&1
-  done
-  elapsed=$(( $(now_ms) - started ))
-  if [ -z "$best" ] || [ "$elapsed" -lt "$best" ]; then
-    best="$elapsed"
-  fi
-done
-
-if [ "$best" -le "$BUDGET_MS" ]; then
-  _ok "$ROUNDS solo post-batch calls in ${best}ms (budget ${BUDGET_MS}ms)"
-else
-  _bad "$ROUNDS solo post-batch calls in ${best}ms (budget ${BUDGET_MS}ms)" \
-    "the unread check is waking the engine when there is nothing to deliver"
-fi
+# There is deliberately no timing assertion for it, and the reason is worth
+# leaving here because the obvious one looks convincing and is not.
+#
+# The figures above came from a version of the gate that read the payload in
+# bash before deciding, a byte at a time. It does not any more: `unread` reads
+# `events.seq` and the cursor files, all small, and stdin is passed through to
+# the engine untouched. So the small-against-large ratio no longer moves when
+# the gate breaks — a `PAY=$(cat)` put back in front of it was measured at under
+# a millisecond against 128 KB, invisible beside the cost of starting bash at
+# all. An assertion on it passed with the gate deliberately broken, which is the
+# definition of measuring nothing.
+#
+# The property itself is tested exactly rather than by stopwatch, in
+# `tests/test_pyhook.sh`: a `post-batch` with nothing unread must not wake the
+# engine, asserted against a stub engine that records whether it was run, and
+# asserted of BOTH fast paths so they cannot drift apart. That is the check;
+# this file's job is the cost of the door that is already known to be shut.
 
 # ---- the off switch --------------------------------------------------------
 #
