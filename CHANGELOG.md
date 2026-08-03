@@ -2,6 +2,33 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.3.0 — 2026-08-04
+
+Stop announcing a step over the guard that stepped over nothing.
+
+Every `AGENTBUS_OFF=1` put a line on the bus, whether or not it overrode
+anything, and that turns out to hide the ones that matter. Counted over 48 hours
+on the machine this plugin is developed on: 88 of them, of which **76 — 86 per
+cent — would not have matched a single resource.** Agents had learned to write
+the prefix by habit; `sleep 30` and `ps ax | grep` were in there. The twelve
+real ones were somewhere in that noise, six of them driving the one simulator
+the plugin exists to serialise, and the roster is where somebody looking for
+them would have looked.
+
+- The announcement now happens only when the command really would have been
+  guarded, and it **names what was stepped over** — `ran past the guard on
+  'simulator', 'api'` rather than a bare prefix. The escape hatch is still
+  recorded, because a guard everybody can step over quietly is not a guard; an
+  opt-out that overrode nothing was never a step over the guard at all.
+- **`ps`, `pgrep` and `lsof` are read-only.** Asking which processes are running
+  is not running them, and `pgrep -f psql` was matching a database and being
+  stepped over. `kill` and `pkill` are deliberately still guarded: killing the
+  process that serves a resource is the most decisive way of touching it there
+  is, and there is now an assertion whose job is to stop that being tidied away.
+
+The opt-out path pays a resource match it used to skip, which is the same work
+any guarded command already does.
+
 ## 2.2.0 — 2026-08-02
 
 **`agentbus post --all`** reaches every live session on the machine, not just

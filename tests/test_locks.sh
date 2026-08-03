@@ -318,14 +318,90 @@ out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
 assert_allow "$out" "and taking that offer really does get past"
 assert_equal 1 "$(locks_held)" "without claiming anything on the way"
 
-# It is an override, not a hole: the others can see it was taken.
-assert_contains "$(ab sess-a inbox)$(lock_lines)$(ab sess-a status)" \
-  "ran past the guard" "and stepping over a guard leaves a trace on the bus"
+# It is an override, not a hole: the others can see it was taken, and what of.
+trace=$(ab sess-a inbox)$(lock_lines)$(ab sess-a status)
+assert_contains "$trace" "ran past the guard" \
+  "and stepping over a guard leaves a trace on the bus"
+assert_contains "$trace" "'db'" "which names the resource that was stepped over"
 
 # A value that means "off" is not an opt-out.
 out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
   "cmd=AGENTBUS_OFF=0 $CMD" id=off-3)")
 assert_deny "$out" "AGENTBUS_OFF=0 is not an opt-out"
+ab sess-a release db > /dev/null
+
+# ---- an opt-out that overrode nothing is not a step over the guard ----------
+#
+# Measured on the machine this plugin was written on, over 48 hours: 88
+# AGENTBUS_OFF prefixes, of which 76 — 86 per cent — would not have matched a
+# single resource. Agents had learned to write it by habit, `sleep 30` and
+# `ps ax | grep` included, and every one of them put a line on the bus. The
+# twelve real ones were lost in that, six of them driving the one simulator
+# this plugin exists to serialise, and the roster is where somebody looking for
+# them would look.
+#
+# So the announcement is about what was overridden, not about the prefix being
+# typed. This costs the opt-out path a `resources_for` it used to skip, which is
+# the same work any guarded command already does.
+
+# Counted off the event file and filtered on the kind the announcement actually
+# uses. `lock_lines` filters to `kind == "lock"` and an opt-out is a `block`, so
+# counting through it compared nothing to nothing — the first version of this
+# assertion passed with the fix reverted, which is the whole reason the rule
+# below is that a test is not believed until it has been seen to fail.
+steps_over() {   # → how many times the bus has recorded a step over the guard
+  python3 -c "
+import json
+try:
+    fh = open('$AGENTBUS_HOME/events.jsonl')
+except OSError:
+    raise SystemExit(print(0))
+n = 0
+for line in fh:
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        continue
+    if rec.get('kind') == 'block' and 'ran past the guard' in (rec.get('text') or ''):
+        n += 1
+print(n)"
+}
+
+before=$(steps_over)
+assert_equal 1 "$before" "one step over the guard has been recorded so far"
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=AGENTBUS_OFF=1 sleep 30" id=off-4)")
+assert_allow "$out" "a command that touches nothing is allowed, opted out or not"
+assert_equal "$before" "$(steps_over)" \
+  "and opting out of nothing says nothing on the bus"
+
+# And the announcement still happens for a real one, so the assertion above is
+# not passing because announcements stopped altogether.
+ab sess-a claim db --why "seeding again" > /dev/null
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=AGENTBUS_OFF=1 $CMD" id=off-5)")
+assert_allow "$out" "an opt-out that really overrides something still gets past"
+assert_equal $((before + 1)) "$(steps_over)" "and is still recorded when it does"
+ab sess-a release db > /dev/null
+
+# ---- asking what is running is not running it -------------------------------
+#
+# `pgrep -f psql` and `lsof -c psql` name the guarded word and do nothing with
+# it, and both were matching the database and being stepped over. `kill` and
+# `pkill` are deliberately NOT read-only: killing the process that serves a
+# resource is the most decisive way of touching it there is, and that assertion
+# is here so the exclusion cannot be tidied away later.
+
+ab sess-a claim db --why "holding it so a match would be refused" > /dev/null
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=pgrep -f psql" id=ro-1)")
+assert_allow "$out" "looking for the database's process is not using it"
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=lsof -c psql" id=ro-2)")
+assert_allow "$out" "nor is asking what it has open"
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=pkill -f psql" id=ro-3)")
+assert_deny "$out" "but killing it is still guarded, and stays that way"
 ab sess-a release db > /dev/null
 
 # ---- a resource can say when a command is not about it ----------------------

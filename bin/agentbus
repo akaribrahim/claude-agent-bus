@@ -131,6 +131,12 @@ READONLY_HEADS = {
     "less", "more", "file", "stat", "which", "type", "man", "diff",
     "pwd", "date", "true", "false", "test", "basename", "dirname", "realpath",
     "code", "open", "agentbus",
+    # Asking what is running is not running it. `ps ax | grep "[a]lembic"` was
+    # matching the database and being stepped over with AGENTBUS_OFF; looking
+    # for a process is how an agent works out whether it needs the thing at all.
+    # `kill` and `pkill` are deliberately NOT here: killing the process that
+    # serves a resource is the most decisive way there is of touching it.
+    "ps", "pgrep", "lsof",
 }
 
 # `git` is not read-only as a whole: checkout, switch, stash, reset, rebase,
@@ -4262,7 +4268,20 @@ def plan_for(me, cmd=None, names=None, sessions=None, probe_services=False):
         # this plan, because a guard everybody can step over quietly is not a
         # guard — this is the only place the plugin lets a command past a
         # decision it would otherwise have made.
-        return _plan(cmd, "allow", "opted-out")
+        #
+        # But only when it stepped over something. The resources are worked out
+        # here rather than skipped, because announcing every `AGENTBUS_OFF` was
+        # measured on this machine and it hides the ones that matter: over 48
+        # hours, 88 of them, of which 76 — 86 per cent — would not have matched
+        # a single resource. Agents had learned to write the prefix by habit,
+        # `sleep 30` and `ps ax | grep` included, and every one of those put a
+        # line on the bus. The twelve real ones were somewhere in the noise, six
+        # of them driving the simulator this plugin exists to serialise, and
+        # nobody reading `agentbus status` was going to find them.
+        cfg = repo_config(me.get("repo_key", ""), me.get("root"))
+        over = [h["name"] for h in resources_for(cmd, cfg)
+                if not h.get("_passthrough")]
+        return _plan(cmd, "allow", "opted-out", blocker={"overrode": over})
     cfg = repo_config(me.get("repo_key", ""), me.get("root"))
     sessions = sessions if sessions is not None else load_sessions()
     if names is None:
@@ -4599,9 +4618,15 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
     if plan["reason"] == "opted-out":
         # Said out loud, because a guard everybody can step over quietly is not
         # a guard. This is the only place the plugin lets a command past a
-        # decision it would otherwise have made.
-        emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
-             "ran past the guard with AGENTBUS_OFF — %s" % cmd.strip()[:120])
+        # decision it would otherwise have made — and the line now names what
+        # was stepped over, so a reader can tell the six maestro runs from the
+        # eighty `sleep 30`s. An opt-out that overrode nothing is not a step over
+        # the guard at all; see `plan_for`.
+        over = (plan.get("blocker") or {}).get("overrode") or []
+        if over:
+            emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
+                 "ran past the guard on %s with AGENTBUS_OFF — %s"
+                 % (", ".join("'%s'" % n for n in over), cmd.strip()[:120]))
         return
     plan = commit_plan(plan, me, sessions, payload_tool_use_id)
     if plan["verdict"] == "allow":
