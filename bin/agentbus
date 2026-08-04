@@ -1923,11 +1923,19 @@ def ledger_view(repo_key, sessions, locks=None, writes=None, at=None):
     maintenance. `sweep_tasks` does that, from the hooks a person's own actions
     drive.
 
-    A headless merge worker is the obvious next reader: a task whose state is
-    `done`, whose owner's branch is ahead of the trunk, and which nothing else is
-    waiting on, is a merge candidate. It should read this and never write the
-    ledger — closing somebody else's task is a declaration, and only the party
-    that did the work can make it."""
+    `merge_view` is the reader this was written for: a task whose state is `done`
+    and whose branch is ahead of the trunk is a merge candidate. It reads this and
+    never writes the ledger — closing somebody else's task is a declaration, and
+    only the party that did the work can make it.
+
+    The third condition this docstring used to name — "and which nothing else is
+    waiting on" — filtered nothing, and it is worth leaving the correction here
+    rather than quietly deleting it. `waiters` below is only built from tasks that
+    are still open and only for refs that are NOT in `finished`, so a done task's
+    `waiting` is empty by construction. A candidate filtered on it would have
+    looked careful and measured the empty set. The condition that does carry
+    information is the other direction, `blocked_by`: a task its own owner
+    declared finished while the thing it was built on has not landed."""
     led = load_ledger(repo_key)
     if not led["tasks"]:
         return []
@@ -5665,6 +5673,12 @@ tr.task td:first-child{padding-left:30px}
 tr.task .tid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600}
 tr.task .what{overflow-wrap:anywhere}
 tr.blocked{background:var(--wait)}
+/* What would happen if the finished work landed together. Read-only, like the
+   rest of the page, and deliberately with nothing here to press: the command is
+   printed as text because a control that spends model calls when it is clicked
+   is a different kind of object from a window that only watches. */
+tr.land .mono{font-weight:600}
+tr.pair td{padding:6px 14px;color:var(--dim);font-size:12px}
 .tag.st-done{border-color:var(--green);color:var(--green)}
 .tag.st-dropped{border-color:var(--red);color:var(--red);font-weight:600}
 .files{cursor:pointer;color:var(--dim);font-size:12px;text-decoration:underline dotted}
@@ -5689,6 +5703,9 @@ tr.blocked{background:var(--wait)}
  <section class="full"><h2>Services</h2><table><thead><tr><th>Service</th>
   <th>Serving</th><th>Started by</th><th>Held by</th><th>State</th></tr></thead>
   <tbody id="serves"></tbody></table></section>
+ <section class="full"><h2>Landing</h2><table><thead><tr><th>Branch</th>
+  <th>Ahead</th><th>Onto trunk</th><th>Checkout</th><th>Finished work</th></tr>
+  </thead><tbody id="landing"></tbody></table></section>
  <section class="full"><h2>Feed</h2><div id="feed"></div></section>
 </main>
 <script>
@@ -5858,6 +5875,44 @@ function fillTask(tr, it){var t = it.t, c = tr.c;
    (t.wrote_n > t.wrote.length ? "\n+" + (t.wrote_n - t.wrote.length) + " older" : ""));
  put(c.when, t.state === "done" ? "done " + ago(t.done_at, it.now) + " ago"
    : "for " + ago(t.at, it.now));}
+/* ---- what would happen if the finished work landed together --------------- */
+function makeLand(){var tr = el("tr", "land"), c = {}, td = add(tr, "td");
+ c.branch = add(td, "span", "name mono");
+ c.ahead = add(tr, "td", "mono");
+ td = add(tr, "td");
+ c.onto = add(td, "span"); c.oconf = add(td, "div", "clash");
+ td = add(tr, "td", "mono");
+ c.root = add(td, "span"); c.dirty = add(gap(td), "div", "warn");
+ td = add(tr, "td");
+ c.tasks = add(td, "div", "clash");
+ c.files = add(td, "div", "files"); c.list = add(td, "div", "list");
+ c.files.onclick = function(){c.list.classList.toggle("open");};
+ tr.c = c; return tr;}
+function fillLand(tr, it){var b = it.b, c = tr.c;
+ put(c.branch, b.branch);
+ put(c.ahead, "+" + b.ahead + (b.behind ? " / -" + b.behind : ""));
+ put(c.onto, b.onto === "clean" ? "clean" :
+   b.onto === "conflict" ? "conflicts" : "not computable");
+ mark(c.onto, "ok", b.onto === "clean");
+ mark(c.onto, "bad", b.onto !== "clean");
+ put(c.oconf, b.onto === "conflict" ? b.onto_conflicts.join("\n")
+   : b.onto === "unknown" ? b.onto_why : "");
+ shown(c.oconf, b.onto !== "clean");
+ mark(c.oconf, "bad", b.onto === "conflict");
+ put(c.root, b.root || "not checked out");
+ /* The difference between "ready" and "looks ready": the branch is ahead, and
+    its checkout still has work in it that a merge of the branch would not take. */
+ put(c.dirty, b.dirty ? b.dirty + " uncommitted" : "");
+ shown(c.dirty, !!b.dirty);
+ put(c.tasks, b.tasks.map(function(t){
+   return t.id + "  " + t.what + " — " + t.agent +
+     (t.note ? ", “" + t.note + "”" : "");}).join("\n"));
+ put(c.files, b.files_n + (b.files_n === 1 ? " file" : " files") + " changed");
+ shown(c.files, !!b.files_n);
+ put(c.list, b.files.join("\n") +
+   (b.files_n > b.files.length ? "\n+" + (b.files_n - b.files.length) + " more" : ""));}
+function makePair(){var tr = el("tr", "pair");
+ tr.c = {t: add(tr, "td")}; tr.c.t.colSpan = 5; return tr;}
 function makeGrp(){var tr = el("tr", "grp");
  tr.c = {t: add(tr, "td")}; tr.c.t.colSpan = 5; return tr;}
 function makeNone(){var tr = el("tr");
@@ -6005,6 +6060,42 @@ function render(d){
    function(node, it){
      if(it.kind === "serve") fillServe(node, it); else fillSpan(node, it);});
 
+ /* Read-only, and computed off the poll: a `merge-tree` per pair of branches for
+    as long as a tab is open is not a cost a window that only watches may impose.
+    An absent view means not computed yet, which the page says rather than
+    implying there is nothing to land. */
+ var lands = (d.landing || []).filter(keep), lr = [];
+ lands.forEach(function(L){
+  if(!L.candidates.length) return;
+  var lbl = L.repo;
+  d.repos.forEach(function(r){if(r.key === L.repo) lbl = r.label || r.key;});
+  lr.push({k: "lg:" + L.repo, kind: "grp", label: lbl + " → " + L.trunk});
+  L.candidates.forEach(function(b){
+    lr.push({k: "lb:" + L.repo + ":" + b.branch, kind: "land", b: b});});
+  L.pairs.forEach(function(p){
+    if(p.state === "clean" && !p.both.length) return;
+    lr.push({k: "lp:" + L.repo + ":" + p.a + ":" + p.b, kind: "pair",
+      label: p.state === "conflict"
+        ? p.a + " and " + p.b + " CONFLICT in " + p.conflicts.join(", ")
+        : p.state === "unknown"
+        ? p.a + " and " + p.b + " could not be compared — " + p.why
+        : p.a + " and " + p.b + " both touch " + p.both.join(", ") +
+          " — and merge cleanly"});});
+  if(L.more) lr.push({k: "lm:" + L.repo, kind: "pair",
+    label: "+" + L.more + " more finished branches, not compared"});
+  /* Printed, not wired to anything. The human runs it. */
+  lr.push({k: "lh:" + L.repo, kind: "pair",
+    label: "agentbus merges for the detail · agentbus integrate --yes "
+      + "does the merge in a scratch worktree, and spends model calls"});});
+ if(!lr.length) lr = [{k: "none", kind: "empty", label: lands.length
+   ? "nothing finished is ahead of the trunk"
+   : "not computed yet — the poll runs no git"}];
+ sync(document.getElementById("landing"), lr, function(it){
+   return it.kind === "land" ? makeLand() : it.kind === "grp" ? makeGrp()
+     : it.kind === "pair" ? makePair() : makeNone();},
+  function(node, it){
+   if(it.kind === "land") fillLand(node, it); else fillSpan(node, it);});
+
  newest = ev.length ? ev[0].i : 0;
  /* Only when something really has arrived since the reader last looked away: a
     divider with nothing above it is a line drawn for its own sake. */
@@ -6044,19 +6135,34 @@ _GIT = {}                 # root -> {"at": ts, "ahead": int|None, "base": str}
 _GIT_RUNNING = set()      # roots a refresh thread already has in hand
 
 
+def git_probe(root, args, env=None, timeout=20):
+    """(exit code, stdout, stderr) for one git command in `root`.
+
+    The exit code is kept because the interesting git commands here say what they
+    found *through* it: `merge-tree` exits 0 for a clean merge and 1 for a
+    conflicted one, and both are answers. `git_out` throws that away, which is
+    right for a command asked only for its number and wrong for one asked a
+    question. Never raises: a git that is missing, wedged or past its timeout is
+    reported as a failed command, because a coordination layer may not be the
+    reason a session breaks."""
+    import subprocess
+    try:
+        out = subprocess.run(("git",) + tuple(args), cwd=root or None,
+                             capture_output=True, text=True, timeout=timeout,
+                             env=env)
+    except Exception as exc:
+        return 1, "", str(exc)
+    return out.returncode, out.stdout, (out.stderr or "").strip()
+
+
 def git_out(root, *args):
     """One read-only git command in `root`; "" if it fails or has nothing to say.
 
     Ten seconds is a long timeout for `rev-list`, and deliberate: this only ever
     runs off the request path, so the cost of waiting is one stale number rather
     than a page that will not load."""
-    import subprocess
-    try:
-        out = subprocess.run(("git",) + args, cwd=root, capture_output=True,
-                             text=True, timeout=10)
-    except Exception:
-        return ""
-    return out.stdout.strip() if out.returncode == 0 else ""
+    rc, out, _ = git_probe(root, args, timeout=10)
+    return out.strip() if rc == 0 else ""
 
 
 def default_base(root, known=""):
@@ -6129,6 +6235,361 @@ def _git_refresh(root):
         _GIT_RUNNING.discard(root)
 
 
+# ------------------------------------------------------------- landing ------
+#
+# What would happen if the finished work landed together.
+#
+# The question this answers is the one the person running several chats actually
+# asks, and it is the last thing they were still doing by hand: "these two both
+# say they are done — can I put them on the trunk, and what will fight?"
+#
+# None of it needs a model. The ledger says which work is finished and on which
+# branch; git can compute the rest exactly. So this layer is deterministic,
+# free, and instant, and it is the only part of landing that runs every day.
+# `agentbus integrate` is the part that costs money, and it starts from here.
+#
+# Two properties this section is built around.
+#
+# It touches nothing. Every candidate branch is checked out in a worktree
+# somebody is working in *right now*, so a merge, a checkout, an index refresh
+# or a stash would rewrite files under a running session mid-tool-call — the one
+# recovery this project's own plan says never to do. `git merge-tree` is what
+# makes that avoidable: it merges two commits in memory and reports the
+# conflicts without a working tree, an index or a ref anywhere in the picture.
+# Its `--write-tree` mode does put the merged tree in the object store, so the
+# object store is redirected too (`read_only_git_env`) and even those unreferenced
+# blobs land in a temporary directory that is deleted afterwards. What is left is
+# a set of git commands that cannot write to the repository at all.
+#
+# It reasons about branches, not checkouts. A ref is visible from every worktree
+# of a repository, so all of this runs in the caller's own checkout and never
+# reads anybody else's — with one deliberate exception, `dirty_count`, which has
+# to look at the other worktree because uncommitted work is the difference
+# between "ready" and "looks ready". Reading it is safe; only writing is not.
+
+MERGE_TTL = 30            # seconds a computed landing view is still served for
+MERGE_MAX = 6             # branches compared pairwise before the rest is a count
+_MERGE = {}               # repo key -> {"at": ts, "view": {...}}
+_MERGE_RUNNING = set()    # repo keys a refresh thread already has in hand
+
+
+def read_only_git_env(root):
+    """(environment, scratch directory) that make `merge-tree` unable to write.
+
+    `merge-tree --write-tree` writes the tree it merged, and any blob it had to
+    merge, into the object database. Nothing references them and `git gc` removes
+    them eventually, so it is harmless — but "harmless" is not the promise this
+    layer makes, and a promise that has to be qualified is one nobody can test.
+    Pointing `GIT_OBJECT_DIRECTORY` at a temporary directory and naming the real
+    one as an alternate makes the writes go somewhere else while every existing
+    object is still readable, so the repository comes out byte-identical.
+
+    Returns the unmodified environment when the common directory cannot be found.
+    That path is still no merge, no checkout, no index and no ref — only a few
+    unreferenced objects — and refusing to answer at all would be worse."""
+    import tempfile
+    common = git_out(root, "rev-parse", "--path-format=absolute",
+                     "--git-common-dir")
+    objects = os.path.join(common, "objects") if common else ""
+    if not common or not os.path.isdir(objects):
+        return None, ""
+    scratch = tempfile.mkdtemp(prefix="agentbus-preview-")
+    env = dict(os.environ)
+    env["GIT_OBJECT_DIRECTORY"] = os.path.join(scratch, "objects")
+    env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = objects
+    try:
+        os.makedirs(env["GIT_OBJECT_DIRECTORY"])
+    except OSError:
+        return None, scratch
+    return env, scratch
+
+
+def merge_tree(root, a, b, env=None):
+    """("clean"|"conflict"|"unknown", conflicting paths, why) for merging b into a.
+
+    The three answers are not two. `merge-tree` exits 1 both for a merge that
+    conflicts and for a ref it cannot resolve, and the second must never be
+    reported as the first: "nothing conflicts" about a branch that has been
+    deleted is the kind of green answer that gets somebody to run a merge. What
+    separates them is stdout — a computed merge always prints its tree, and a
+    refused one prints nothing at all."""
+    rc, out, err = git_probe(root, ("merge-tree", "--write-tree", "--name-only",
+                                   "-z", a, b), env=env)
+    if not out:
+        return "unknown", [], err.split("\n")[0] if err else "git said nothing"
+    # -z framing: the tree, then one field per conflicting path, then an empty
+    # field, then the informational messages in groups of four. The empty field
+    # is the terminator, which is why this stops rather than filtering.
+    names = []
+    for field in out.split("\0")[1:]:
+        if not field:
+            break
+        names.append(field)
+    if rc == 0:
+        return "clean", [], ""
+    if not names:
+        return "unknown", [], err.split("\n")[0] if err else "conflicted, unnamed"
+    return "conflict", names, ""
+
+
+def worktree_paths(root):
+    """{branch: the checkout it is in} for every worktree of this repository.
+
+    From git rather than from the session list, because a branch whose chat has
+    gone still has a checkout and still has work on it — which is exactly the
+    case somebody merging is looking at."""
+    out, here = {}, ""
+    for line in git_out(root, "worktree", "list", "--porcelain").split("\n"):
+        if line.startswith("worktree "):
+            here = line[9:]
+        elif line.startswith("branch refs/heads/") and here:
+            out[line[18:]] = here
+    return out
+
+
+def dirty_count(root):
+    """How many files are modified or untracked in `root`, or None if unasked.
+
+    `--no-optional-locks` is the whole reason this is safe to point at somebody
+    else's checkout: a plain `git status` refreshes the index as it goes, which is
+    a write to a file a running session is using. This asks the same question
+    without taking the lock that would let it answer by writing."""
+    if not root or not os.path.isdir(root):
+        return None
+    rc, out, _ = git_probe(root, ("--no-optional-locks", "status", "--porcelain"))
+    if rc != 0:
+        return None
+    return len([l for l in out.split("\n") if l.strip()])
+
+
+def merge_view(repo_key, sessions, root, limit=MERGE_MAX):
+    """What the finished work would do if it landed on the trunk together.
+
+    Reads the ledger and never writes it: closing somebody else's task is a
+    declaration, and only the party that did the work can make it. The whole of
+    this function is reads — see the section comment above for what that is worth
+    and how it is kept true.
+
+    A candidate is a *branch*, not a task, because a branch is the thing that
+    gets merged. Two finished tasks on one branch land together whether anybody
+    meant them to or not, and a view organised by task would offer a choice that
+    does not exist."""
+    import shutil
+    trunk = default_base(root)
+    view = {"repo": repo_key, "trunk": trunk, "at": now(), "computed": True,
+            "candidates": [], "pairs": [], "skipped": [], "more": 0}
+    rows = [t for t in ledger_view(repo_key, sessions) if t["state"] == "done"]
+    if not trunk or not rows:
+        return view
+
+    def held_back(t, why):
+        view["skipped"].append({"id": t["id"], "what": t["what"],
+                                "agent": t["agent"], "branch": t["branch"],
+                                "why": why})
+
+    by_branch = {}
+    for t in rows:
+        if not t["branch"]:
+            # Nothing to merge and nothing to name: a task taken in a checkout
+            # with no branch at all, which happens in a repository whose first
+            # commit has not been made.
+            held_back(t, "no branch recorded")
+            continue
+        by_branch.setdefault(t["branch"], []).append(t)
+
+    trees = worktree_paths(root)
+    env, scratch = read_only_git_env(root)
+    try:
+        ready, files = [], {}
+        for branch in sorted(by_branch):
+            group = by_branch[branch]
+            rc, out, _ = git_probe(root, ("rev-parse", "--verify", "--quiet",
+                                          branch + "^{commit}"))
+            if rc != 0 or not out.strip():
+                for t in group:
+                    held_back(t, "that branch is gone")
+                continue
+            # A finished task still waiting on something unfinished is the one
+            # state that holds a whole branch back, and it is the condition the
+            # comment in `ledger_view` was reaching for. Its own `waiting` cannot
+            # be it: `ledger_view` only records a waiter against a task that is
+            # NOT yet finished, so a done task's `waiting` is empty by
+            # construction and a candidate filtered on it filters nothing. This
+            # is the direction that carries information — the agent has declared
+            # its work finished while the thing it was built on has not landed,
+            # and half a branch cannot be merged.
+            blocked = [t for t in group if t["blocked_by"]]
+            if blocked:
+                for t in group:
+                    held_back(t, "%s is waiting for %s to land"
+                              % (blocked[0]["id"],
+                                 ", ".join(blocked[0]["blocked_by"])))
+                continue
+            ahead = git_out(root, "rev-list", "--count",
+                            "%s..%s" % (trunk, branch))
+            behind = git_out(root, "rev-list", "--count",
+                             "%s..%s" % (branch, trunk))
+            if not ahead.isdigit() or int(ahead) == 0:
+                for t in group:
+                    held_back(t, "nothing on it that %s does not have" % trunk)
+                continue
+            changed = [p for p in git_out(root, "diff", "--name-only",
+                                          "%s...%s" % (trunk, branch)).split("\n")
+                       if p]
+            state, conflicts, why = merge_tree(root, trunk, branch, env)
+            where = trees.get(branch, "")
+            files[branch] = changed
+            ready.append({
+                "branch": branch, "ahead": int(ahead),
+                "behind": int(behind) if behind.isdigit() else 0,
+                "files": changed[:BOARD_FILES], "files_n": len(changed),
+                "root": short_path(where) if where else "",
+                "dirty": dirty_count(where) if where else None,
+                "onto": state, "onto_conflicts": conflicts[:BOARD_FILES],
+                "onto_why": why,
+                "tasks": [{"id": t["id"], "what": t["what"], "agent": t["agent"],
+                           "note": t["note"], "done_at": t["done_at"],
+                           "owner_live": t["owner_live"]} for t in group]})
+        # Newest first when there are more than can be compared pairwise, so the
+        # ones cut are the ones that have been sitting longest, then back into
+        # branch order so the page does not reshuffle between polls.
+        ready.sort(key=lambda c: -max([t["done_at"] for t in c["tasks"]] or [0]))
+        view["more"] = max(0, len(ready) - limit)
+        view["candidates"] = sorted(ready[:limit], key=lambda c: c["branch"])
+        cands = view["candidates"]
+        for i, a in enumerate(cands):
+            for b in cands[i + 1:]:
+                state, conflicts, why = merge_tree(root, a["branch"],
+                                                   b["branch"], env)
+                both = sorted(set(files[a["branch"]]) & set(files[b["branch"]]))
+                view["pairs"].append({
+                    "a": a["branch"], "b": b["branch"], "state": state,
+                    "why": why, "conflicts": conflicts[:BOARD_FILES],
+                    "both": both[:BOARD_FILES], "both_n": len(both)})
+    finally:
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
+    return view
+
+
+def merges_cached(repo_key, root):
+    """A landing view for the board, from cache only. None is "not computed yet".
+
+    The same bargain `git_ahead` makes, for a heavier reason. One poll of a page
+    left open in a tab would otherwise run a `merge-tree` per pair of branches
+    for as long as the tab is open, and a window that only watches has no
+    business imposing that. So the request path runs no git at all: it serves what
+    the cache holds and hands the work to a thread."""
+    ent = _MERGE.get(repo_key)
+    age = now() - ent["at"] if ent else None
+    if repo_key and root and (age is None or age >= MERGE_TTL // 2) \
+            and repo_key not in _MERGE_RUNNING:
+        _MERGE_RUNNING.add(repo_key)
+        import threading
+        threading.Thread(target=_merge_refresh, args=(repo_key, root),
+                         daemon=True).start()
+    if ent and age < MERGE_TTL:
+        return ent["view"]
+    return None
+
+
+def _merge_refresh(repo_key, root):
+    try:
+        # Its own session list: the poll's is a snapshot from before the thread
+        # started, and reading them again costs a directory listing against
+        # several seconds of git.
+        _MERGE[repo_key] = {"at": now(),
+                            "view": merge_view(repo_key, load_sessions(), root)}
+    except Exception:
+        _MERGE[repo_key] = {"at": now(), "view": None}
+    finally:
+        _MERGE_RUNNING.discard(repo_key)
+
+
+def merges_text(view):
+    """The landing view as text, for `agentbus merges` and for what `integrate`
+    prints before it spends anything."""
+    trunk = view["trunk"]
+    if not trunk:
+        return ("agent-bus: this repository has no default branch to land on, "
+                "so there is nothing to compare against.")
+    lines = []
+    cands = view["candidates"]
+    if not cands:
+        lines.append("agent-bus: nothing is ready to land on %s." % trunk)
+    else:
+        lines.append("agent-bus: %d branch%s ready to land on %s"
+                     % (len(cands), "" if len(cands) == 1 else "es", trunk))
+        for c in cands:
+            head = "  %-24s +%d commit%s, %d file%s" % (
+                c["branch"], c["ahead"], "" if c["ahead"] == 1 else "s",
+                c["files_n"], "" if c["files_n"] == 1 else "s")
+            if c["behind"]:
+                head += ", %d behind" % c["behind"]
+            if c["root"]:
+                head += "   %s" % c["root"]
+            if c["dirty"]:
+                head += " (%d uncommitted)" % c["dirty"]
+            lines.append(head)
+            for t in c["tasks"]:
+                lines.append("      %-4s %s — %s%s" % (
+                    t["id"], t["what"], t["agent"],
+                    ', "%s"' % t["note"] if t["note"] else ""))
+            if c["onto"] == "clean":
+                lines.append("      merges into %s cleanly" % trunk)
+            elif c["onto"] == "conflict":
+                lines.append("      CONFLICTS with %s: %s"
+                             % (trunk, ", ".join(c["onto_conflicts"])))
+            else:
+                lines.append("      could not be merged against %s (%s)"
+                             % (trunk, c["onto_why"]))
+    if view["more"]:
+        lines.append("  (+%d more finished branch%s, not compared)"
+                     % (view["more"], "" if view["more"] == 1 else "es"))
+    pairs = [p for p in view["pairs"] if p["state"] != "clean" or p["both"]]
+    if pairs:
+        lines.append("")
+        lines.append("Between them:")
+        for p in pairs:
+            if p["state"] == "conflict":
+                lines.append("  %s and %s CONFLICT in %s"
+                             % (p["a"], p["b"], ", ".join(p["conflicts"])))
+            elif p["state"] == "unknown":
+                lines.append("  %s and %s could not be compared (%s)"
+                             % (p["a"], p["b"], p["why"]))
+            else:
+                lines.append("  %s and %s both touch %s — and merge cleanly"
+                             % (p["a"], p["b"], ", ".join(p["both"])))
+    if view["skipped"]:
+        lines.append("")
+        lines.append("Finished, but not ready:")
+        for s in view["skipped"]:
+            lines.append("  %-4s %s — %s" % (s["id"], s["what"], s["why"]))
+    return "\n".join(lines)
+
+
+def cli_merges(args):
+    """What would happen if the finished work landed together. Changes nothing.
+
+    Deliberately the whole of the daily answer, with no model in it: the ledger
+    knows what is finished and git can compute the rest exactly, so the thing
+    somebody needed five terminals and a merge to find out is a free, instant
+    read. `agentbus integrate` is the other half, and it says what it costs."""
+    sessions = load_sessions()
+    _, me = resolve_party()
+    if not me:
+        root, repo_key, _, _ = git_facts(os.getcwd())
+        me = {"sid": "", "repo_key": repo_key, "root": root}
+    root = me.get("root") or os.getcwd()
+    limit = int(opt(args, "--limit", str(MERGE_MAX)) or MERGE_MAX)
+    view = merge_view(me.get("repo_key", ""), sessions, root, limit=limit)
+    print(merges_text(view))
+    if view["candidates"]:
+        print("\nNothing above was merged, checked out or written: every git "
+              "command here is a read.\n`agentbus integrate` does it for real, "
+              "in a scratch worktree, and costs model calls.")
+
+
 def board_state(limit=60):
     """Everything the dashboard shows, as plain data.
 
@@ -6140,7 +6601,7 @@ def board_state(limit=60):
     sessions = load_sessions()
     live_sids = {s["sid"] for s in sessions}
     out = {"now": now(), "sessions": [], "locks": [], "serves": [],
-           "events": [], "repos": [], "tasks": []}
+           "events": [], "repos": [], "tasks": [], "landing": []}
 
     # What each session has produced, and where two of them have produced the
     # same file. The overlap is the whole point: two chats that have both edited
@@ -6290,6 +6751,17 @@ def board_state(limit=60):
             t for t in ledger_view(repo_key, sessions, locks=raw_locks,
                                    writes=pairs, at=out["now"])
             if t["fresh"])
+
+    # What the finished work would do if it landed together. Read-only like
+    # everything else here, and from cache only: the pairwise merges cost git and
+    # a page left open in a tab may not spend it on every poll. The page says
+    # "these look ready and here is what would fight" and prints the command; it
+    # does not offer to run it. A button that spends model calls when clicked is a
+    # different kind of object from the one this page is.
+    for repo_key, root in sorted(roots.items()):
+        view = merges_cached(repo_key, root)
+        if view:
+            out["landing"].append(view)
 
     for r in log:
         if r.get("i", 0) <= seq - limit:
@@ -7727,6 +8199,7 @@ COMMANDS = {
     "watch": cli_watch, "board": cli_board, "here": cli_here,
     "port": cli_port, "env": cli_env,
     "doing": cli_doing, "take": cli_take, "done": cli_done,
+    "merges": cli_merges,
     "init-repo": cli_init_repo, "doctor": cli_doctor,
     "register": cli_register, "install": cli_install, "serve": cli_serve,
     "serves": cli_serves, "forget": cli_forget,
@@ -7761,6 +8234,8 @@ USAGE = """agentbus — coordination between parallel Claude Code sessions
   take "<what>" [--needs <task>]   say what you have started
   take <task>                  pick up work whose session has gone
   done [<task>] [--note ".."]  say it has landed
+  merges                       what the finished work would do if it landed
+                               together, and what would conflict. Reads only.
   handoff [--note "..."]       summarise what you did, for the others
   doing "..."                  one line others see in their roster
   name [<new>]                 read or set this session's name

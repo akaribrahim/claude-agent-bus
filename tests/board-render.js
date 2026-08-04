@@ -91,7 +91,8 @@ Node.prototype.shownText = function () {
 
 const ids = {};
 function byId(id) { return ids[id] || (ids[id] = new Node("div")); }
-["count", "wanting", "stuck", "lost", "filters", "agents", "serves", "feed"].forEach(byId);
+["count", "wanting", "stuck", "lost", "filters", "agents", "serves", "landing",
+ "feed"].forEach(byId);
 
 global.document = {
   createElement: t => new Node(t),
@@ -114,7 +115,7 @@ new Function(fs.readFileSync(process.argv[2], "utf8"))();
 setTimeout(() => {
   console.log("HEADER " + [byId("count"), byId("wanting"), byId("stuck")]
     .map(n => n.shownText().trim()).filter(Boolean).join(" "));
-  for (const id of ["agents", "serves", "feed"]) {
+  for (const id of ["agents", "serves", "landing", "feed"]) {
     for (const row of byId(id).children) {
       const cells = row.children.map(c => c.shownText().replace(/\s+/g, " ").trim())
         .filter(Boolean);
