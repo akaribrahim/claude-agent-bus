@@ -2,6 +2,140 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.6.0 — 2026-08-05
+
+**"Can these two land together?"** — answered by git, for free, without touching
+anything. And, separately and only when you ask for it, a session of agent-bus's
+own that actually does the merge.
+
+2.5.0 let the agents say what they had taken and what they were waiting for. What
+was still being done by hand was the last step: two chats both say they are
+finished, and finding out whether their work can go on the trunk together meant
+merging and seeing — which means checking out a branch somebody is working in and
+rewriting their files mid-tool-call, the one thing this project's own recovery
+notes say never to do.
+
+    agentbus merges
+
+    agent-bus: 2 branches ready to land on main
+      feat-api                 +3 commits, 7 files   ~/work/api-wt (2 uncommitted)
+          t1   fix the review findings in api/ — dizzy-mole, "all four closed"
+          merges into main cleanly
+      feat-web                 +1 commit, 4 files    ~/work/web-wt
+          t3   rebase web onto main — quiet-fox
+          merges into main cleanly
+
+    Between them:
+      feat-api and feat-web CONFLICT in api/schema.py
+
+**No model, no cost, no state.** The ledger already knows which work is finished
+and on which branch; `git merge-tree` merges two commits in memory and names the
+files that would actually fight, with no working tree, no index and no ref
+anywhere in the picture. So this is the part that gets used every day, and it is
+instant and free.
+
+- **A candidate is a branch, not a task.** Two finished tasks on one branch land
+  together whether anybody meant them to or not, so a view organised by task
+  would offer a choice that does not exist.
+- **"They both touched it" and "it conflicts" are different answers**, and the
+  board could only give the first. Two chats editing opposite ends of one file is
+  not a problem; the same three lines from both is.
+- **Uncommitted work is reported**, because it is the whole difference between
+  ready and looks-ready: the branch is ahead and its checkout still holds work a
+  merge of the branch would not take.
+- **Finished but not ready is said out loud**, with the reason: a branch that has
+  been deleted, a branch with nothing on it the trunk does not have, or a task its
+  own author called finished while the thing it was built on has not landed. Each
+  is a branch somebody would otherwise be told to merge.
+- The same view is on the board, read-only and computed off the poll, with the
+  command printed as text. **There is deliberately nothing there to press.** A
+  control that spends model calls when it is clicked is a different kind of object
+  from a window that only watches, and the board is the second one. The page
+  refuses a POST outright.
+
+**It writes nothing, and that is asserted rather than asserted-to.**
+`merge-tree --write-tree` does put the tree it merged into the object store, so
+the object store is redirected as well: the writes land in a temporary directory
+that is deleted afterwards. The test fingerprints every file in every worktree
+and the whole git directory across every route into this code, with a
+deliberately stale stat cache in place first — because `git status` refreshes the
+index unless it is told not to, and in a fixture nothing has touched, a `status`
+missing that flag writes nothing either and would pass for the wrong reason.
+
+### And then, if you want it done
+
+    agentbus integrate --yes
+
+**One chat cannot make another chat act.** Hooks fire on a session's own
+activity, so nothing can put a turn into an idle interactive session; that is a
+limit of Claude Code and it is not going away. A session agent-bus *starts
+itself* is different, because it was created programmatically. So the shape that
+works is not "make those two chats coordinate" — it is "take the work they
+finished and have a session of our own put it together".
+
+`integrate` spawns a headless Claude Code session to merge the candidates,
+resolve what conflicts, run whatever the repository uses to check itself, and
+report. **It prints what it will do and what it will cost, and stops unless you
+add `--yes`** — a flag rather than a question, because an agent may run this too
+and an agent cannot answer one at a terminal.
+
+Five rails, each in the engine rather than in the prompt, because a prompt is a
+request:
+
+- **A scratch worktree it creates and removes**, detached at the trunk. Never
+  anybody's checkout, and never `main` in a checkout somebody is using.
+- **It cannot push.** Every remote's `pushurl` is overridden in the worker's
+  environment. The test measures this by pushing, and by pushing without it.
+- **It registers on the bus like any other session**, so the other agents see it
+  and the guards apply to it. The environment it is handed has the parent's
+  session identity removed and `AGENTBUS_OFF` cleared — with the first it would
+  file its writes under the chat that started it, and with the second it would be
+  invisible to everything.
+- **It cannot close anybody's task.** Not because it is asked not to: a candidate
+  is made of tasks whose state is `done`, `done` refuses a task that is not the
+  caller's own session's and `take` refuses one that is finished, so there is no
+  order of verbs by which another session closes finished work. Saying work is
+  done is its author's declaration to make.
+- **The spend is capped** with `--max-budget-usd`, which the CLI itself enforces,
+  so the ceiling printed before the run is not one this verb has to police.
+
+**Whether it worked is asked of git, not of the worker.** Every branch has to be
+an ancestor of what is in the scratch tree and nothing may be left uncommitted.
+"I merged them" is a sentence. And a run that does not finish — a real conflict
+needing a person, a check that failed — **leaves the half-merged tree and the
+worker's own transcript exactly where they are**, because deleting them to keep
+the temporary directory tidy throws away the only reason anybody would look.
+
+Tested without a model against a stand-in CLI on PATH that does the merges with
+plain git, which covers everything except the model's judgement. What genuinely
+needs a real session — that the spawned worker appears in the roster under its own
+name — is a new block in `tests/live/acceptance.sh`, where the paid tests live.
+
+Also fixed, and it was measuring nothing: `ledger_view`'s note about a future
+merge reader named three conditions, and the third filtered nothing. `waiting` is
+only ever recorded against a task that is *not* yet finished, so a done task's
+`waiting` is empty by construction and a candidate filtered on it would have
+looked careful and measured the empty set. The condition that carries information
+is the other direction. And `git_out` threw away the exit code, which is exactly
+how `merge-tree` reports whether it conflicted — the reads go through `git_probe`
+now, so a ref git cannot resolve is never reported as a merge with nothing to
+fight about.
+
+**Cost.** Nothing was added to the path a tool call pays: no hook reads any of
+this, and the shell fast path in front of all of it is unchanged at about 5 ms,
+which is what most tool calls actually pay. The board's poll runs no git for it
+either — the landing view is cached for thirty seconds per repository and computed
+in a background thread, the same bargain 2.4.0 made for the commit counts, and for
+a heavier reason: a `merge-tree` per pair of branches for as long as a tab is open
+is not a cost a window that only watches may impose.
+
+A hook that does wake the engine got 2.7 ms slower, and for the honest reason
+rather than an algorithmic one: the engine grew by 842 lines, and a hook is handed
+a script rather than an import, so Python recompiles the whole file every time and
+is never allowed to cache the result. Measured on this Mac, median of fifteen:
+7860 lines compile in 25.8 ms and 8702 in 28.5 ms. The same trade 2.1.0 and 2.5.0
+recorded.
+
 ## 2.5.0 — 2026-08-04
 
 The agents can now say **what they have taken and what they are waiting for**,

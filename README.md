@@ -219,6 +219,11 @@ agentbus release <res>[,<res>] | --all
 agentbus take "<what>" [--needs <task>]         say what you have started
 agentbus take <task>                  pick up work whose session has gone
 agentbus done [<task>] [--note ".."]  say it has landed
+agentbus merges                       what the finished work would do if it landed
+                                      together, and what would conflict. Reads only
+agentbus integrate --yes [--only a,b] [--budget 2.00] [--keep]
+                                      spawn a headless session to land it, in a
+                                      scratch worktree. Spends model calls
 agentbus doing "..."                  one line others see in their roster
 agentbus init-repo [--dry-run|--force|--local]
 agentbus here [<path>]                record which worktree you are working in
@@ -291,6 +296,78 @@ repository. The header counts what is open, blocked and dropped.
 
 The feed draws a line where you last looked away. That mark lives in your
 browser, not on the bus.
+
+## Landing it
+
+Two chats say they are done. Whether their work can go on the trunk together used
+to be answerable only by merging and seeing — which means checking out a branch
+somebody is working in and rewriting their files mid-tool-call. Git can answer it
+exactly instead, and for nothing:
+
+```bash
+agentbus merges
+```
+
+```
+agent-bus: 2 branches ready to land on main
+  feat-api                 +3 commits, 7 files   ~/work/api-wt (2 uncommitted)
+      t1   fix the review findings in api/ — dizzy-mole, "all four closed"
+      merges into main cleanly
+  feat-web                 +1 commit, 4 files    ~/work/web-wt
+      t3   rebase web onto main — quiet-fox
+      merges into main cleanly
+
+Between them:
+  feat-api and feat-web CONFLICT in api/schema.py
+
+Finished, but not ready:
+  t5   build the exporter — t4 is waiting for t2 to land
+```
+
+The candidate is a **branch**, not a task, because a branch is what gets merged:
+two finished tasks on one branch land together whether anybody meant them to or
+not. "They both touched it" and "it conflicts" are kept apart — two chats editing
+opposite ends of one file is not a problem and the board's write-log collision
+cannot tell the difference. Uncommitted work is reported because it is the whole
+difference between ready and looks-ready. And *finished but not ready* is said out
+loud with the reason, because each of those is a branch you would otherwise be told
+to merge.
+
+**It writes nothing.** Not a merge, not a checkout, not an index refresh, not a
+stash. `git merge-tree` merges two commits in memory, and even the tree it
+produces is redirected into a temporary directory so the object store comes out
+byte-identical. The same view is on the board, computed off the poll, with the
+command printed as text and nothing there to press: a control that spends model
+calls when clicked is a different kind of object from a window that only watches.
+
+### And if you want it done
+
+```bash
+agentbus integrate --yes
+```
+
+One chat cannot make another chat act — hooks fire on a session's own activity, so
+nothing can put a turn into an idle interactive session. A session agent-bus
+**starts itself** is different, because it was created programmatically. So this
+spawns one: it merges the candidates in a scratch worktree of its own, resolves
+what conflicts, runs whatever the repository uses to check itself, and reports.
+
+Without `--yes` it prints the plan, the command line it would run and the cost,
+and does nothing. A flag rather than a prompt, because an agent may run this too.
+
+- **A scratch worktree it creates and removes**, detached at the trunk. Never
+  anybody's checkout, and never `main` in one somebody is using.
+- **It cannot push.** Every remote's `pushurl` is overridden in its environment.
+- **It registers on the bus like any other session**, so it is in the roster and
+  the guards apply to it. It is not a special citizen.
+- **It cannot close anybody's task** — the engine refuses, not the prompt. Saying
+  work is finished is its author's declaration to make.
+- **The spend is capped** with the CLI's own `--max-budget-usd`.
+
+Whether it worked is asked of git, not of the worker: every branch has to be an
+ancestor of what is in the scratch tree. And if it could not finish — a real
+conflict needing a person, a check that failed — it says so and **leaves the
+worktree and the transcript** rather than deleting the evidence.
 
 Sessions are named after their chats. A session registers the moment it opens,
 when its branch is the only thing to go on, so it starts as `feat-login` or
@@ -375,6 +452,15 @@ milliseconds between the last two rows.
 There is no daemon and nothing runs between sessions. Alone, it is effectively
 free.
 
+`agentbus merges` and the board's landing view cost git rather than tokens: a
+handful of `rev-list`, one `diff` and one `merge-tree` per candidate branch, plus
+one `merge-tree` per pair. The board never pays it on a poll — the view is cached
+for thirty seconds per repository and computed in a background thread.
+
+`agentbus integrate` is the only thing here that costs money. It is capped with
+the CLI's own `--max-budget-usd`, $2.00 unless you say otherwise, and it prints
+what it is about to spend and stops unless you add `--yes`.
+
 ## Limits, stated plainly
 
 - **One machine.** Everything is coordinated through a directory in your home
@@ -382,6 +468,17 @@ free.
 - **Nothing is pushed into an idle session.** A message reaches another agent at
   its next turn, not the moment you send it. If it is mid-run, it hears when
   that run ends.
+- **One chat cannot make another chat act.** Hooks fire on a session's own
+  activity, so there is no way to inject a turn into an idle interactive session,
+  and "coordinate between yourselves and both get to main" is therefore not
+  something this can be made to do. What it does instead is remove the reason you
+  were asking: `agentbus merges` answers the question for free, and `agentbus
+  integrate` starts a session of its own — which can be driven, because agent-bus
+  created it.
+- **`integrate` is a rail, not a sandbox.** A worker cannot push to a configured
+  remote and cannot close anybody's task, both enforced rather than requested. A
+  determined `git push <literal-url>` would still get out; the rails are against
+  the accident, which is the thing that actually happens.
 - **The guards are only as good as the config.** A resource nobody declared is a
   resource nobody guards, and a pattern that stops matching fails silently.
   `agentbus doctor` reports resources that have never matched, which is the only
@@ -412,6 +509,7 @@ free.
 ```bash
 make test                      # the plugin's own logic, isolated state, no network
 tests/live/acceptance.sh all   # two real Claude Code sessions through the real CLI
+tests/live/acceptance.sh land  # just the one that spawns an integration worker
 ```
 
 The first is fast and free. The second spawns real sessions and costs real model
