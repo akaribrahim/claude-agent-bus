@@ -1506,17 +1506,46 @@ def interesting_to(rec, me):
     return rec.get("repo") == me.get("repo_key")
 
 
+def cursor_of(me, seq=None):
+    """How far through the log this party has been shown, clamped to the log.
+
+    A cursor above the sequence number means the counter was reset or restored
+    under us — treat it as unread from the start rather than wedging the session
+    on a number the log will take days to reach again."""
+    if seq is None:
+        seq = read_int(SEQFILE, 0)
+    cursor = read_int(os.path.join(CURSORS, party_key(me)), 0)
+    return 0 if cursor > seq else cursor
+
+
+def unseen(me, log=None):
+    """What this party has not been shown: (everything after its cursor, the
+    part addressed to it, its cursor, the sequence number). Writes nothing.
+
+    Split out of `deliver` so the *count* can be asked for without the prose.
+    The board wants "how far behind is this session" for every live session on
+    every poll, and `deliver` answers with an English sentence that happens to
+    contain the number. One body, so the number a watcher reads is the number
+    the session will be handed.
+
+    `log` is for a caller that has already read the log from at or below this
+    party's cursor — the board reads it once and asks five times, where five
+    reads would cost several times the whole poll."""
+    seq = read_int(SEQFILE, 0)
+    cursor = cursor_of(me, seq)
+    if seq <= cursor:
+        return [], [], cursor, seq
+    fresh = ([r for r in log if r.get("i", 0) > cursor] if log is not None
+             else read_events(after=cursor))
+    return fresh, [r for r in fresh if interesting_to(r, me)], cursor, seq
+
+
 def deliver(me, advance=True):
     """Everything this session has not been shown yet, formatted for context."""
     key = party_key(me)
-    cursor = read_int(os.path.join(CURSORS, key), 0)
-    seq = read_int(SEQFILE, 0)
-    if cursor > seq:
-        cursor = 0  # the counter was reset or restored under us; do not wedge
+    fresh, mine, cursor, seq = unseen(me)
     if seq <= cursor:
         return ""
-    fresh = read_events(after=cursor)
-    mine = [r for r in fresh if interesting_to(r, me)]
     if advance:
         # Advance to what was actually read, not to the sequence number sampled
         # before reading: an event appended in between would be shown twice.
@@ -2011,8 +2040,15 @@ def repo_writes(me, cutoff=0):
     nothing else announce itself on the way out: the first handoff this plugin
     ever wrote in anger said "wrote 1 file, most recently /tmp/claude-clip.txt".
     A summary nobody needs is what stops the useful ones being read."""
-    seen, out = set(), []
+    seen, raw, out = set(), set(), []
     for ts, path in reversed(recent_writes(me.get("sid"), cutoff)):
+        # The same path written eight hundred times is the normal shape of an
+        # afternoon's editing, and resolving each one costs a syscall per path
+        # component. Dropping the repeats by string first changes no answer — one
+        # spelling resolves to one file — and the board asks for this every poll.
+        if path in raw:
+            continue
+        raw.add(path)
         real = os.path.realpath(path)
         if real in seen:
             continue
@@ -5358,6 +5394,107 @@ tick(); setInterval(tick, __INTERVAL__);
 """
 
 
+# How far ahead of the trunk each checkout is, without paying for it on the
+# poll. Counting commits means running git, and git once per worktree per poll —
+# for as long as a tab is open — is a cost a window that only watches has no
+# business imposing on the machine it is watching. So the request path never
+# runs git at all: it serves what the cache holds and hands the work to a
+# thread. Nothing here is written to disk, which also means two open tabs share
+# nothing and neither can leave anything behind.
+GIT_TTL = 10              # seconds a counted number is still served for
+BOARD_FILES = 12          # files named per session before "+n more"
+# Last resort only, after two derived answers, and only if such a branch really
+# exists. Assuming a name is what this ladder is here to avoid.
+TRUNK_NAMES = ("main", "master", "trunk", "default", "develop")
+_GIT = {}                 # root -> {"at": ts, "ahead": int|None, "base": str}
+_GIT_RUNNING = set()      # roots a refresh thread already has in hand
+
+
+def git_out(root, *args):
+    """One read-only git command in `root`; "" if it fails or has nothing to say.
+
+    Ten seconds is a long timeout for `rev-list`, and deliberate: this only ever
+    runs off the request path, so the cost of waiting is one stale number rather
+    than a page that will not load."""
+    import subprocess
+    try:
+        out = subprocess.run(("git",) + args, cwd=root, capture_output=True,
+                             text=True, timeout=10)
+    except Exception:
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def default_base(root, known=""):
+    """The ref this worktree's own commits should be counted against.
+
+    Derived, not assumed. `origin/HEAD` is the answer the repository itself
+    recorded when it was cloned; `init.defaultBranch` is what this machine would
+    have named the trunk had it created the repository; the conventional names
+    come last and only when such a branch actually exists. Hard-coding one name
+    would have the repository this ships from reporting its default correctly and
+    an older one, or a worktree of a repository with no remote at all, reporting
+    nothing. "" when there is genuinely nothing to compare against — a tree with
+    no commits yet — which the page says rather than guesses at."""
+    if known:
+        return known      # trunks are not renamed twice an afternoon
+    head = git_out(root, "symbolic-ref", "--quiet", "--short",
+                   "refs/remotes/origin/HEAD")
+    if head:
+        return head
+    have = set(git_out(root, "for-each-ref", "--format=%(refname:short)",
+                       "refs/heads/").split("\n"))
+    for name in (git_out(root, "config", "--get", "init.defaultBranch"),) + \
+            TRUNK_NAMES:
+        if name and name in have:
+            return name
+    return ""
+
+
+def git_count(root):
+    """Count `root`'s commits since its default branch. Runs git — never call
+    this from a poll."""
+    base = default_base(root, (_GIT.get(root) or {}).get("base") or "")
+    count = git_out(root, "rev-list", "--count", "%s..HEAD" % base) if base else ""
+    if not count.isdigit():
+        # Either there is no trunk to compare with, or the one we remembered has
+        # been renamed or its remote removed, or HEAD does not resolve yet in a
+        # tree with no commits. Forget the base so the next pass derives it again
+        # instead of asking the same dead question every ten seconds.
+        return {"at": now(), "ahead": None, "base": ""}
+    return {"at": now(), "ahead": int(count), "base": base}
+
+
+def git_ahead(root):
+    """(commits ahead of the trunk, the ref that was counted against) for a
+    worktree, from cache only. (None, None) is "not computed yet".
+
+    Refreshed in the background from halfway through the TTL, so a number that
+    keeps being asked for never actually expires and the column does not blink
+    empty every ten seconds. Past the full TTL it does go empty, which is the
+    point: if git is wedged or slow the page says it does not know rather than
+    showing a number from some minutes ago as though it were current."""
+    ent = _GIT.get(root)
+    age = now() - ent["at"] if ent else None
+    if root and (age is None or age >= GIT_TTL // 2) and root not in _GIT_RUNNING:
+        # Check-then-add, with no lock: two tabs polling in the same instant can
+        # both start a refresh for one root. Both run read-only git and write the
+        # same answer, so the race costs one extra `rev-list` and nothing else.
+        _GIT_RUNNING.add(root)
+        import threading
+        threading.Thread(target=_git_refresh, args=(root,), daemon=True).start()
+    if ent and age < GIT_TTL:
+        return ent["ahead"], ent["base"]
+    return None, None
+
+
+def _git_refresh(root):
+    try:
+        _GIT[root] = git_count(root)
+    finally:
+        _GIT_RUNNING.discard(root)
+
+
 def board_state(limit=60):
     """Everything the dashboard shows, as plain data.
 
@@ -5371,6 +5508,33 @@ def board_state(limit=60):
     out = {"now": now(), "sessions": [], "locks": [], "serves": [],
            "events": [], "repos": []}
 
+    # What each session has produced, and where two of them have produced the
+    # same file. The overlap is the whole point: two chats that have both edited
+    # one file is the thing somebody merging their work needs to see *before* the
+    # merge, and the bus already records every write per session, so this half
+    # costs no git. Repository-relative, because that is the form two worktrees
+    # of one repository have in common — there the same file has two absolute
+    # paths and one relative one. Only within a repository: sessions in different
+    # projects cannot collide, and pairing them would be noise.
+    wrote = {s["sid"]: [rel for _ts, rel in repo_writes(s, 0)] for s in sessions}
+    clash = {}                      # sid -> {relative path: [other agents]}
+    for a in sessions:
+        for b in sessions:
+            if b["sid"] == a["sid"] or b.get("repo_key") != a.get("repo_key"):
+                continue
+            for rel in set(wrote[a["sid"]]) & set(wrote[b["sid"]]):
+                clash.setdefault(a["sid"], {}).setdefault(rel, []).append(
+                    b.get("agent") or "?")
+
+    # One read of the log for the whole poll. Each session's unread count is
+    # measured from its own cursor, and asking `unseen` to read the log itself
+    # once per session would cost several times everything else on this page put
+    # together. Read from the lowest cursor of the lot, or from the tail the feed
+    # needs, whichever is further back.
+    seq = read_int(SEQFILE, 0)
+    cursors = {s["sid"]: cursor_of(s, seq) for s in sessions}
+    log = read_events(after=min([max(0, seq - limit)] + list(cursors.values())))
+
     seen_repos = {}
     for s in sessions:
         subs = [{"name": a.get("name"), "type": a.get("agent_type"),
@@ -5378,14 +5542,31 @@ def board_state(limit=60):
                  "branch": a.get("branch") or "",
                  "started": a.get("started", 0)}
                 for a in load_agents(s["sid"])]
+        ahead, base = git_ahead(s.get("root", ""))
+        idle = now() - s.get("beat", 0) > IDLE_SECS
+        # Not `deliver`: that formats the same events into a sentence for the
+        # session itself, and would advance nothing but would read the log five
+        # times over. `unseen` is the shared body underneath it.
+        unread = len(unseen(s, log=log)[1])
+        mine = wrote[s["sid"]]
         out["sessions"].append({
             "sid": s["sid"], "agent": s.get("agent"),
             "root": short_path(s.get("root", "")),
             "branch": s.get("branch") or "", "doing": s.get("doing") or "",
-            "beat": s.get("beat", 0), "idle": now() - s.get("beat", 0) > IDLE_SECS,
+            "beat": s.get("beat", 0), "idle": idle,
             "guarded": int(s.get("guarded", 0) or 0),
             "repo": s.get("repo_key", ""), "repo_label": s.get("repo_label", ""),
-            "owns": owns_summary(s["sid"], limit=6), "agents": subs})
+            "owns": owns_summary(s["sid"], limit=6), "agents": subs,
+            "ahead": ahead, "ahead_of": base,
+            "wrote": mine[:BOARD_FILES], "wrote_n": len(mine),
+            "clash": [{"path": p, "with": sorted(set(who))}
+                      for p, who in sorted(clash.get(s["sid"], {}).items())],
+            "unread": unread,
+            # The one thing on the page that asks to be acted on. A session that
+            # is working will read the bus itself at its next turn; a session
+            # that has stopped with messages it has never been shown is a window
+            # somebody has to go and poke, and that is not visible anywhere else.
+            "waiting": bool(idle and unread)})
         seen_repos[s.get("repo_key", "")] = s.get("repo_label", "")
 
     try:
@@ -5468,9 +5649,10 @@ def board_state(limit=60):
                 "churn_roots": sorted({short_path(m.get("root", ""))
                                        for m in recent})})
 
-    seq = read_int(SEQFILE, 0)
-    for r in read_events(after=max(0, seq - limit)):
-        out["events"].append({
+    for r in log:
+        if r.get("i", 0) <= seq - limit:
+            continue                # read further back than the feed shows, for
+        out["events"].append({      # the unread counts; the feed keeps its tail
             "i": r.get("i"), "ts": r.get("ts"), "agent": r.get("agent"),
             "to": r.get("to") or "", "kind": r.get("kind"),
             "repo": r.get("repo", ""), "text": r.get("text", "")})

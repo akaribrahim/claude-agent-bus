@@ -46,6 +46,8 @@ ldr = importlib.machinery.SourceFileLoader('ab', '$AB_ROOT/bin/agentbus')
 ab = importlib.util.module_from_spec(importlib.util.spec_from_loader('ab', ldr))
 ldr.exec_module(ab)
 d = ab.board_state()
+def who(name):    # the live session an agent name belongs to
+    return [s for s in d['sessions'] if s['agent'] == name][0]
 print($1)"
 }
 
@@ -87,6 +89,143 @@ assert_contains "$(state 'json.dumps(d["events"])')" "something worth reading" \
   "and the messages, newest first"
 assert_equal "$(state 'd["events"][0]["i"]')" "$(read_seq)" \
   "the newest event really is first"
+
+# ---- what each session produced, and where two of them collide --------------
+#
+# The question somebody merging two chats' work has is not "who is live" but
+# "have they both edited the same file", and the answer has to arrive before the
+# merge rather than during it. The bus already records every write per session,
+# so the collision half of this needs no git at all — only the repository-relative
+# form of the path, which is what two worktrees of one repository have in common.
+
+B=$(ab sess-b name)
+: > "$WT2/one.py"
+commit_all "$WT2"
+: > "$WT2/two.py"
+commit_all "$WT2"
+
+wrote() {   # <session id> <worktree> <relative path…>
+  local sid="$1" root="$2"; shift 2
+  for f in "$@"; do
+    : > "$root/$f"
+    ab_hook record-write "$(payload write "sid=$sid" "cwd=$root" \
+      "path=$root/$f")" > /dev/null
+  done
+}
+wrote sess-a "$REPO" shared.py only-a.py
+wrote sess-b "$WT2" shared.py only-b.py
+
+assert_equal 2 "$(state 'who("'"$A"'")["wrote_n"]')" \
+  "the snapshot counts the files a session has written"
+assert_contains "$(state 'json.dumps(who("'"$A"'")["wrote"])')" "only-a.py" \
+  "and names them"
+assert_equal 1 "$(state 'len(who("'"$A"'")["clash"])')" \
+  "one of which the other session has written too"
+assert_equal shared.py "$(state 'who("'"$A"'")["clash"][0]["path"]')" \
+  "named as the repository sees it, so two worktrees line up on one path"
+assert_equal "$B" "$(state '" ".join(who("'"$A"'")["clash"][0]["with"])')" \
+  "and the collision names the other one"
+assert_equal shared.py "$(state 'who("'"$B"'")["clash"][0]["path"]')" \
+  "which the other session is told about too, since either could be merged first"
+
+# Sessions in different projects cannot collide, and pairing them would put a
+# warning on the page about two files that have nothing to do with each other.
+REPO2=$(make_repo boardrepo2)
+commit_all "$REPO2"
+new_session sess-c "$REPO2"
+C=$(ab sess-c name)
+wrote sess-c "$REPO2" shared.py
+assert_equal 0 "$(state 'len(who("'"$C"'")["clash"])')" \
+  "the same path in another repository is not a collision"
+assert_equal "$B" "$(state '" ".join(who("'"$A"'")["clash"][0]["with"])')" \
+  "and nobody from another project is named beside the session that did collide"
+
+# ---- how far ahead of the trunk, without paying for it on the poll ----------
+#
+# A `git rev-list` per session per poll, for as long as a tab is open, is a cost
+# a window that only watches has no business imposing. So the poll runs no git:
+# it serves a cached number and hands the counting to a thread.
+
+warm() {   # <expression over `d` (a later poll), `who`, `poll`, `stale`>
+  python3 -c "
+import importlib.machinery, importlib.util, json, os, time
+os.environ['AGENTBUS_HOME'] = '$AGENTBUS_HOME'
+ldr = importlib.machinery.SourceFileLoader('ab', '$AB_ROOT/bin/agentbus')
+ab = importlib.util.module_from_spec(importlib.util.spec_from_loader('ab', ldr))
+ldr.exec_module(ab)
+def poll(name):
+    return [s for s in ab.board_state()['sessions'] if s['agent'] == name][0]
+def stale(root, name):    # a cached number older than the TTL
+    ab._GIT[root] = {'at': ab.now() - 3600, 'ahead': 99, 'base': 'main'}
+    return poll(name)
+ab.board_state()          # the first poll asks for the count and does not wait
+for _ in range(100):
+    d = ab.board_state()
+    if all(s['ahead_of'] is not None for s in d['sessions']):
+        break
+    time.sleep(0.05)
+def who(name):
+    return [s for s in d['sessions'] if s['agent'] == name][0]
+print($1)"
+}
+
+assert_equal None "$(state 'who("'"$B"'")["ahead"]')" \
+  "the first poll of a fresh board runs no git and says so"
+assert_equal None "$(state 'who("'"$B"'")["ahead_of"]')" \
+  "with nothing named as the thing it has not counted against yet"
+assert_equal 2 "$(warm 'who("'"$B"'")["ahead"]')" \
+  "a later poll has the commits that worktree is ahead by"
+assert_equal main "$(warm 'who("'"$B"'")["ahead_of"]')" \
+  "counted against the branch the repository itself calls default, no remote to ask"
+assert_equal 0 "$(warm 'who("'"$A"'")["ahead"]')" \
+  "and the checkout sitting on that branch is ahead by nothing"
+assert_equal None "$(warm 'stale("'"$WT2"'", "'"$B"'")["ahead"]')" \
+  "a number older than the cache TTL is not served as though it were current"
+
+# ---- which window to poke ---------------------------------------------------
+#
+# An idle session with messages it has never been shown is invisible today, so
+# the reader messages every chat instead of the one that is waiting.
+
+assert_equal 1 "$(state 'who("'"$B"'")["unread"]')" \
+  "a session that has not been shown a message is counted as behind by one"
+assert_equal 0 "$(state 'who("'"$A"'")["unread"]')" \
+  "and the session that sent it is not behind on its own message"
+assert_equal False "$(state 'who("'"$B"'")["waiting"]')" \
+  "a session still working is not waiting: it will read the bus at its next turn"
+
+quiet() {   # <session id…> — silent for longer than IDLE_SECS, nowhere near stale
+  python3 -c "
+import os, sys, time
+for sid in sys.argv[1:]:
+    beat = os.path.join('$AGENTBUS_HOME', 'sessions', sid + '.beat')
+    old = time.time() - 400
+    os.utime(beat, (old, old))" "$@"
+}
+quiet sess-b sess-c
+assert_equal True "$(state 'who("'"$B"'")["idle"]')" "once it has gone quiet"
+assert_equal True "$(state 'who("'"$B"'")["waiting"]')" \
+  "an idle session with an unread message is the one thing asking to be poked"
+assert_equal True "$(state 'who("'"$C"'")["idle"]')" "while another sits quiet too"
+assert_equal False "$(state 'who("'"$C"'")["waiting"]')" \
+  "which is not asking for anything, because it has been shown everything"
+
+# Reading the bus for real clears it — the count is the same one the session is
+# handed, not a second opinion computed a different way.
+ab_hook prompt-submit "$(payload session sid=sess-b "cwd=$WT2")" > /dev/null
+assert_equal 0 "$(state 'who("'"$B"'")["unread"]')" \
+  "and the count is gone once the session has actually been shown the message"
+# The hook that delivered it was also a heartbeat, so the session is no longer
+# quiet. Put it back, or "not waiting" would be true for the wrong reason and
+# would keep being true if the count stopped working.
+quiet sess-b
+assert_equal True "$(state 'who("'"$B"'")["idle"]')" "still quiet afterwards"
+assert_equal False "$(state 'who("'"$B"'")["waiting"]')" \
+  "so an idle session that is up to date stops asking for attention"
+
+# The session in the other project has served its purpose; the read-only checks
+# below count what is live, and they were written when this file had two.
+end_session sess-c
 
 # ---- read-only: watching must not change what is watched --------------------
 
