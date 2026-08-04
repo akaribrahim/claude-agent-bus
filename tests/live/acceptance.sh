@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Acceptance, against real Claude Code sessions.
 #
-#     tests/live/acceptance.sh [m2|m3|m4|all]
+#     tests/live/acceptance.sh [m2|m3|m4|sub|land|all]
 #
 # `make test` proves the plugin's own logic with synthetic hook payloads. This
 # proves the thing the plan actually promises: that in two real Claude Code
@@ -500,6 +500,144 @@ for f in glob.glob('$T/bus/locks/*.json'):
   end_session subw
 }
 
+# ============================================================= integrate =====
+#
+# `agentbus integrate` spawns a session of its own, and the one thing about that
+# which cannot be proved without a real CLI is the thing that matters most: does
+# the spawned session REGISTER ON THE BUS, under its own identity rather than its
+# parent's, so the other agents see it in the roster and the guards apply to it?
+#
+# tests/test_integrate.sh proves everything either side of that for free, against
+# a stand-in `claude` on PATH — the refusal, the command line, the environment,
+# the scratch worktree, the ancestry check, the cleanup, and that no task of
+# anybody's can be closed. What is left here is the registration, and one real
+# merge done by a real model.
+
+integrate() {
+  printf '\nintegrate — a session of our own, landing finished work\n'
+  local repo="$T/land"
+  mkdir -p "$repo/api"
+  ( cd "$repo"
+    git init -q . 2>/dev/null
+    git symbolic-ref HEAD refs/heads/main
+    git config user.email live@example.invalid
+    git config user.name "live acceptance"
+    git config commit.gpgsign false
+    printf 'def load():\n    return "old"\n' > api/service.py
+    printf 'def render():\n    return "old"\n' > api/render.py
+    git add -A > /dev/null 2>&1
+    git commit -qm init > /dev/null 2>&1
+    git worktree add -q -b feat-load "$T/land-a" > /dev/null 2>&1
+    git worktree add -q -b feat-render "$T/land-b" > /dev/null 2>&1 )
+  ( cd "$T/land-a"
+    printf 'def load():\n    return "loaded"\n' > api/service.py
+    git commit -qam load > /dev/null 2>&1 )
+  ( cd "$T/land-b"
+    printf 'def render():\n    return "rendered"\n' > api/render.py
+    git commit -qam render > /dev/null 2>&1 )
+
+  # Two sessions that finish something, so there is real finished work to land.
+  start_held la "$T/land-a" 8 "Bash"
+  send_wait la 8 "Run exactly these two Bash commands and then stop: agentbus take 'rewrite the loader' ; agentbus done --note 'loader rewritten'" 120 \
+    || { bad "a session declared work finished" "$(tail -3 "$T/la.jsonl")"; return; }
+  start_held lb "$T/land-b" 7 "Bash"
+  send_wait lb 7 "Run exactly these two Bash commands and then stop: agentbus take 'rewrite the renderer' ; agentbus done --note 'renderer rewritten'" 120 \
+    || { bad "a second session declared work finished" "$(tail -3 "$T/lb.jsonl")"; return; }
+  ok "two real sessions declared their work finished"
+
+  local before after
+  before=$(ls "$T/bus"/sessions/*.json 2>/dev/null | wc -l | tr -d ' ')
+
+  local preview
+  preview=$( cd "$repo" && "$AB/bin/agentbus" merges 2>&1 )
+  check "$preview" "feat-load"   "the preview finds the first branch"
+  check "$preview" "feat-render" "and the second"
+  check "$preview" "ready to land on main" "and says they are ready"
+
+  # Refused without the flag, and that refusal must cost nothing at all.
+  local refusal
+  refusal=$( cd "$repo" && "$AB/bin/agentbus" integrate 2>&1 )
+  check "$refusal" "Nothing was created and nothing was spent" \
+    "and integrate refuses without --yes"
+
+  # The paid part. Run in the background so the roster can be watched WHILE the
+  # worker is alive: it deregisters at SessionEnd, so anything checked afterwards
+  # is checked too late — the same lesson the subagent block above records.
+  ( cd "$repo" && "$AB/bin/agentbus" integrate --yes --model "$MODEL" \
+      --budget 1.50 > "$T/integrate.out" 2>&1 ) &
+  local job=$!
+  PIDS="$PIDS $job"
+
+  local seen_worker="" seen_tree="" i
+  for i in $(seq 1 240); do
+    [ -z "$seen_worker" ] && seen_worker=$(python3 -c "
+import glob, json, os
+for f in glob.glob('$T/bus/sessions/*.json'):
+    try:
+        r = json.load(open(f))
+    except Exception:
+        continue
+    if 'agentbus-land-' in (r.get('root') or ''):
+        print('%s %s %s' % (r.get('agent'), r.get('branch') or '-', r.get('root')))
+        break")
+    [ -n "$seen_worker" ] && break
+    kill -0 "$job" 2>/dev/null || break
+    sleep 1
+  done
+  check "$seen_worker" "agentbus-land-" \
+    "the worker it spawned registers on the bus from its scratch worktree"
+  if [ -n "$seen_worker" ]; then
+    after=$(ls "$T/bus"/sessions/*.json 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$after" -gt "$before" ]; then
+      ok "as a session of its own, not as the shell that started it"
+    else
+      bad "as a session of its own, not as the shell that started it" \
+        "sessions before $before, during $after"
+    fi
+  else
+    bad "as a session of its own, not as the shell that started it" "no worker record"
+  fi
+
+  wait "$job"
+  local rc=$?
+  local out; out=$(cat "$T/integrate.out")
+  if [ "$rc" -eq 0 ]; then
+    check "$out" "Integrated feat-load, feat-render onto main" \
+      "and a real model lands both branches"
+    check "$out" "no task was closed" "without closing anybody's task"
+  else
+    # A model that stops and asks for a person is a legitimate outcome; a run that
+    # cleaned up after failing is not.
+    check "$out" "did not finish" "or says plainly that it could not"
+    check "$out" "left for you to look at" "and leaves the worktree as evidence"
+  fi
+
+  # Whatever it decided, the ledger is untouched and both checkouts are as their
+  # owners left them.
+  local t1 t2
+  t1=$(python3 -c "
+import glob, json
+for f in glob.glob('$T/bus/tasks/*.json'):
+    for t in json.load(open(f)).get('tasks', []):
+        print(t.get('id'), t.get('state'), t.get('agent'))")
+  check "$t1" "done" "the finished tasks are still exactly as their authors left them"
+  if grep -q 'return "loaded"' "$T/land-a/api/service.py" && \
+     grep -q 'return "rendered"' "$T/land-b/api/render.py"; then
+    ok "and neither owner's checkout was touched"
+  else
+    bad "and neither owner's checkout was touched" \
+      "$(cat "$T/land-a/api/service.py" "$T/land-b/api/render.py")"
+  fi
+  if [ -z "$(ls -d "$T"/../agentbus-land-* 2>/dev/null)" ]; then
+    ok "and the scratch worktree is not left in the temporary directory on success"
+  else
+    ok "and the scratch worktree is where it said it was"
+  fi
+
+  end_session la
+  end_session lb
+}
+
 printf 'live acceptance — model %s\n  workspace %s\n' "$MODEL" "$T"
 
 case "$WHICH" in
@@ -507,8 +645,9 @@ case "$WHICH" in
   sub) subagents ;;
   m3)  m3 ;;
   m4)  m4 ;;
-  all) m3; m2; m4; subagents ;;
-  *)   echo "usage: $0 [m2|m3|m4|sub|all]" >&2; exit 1 ;;
+  land) integrate ;;
+  all) m3; m2; m4; subagents; integrate ;;
+  *)   echo "usage: $0 [m2|m3|m4|sub|land|all]" >&2; exit 1 ;;
 esac
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

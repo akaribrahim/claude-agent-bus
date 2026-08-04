@@ -6590,6 +6590,370 @@ def cli_merges(args):
               "in a scratch worktree, and costs model calls.")
 
 
+# ----------------------------------------------------------- integrate ------
+#
+# The one verb here that spends money, and the only one that acts.
+#
+# What it is for. One chat cannot make another chat act — hooks fire on a
+# session's own activity, so nothing can put a turn into an idle interactive
+# session, and that is a limit of Claude Code rather than of this plugin. A
+# session agent-bus *starts itself* is different, because it was created
+# programmatically and can be driven. So the shape that works is not "make those
+# two chats coordinate": it is "take the work those two chats finished and have a
+# session of our own put it together".
+#
+# `agentbus merges` has already scoped the job for free. This is the part that
+# costs, and it is deliberately something a person types.
+#
+# Five rails, designed in from the start rather than added as advice to a prompt,
+# because a prompt is a request and these are not:
+#
+#   - It works in a worktree it creates and deletes, detached at the trunk.
+#     Never anybody's checkout, and never `main` in a checkout somebody is using —
+#     git would refuse the second anyway, and `--detach` means it is not asked.
+#   - It cannot push. Every remote's `pushurl` is overridden in the worker's
+#     environment, so a push fails before it reaches the network. `git push <url>`
+#     with a literal URL would still get out; the rail is against the accident,
+#     which is the thing that actually happens.
+#   - It registers on the bus like anything else, because the environment it is
+#     given has the parent's session identity removed and `AGENTBUS_OFF` cleared.
+#     Inheriting either is not a small bug: with the parent's id it would file its
+#     writes and its roster line under the chat that started it, and with the bus
+#     off it would be invisible to the guards.
+#   - It cannot close anybody's task, and not because it is asked not to. A
+#     candidate is made of tasks whose state is `done`; `cli_done` refuses a task
+#     that is not the caller's own session's, and `take_over` refuses one that is
+#     finished. Between them there is no sequence of verbs by which another
+#     session closes finished work. The prompt says so as well, but the engine is
+#     what makes it true.
+#   - It says what it will spend before spending it, and requires a flag rather
+#     than a prompt. An agent may run this too, and an agent cannot answer a
+#     question at a terminal.
+
+NO_PUSH = "/nonexistent/agent-bus-refuses-to-push"
+INTEGRATE_BUDGET = "2.00"     # dollars, handed to the CLI as a hard cap
+INTEGRATE_TOOLS = "Bash Read Edit Write Grep Glob"
+
+
+def worker_env(root, base=None):
+    """The environment the headless worker is given. Three deliberate edits.
+
+    Identity is removed. A session spawned from inside another session's Bash
+    tool inherits that session's ids through the environment, and would then
+    register on the bus AS ITS PARENT — one roster line for two processes, the
+    parent's write log collecting the worker's files, and the guards unable to
+    tell them apart. `tests/live/acceptance.sh` unsets the same three for the same
+    reason.
+
+    `AGENTBUS_OFF` is cleared, which is the opposite kind of edit and just as
+    load-bearing: the worker is supposed to be an ordinary citizen of the bus, and
+    a worker started from a shell where somebody had switched the bus off would
+    register nowhere and be subject to nothing.
+
+    Pushing is made to fail. Every remote's `pushurl` is pointed at a path that
+    does not exist, and git config from the environment is inherited by every git
+    the worker runs. A push to a literal URL would still get out — this is a rail
+    against the accident, not a sandbox — and `AGENTBUS_HOME` is deliberately left
+    alone, because the worker must join the same bus everybody else is on."""
+    env = dict(os.environ if base is None else base)
+    for name in ("AGENTBUS_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"):
+        env.pop(name, None)
+    env.pop("AGENTBUS_OFF", None)
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        count = 0
+    for remote in [r for r in git_out(root, "remote").split("\n") if r.strip()]:
+        env["GIT_CONFIG_KEY_%d" % count] = "remote.%s.pushurl" % remote
+        env["GIT_CONFIG_VALUE_%d" % count] = NO_PUSH
+        count += 1
+    env["GIT_CONFIG_COUNT"] = str(count)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def worker_argv(prompt, model="", budget=INTEGRATE_BUDGET,
+                tools=INTEGRATE_TOOLS):
+    """The command line the worker is started with.
+
+    A function of its own so that what is about to be run can be printed and
+    asserted without running it. `--max-budget-usd` is the cost rail the CLI
+    itself enforces: this verb can promise a ceiling because it is not the one
+    counting. `--allowedTools` as one space-separated string is the form
+    `tests/live/acceptance.sh` has been driving real sessions with for a while.
+
+    Nothing here skips permissions. A session that can do anything is not what is
+    wanted: the tools it needs are the tools it is given."""
+    argv = ["claude", "-p", prompt,
+            "--output-format", "stream-json", "--verbose"]
+    if model:
+        argv += ["--model", model]
+    if budget:
+        argv += ["--max-budget-usd", str(budget)]
+    return argv + ["--allowedTools", tools]
+
+
+def worker_prompt(view, branches, tree):
+    """What the worker is told. Scoped by the preview, so it is not asked to
+    discover what git has already computed for nothing."""
+    trunk = view["trunk"]
+    by_branch = {c["branch"]: c for c in view["candidates"]}
+    lines = [
+        "You are agent-bus's integration worker. You are in a scratch git "
+        "worktree made for this one job, at %s, detached at %s. Nobody else is "
+        "working in it and nothing you do here touches anybody's checkout."
+        % (tree, trunk),
+        "",
+        "Merge these branches into it, in this order:"]
+    for branch in branches:
+        c = by_branch.get(branch) or {}
+        for t in c.get("tasks") or []:
+            lines.append("  %-24s %s  %s — %s" % (branch, t["id"], t["what"],
+                                                  t["agent"]))
+        if not c.get("tasks"):
+            lines.append("  %s" % branch)
+    trouble = ["  %s: %s, between %s and %s"
+               % (p["a"], ", ".join(p["conflicts"]), p["a"], p["b"])
+               for p in view["pairs"]
+               if p["state"] == "conflict" and p["a"] in branches
+               and p["b"] in branches]
+    trouble += ["  %s: %s, against %s"
+                % (c["branch"], ", ".join(c["onto_conflicts"]), trunk)
+                for c in view["candidates"]
+                if c["branch"] in branches and c["onto"] == "conflict"]
+    if trouble:
+        lines += ["", "A preview computed with `git merge-tree` says these will "
+                      "conflict, so they are what the job is:"] + trouble
+    else:
+        lines += ["", "A preview computed with `git merge-tree` says none of "
+                      "them conflict, so this should be mechanical. Check "
+                      "rather than assume."]
+    lines += [
+        "",
+        "Do this, in order:",
+        "  1. `git merge --no-ff <branch>` for each branch above, in the order "
+        "given.",
+        "  2. Resolve every conflict so that both sides' intent survives. If one "
+        "is a real disagreement that needs a person to choose, stop there, leave "
+        "it unresolved and say which file and why.",
+        "  3. Work out how this repository checks itself — a Makefile target, a "
+        "test script, a runner under tests/ — and run it. Report what it said.",
+        "  4. Reply with MERGED, CONFLICTS or CHECKS FAILED on the first line by "
+        "itself, then a short paragraph.",
+        "",
+        "Rules, and these are not preferences:",
+        "  - Do not push anything. It is not yours to publish and the "
+        "environment will refuse it.",
+        "  - Do not leave this directory. Do not read, edit, check out or run "
+        "anything in another worktree of this repository — other sessions are "
+        "working in them right now.",
+        "  - Do not run `agentbus done` or `agentbus take`. That work belongs to "
+        "the agents who did it, and saying it is finished is their declaration "
+        "to make, not yours. The engine will refuse you anyway.",
+        "  - Commit nothing except the merges and the conflict resolutions."]
+    return "\n".join(lines)
+
+
+def integrate_text(view, branches, tree_hint, argv, budget):
+    """What this is about to do and what it will cost, printed before anything
+    exists and before anything is spent.
+
+    Separate from the doing so that the refusal path and the run path cannot
+    describe two different jobs — which is the defect class this repository spent
+    a whole plan on, in the shape of a block message that advertised a command the
+    guard would then refuse."""
+    lines = [merges_text(view), "", "Integrating would:"]
+    lines.append("  work in    a fresh worktree under %s, detached at %s"
+                 % (tree_hint, view["trunk"]))
+    lines.append("  merge      %s" % ", then ".join(branches))
+    conflicting = sorted({f for p in view["pairs"]
+                          if p["state"] == "conflict" and p["a"] in branches
+                          and p["b"] in branches for f in p["conflicts"]}
+                         | {f for c in view["candidates"]
+                            if c["branch"] in branches
+                            and c["onto"] == "conflict"
+                            for f in c["onto_conflicts"]})
+    lines.append("  resolve    %s" % (", ".join(conflicting) if conflicting
+                                      else "nothing — the preview says they "
+                                           "merge cleanly"))
+    lines.append("  then       run whatever this repository uses to check "
+                 "itself, and report")
+    lines.append("  spend      one headless Claude Code session, capped at "
+                 "$%s. This is real money." % budget)
+    lines.append("  never      push, touch another worktree, or close anybody's "
+                 "task")
+    lines.append("")
+    lines.append("It runs as: %s" % " ".join(
+        a if a != argv[2] else "<the prompt above>" for a in argv))
+    return "\n".join(lines)
+
+
+def landed(tree, branch):
+    """Whether `branch` is really an ancestor of what is in the scratch worktree.
+
+    Asked of git rather than of the worker. "I merged them" is a sentence; this is
+    the fact, and the difference between the two is the whole reason a report from
+    a model gets checked."""
+    rc, _, _ = git_probe(tree, ("merge-base", "--is-ancestor", branch, "HEAD"))
+    return rc == 0
+
+
+def cli_integrate(args):
+    """Spawn a session of our own to land the finished work. Costs model calls.
+
+    See the section comment above for the five rails and why each one is in the
+    engine rather than in the prompt."""
+    import shutil
+    import subprocess
+    import tempfile
+    sessions = load_sessions()
+    _, me = resolve_party()
+    if not me:
+        root, repo_key, _, _ = git_facts(os.getcwd())
+        me = {"sid": "", "agent": "a shell", "repo_key": repo_key, "root": root}
+    root = me.get("root") or os.getcwd()
+    view = merge_view(me.get("repo_key", ""), sessions, root,
+                      limit=int(opt(args, "--limit", str(MERGE_MAX))))
+    budget = opt(args, "--budget", INTEGRATE_BUDGET)
+    model = opt(args, "--model", "")
+
+    only = [b for b in (opt(args, "--only", "") or "").split(",") if b.strip()]
+    branches, refused = [], []
+    for c in view["candidates"]:
+        if only and c["branch"] not in only:
+            continue
+        if c["onto"] == "unknown":
+            # Merging what could not even be compared is how a worker is sent to
+            # do a job nobody has scoped.
+            refused.append("%s — could not be compared against %s (%s)"
+                           % (c["branch"], view["trunk"], c["onto_why"]))
+            continue
+        branches.append(c["branch"])
+    for line in refused:
+        print("agent-bus: leaving out %s" % line, file=sys.stderr)
+    if not branches:
+        print(merges_text(view))
+        print("\nThere is nothing to integrate. `agentbus merges` is the same "
+              "answer without the spending.")
+        return
+
+    tmp_root = tempfile.gettempdir()
+    prompt = worker_prompt(view, branches, os.path.join(tmp_root, "<new>"))
+    argv = worker_argv(prompt, model=model, budget=budget)
+    print(integrate_text(view, branches, tmp_root, argv, budget))
+    if not flag(args, "--yes"):
+        # A flag rather than a question, because an agent may run this and an
+        # agent cannot answer one. Non-zero, so nothing reads a refusal as a run.
+        print("\nNothing was created and nothing was spent. `--yes` runs it:\n"
+              "  agentbus integrate --yes")
+        sys.exit(1)
+
+    if not shutil.which("claude"):
+        print("agent-bus: no `claude` on PATH, so there is nothing to spawn. "
+              "Nothing was created.", file=sys.stderr)
+        sys.exit(1)
+
+    holding = tempfile.mkdtemp(prefix="agentbus-land-")
+    tree = os.path.join(holding, "landing")
+    rc, _, err = git_probe(root, ("worktree", "add", "--detach", tree,
+                                 view["trunk"]))
+    if rc != 0:
+        shutil.rmtree(holding, ignore_errors=True)
+        print("agent-bus: could not make a scratch worktree: %s" % err,
+              file=sys.stderr)
+        sys.exit(1)
+    print("\nworktree %s" % tree)
+
+    # Announced, because the worker is about to appear in the roster and the other
+    # agents should know why a session they have never seen is holding things.
+    emit(me.get("sid"), me.get("agent"), me.get("repo_key", ""), "note",
+         "started an integration worker on %s: merging %s in a scratch "
+         "worktree. It will not push and it will not close anybody's task."
+         % (view["trunk"], ", ".join(branches)))
+
+    was = git_out(root, "rev-parse", view["trunk"])
+    log = os.path.join(holding, "worker.jsonl")
+    prompt = worker_prompt(view, branches, tree)     # now with the real path
+    argv = worker_argv(prompt, model=model, budget=budget)
+    said, code = "", 1
+    try:
+        with open(log, "w") as fh:
+            proc = subprocess.Popen(argv, cwd=tree, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True,
+                                    env=worker_env(root))
+            for line in proc.stdout:
+                fh.write(line)
+                fh.flush()
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") == "assistant":
+                    for part in rec.get("message", {}).get("content") or []:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            text = (part.get("text") or "").strip()
+                            if text:
+                                print("  · %s" % text.split("\n")[0][:100])
+                elif rec.get("type") == "result":
+                    said = rec.get("result") or ""
+            code = proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        code = 130
+    except OSError as exc:
+        print("agent-bus: the worker could not be started: %s" % exc,
+              file=sys.stderr)
+        code = 1
+
+    missing = [b for b in branches if not landed(tree, b)]
+    left = dirty_count(tree)
+    now_at = git_out(root, "rev-parse", view["trunk"])
+    print("")
+    if said:
+        print(said.strip())
+        print("")
+    if now_at and was and now_at != was:
+        # Not something the rails should allow, so if it happens it is the most
+        # important line on the screen.
+        print("agent-bus: WARNING — %s moved while this ran (%s → %s). Nothing "
+              "here should have done that; check what else is running."
+              % (view["trunk"], was[:9], now_at[:9]), file=sys.stderr)
+
+    if code == 0 and not missing and not left:
+        print("Integrated %s onto %s in the scratch worktree. %s"
+              % (", ".join(branches), view["trunk"],
+                 git_out(tree, "log", "--oneline",
+                         "%s..HEAD" % view["trunk"]).replace("\n", "; ")))
+        print("Nothing was pushed and no task was closed — closing work is its "
+              "author's to declare. `agentbus post --to <agent>` if you want "
+              "them to.")
+        if flag(args, "--keep"):
+            print("Kept: %s" % tree)
+            return
+        git_probe(root, ("worktree", "remove", "--force", tree))
+        shutil.rmtree(holding, ignore_errors=True)
+        return
+
+    # Left where it is, on purpose: the half-merged tree, the conflict markers and
+    # the worker's own transcript are the evidence, and deleting them to keep the
+    # temporary directory tidy would throw away the only reason anybody would look.
+    why = []
+    if code != 0:
+        why.append("the worker exited %d" % code)
+    if missing:
+        why.append("%s never landed" % ", ".join(missing))
+    if left:
+        why.append("%d file%s left unresolved or uncommitted"
+                   % (left, "" if left == 1 else "s"))
+    print("agent-bus: this did not finish — %s." % "; ".join(why),
+          file=sys.stderr)
+    print("The worktree is left for you to look at:\n  %s\n  %s"
+          % (tree, log), file=sys.stderr)
+    print("When you are done with it:\n  git -C %s worktree remove --force %s"
+          % (short_path(root), tree), file=sys.stderr)
+    sys.exit(1)
+
+
 def board_state(limit=60):
     """Everything the dashboard shows, as plain data.
 
@@ -8199,7 +8563,7 @@ COMMANDS = {
     "watch": cli_watch, "board": cli_board, "here": cli_here,
     "port": cli_port, "env": cli_env,
     "doing": cli_doing, "take": cli_take, "done": cli_done,
-    "merges": cli_merges,
+    "merges": cli_merges, "integrate": cli_integrate,
     "init-repo": cli_init_repo, "doctor": cli_doctor,
     "register": cli_register, "install": cli_install, "serve": cli_serve,
     "serves": cli_serves, "forget": cli_forget,
@@ -8236,6 +8600,9 @@ USAGE = """agentbus — coordination between parallel Claude Code sessions
   done [<task>] [--note ".."]  say it has landed
   merges                       what the finished work would do if it landed
                                together, and what would conflict. Reads only.
+  integrate --yes [--only a,b] [--budget 2.00] [--keep]
+                               spawn a headless session to actually land it, in
+                               a scratch worktree. Spends model calls.
   handoff [--note "..."]       summarise what you did, for the others
   doing "..."                  one line others see in their roster
   name [<new>]                 read or set this session's name
