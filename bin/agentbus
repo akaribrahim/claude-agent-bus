@@ -5657,6 +5657,16 @@ tr.waiting .name{color:var(--amber)}
 .tag.want{border-color:var(--amber);color:var(--amber);font-weight:600}
 tr.grp td{padding:6px 14px;background:var(--bg);color:var(--dim);font-size:11px;
  font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+/* Declared intent, under the session it belongs to and indented like a
+   subagent, so a session that has declared nothing still shows its branch, its
+   files and its clashes exactly as before. The ledger enriches the row; it does
+   not stand in for it. */
+tr.task td:first-child{padding-left:30px}
+tr.task .tid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600}
+tr.task .what{overflow-wrap:anywhere}
+tr.blocked{background:var(--wait)}
+.tag.st-done{border-color:var(--green);color:var(--green)}
+.tag.st-dropped{border-color:var(--red);color:var(--red);font-weight:600}
 .files{cursor:pointer;color:var(--dim);font-size:12px;text-decoration:underline dotted}
 .list{display:none;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim);
  font-size:.86em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -5668,7 +5678,8 @@ tr.grp td{padding:6px 14px;background:var(--bg);color:var(--dim);font-size:11px;
 .since::after{content:"";flex:1;height:1px;background:var(--accent);opacity:.35}
 </style></head><body>
 <header><h1>agent-bus</h1><span class="count" id="count">…</span>
- <span class="count warn" id="wanting"></span></header>
+ <span class="count warn" id="wanting"></span>
+ <span class="count bad" id="stuck"></span></header>
 <div id="lost">connection lost — did `agentbus board` stop?</div>
 <main>
  <section><h2>Projects</h2><div id="filters"></div></section>
@@ -5807,6 +5818,46 @@ function makeKid(){var tr = el("tr", "kid"), c = {};
 function fillKid(tr, it){var a = it.a, c = tr.c;
  put(c.name, a.name); put(c.branch, a.branch || "-");
  put(c.root, a.root); put(c.type, a.type || "");}
+/* ---- what an agent says it is doing -------------------------------------- */
+function makeTask(){var tr = el("tr", "task"), c = {}, td = add(tr, "td");
+ c.tid = add(td, "span", "tid"); c.state = add(gap(td), "span", "tag");
+ c.branch = add(tr, "td", "mono");
+ c.was = add(tr, "td", "meta");
+ td = add(tr, "td");
+ c.what = add(td, "div", "what"); c.block = add(td, "div", "bad");
+ c.wait = add(td, "div", "meta"); c.res = add(td, "div", "meta");
+ c.files = add(td, "div", "files"); c.list = add(td, "div", "list");
+ c.files.onclick = function(){c.list.classList.toggle("open");};
+ c.when = add(tr, "td", "meta");
+ tr.c = c; return tr;}
+function fillTask(tr, it){var t = it.t, c = tr.c;
+ put(c.tid, t.id);
+ put(c.state, t.state); mark(c.state, "st-done", t.state === "done");
+ mark(c.state, "st-dropped", t.state === "dropped");
+ shown(c.state, t.state !== "open");
+ /* Blank under its own session, which already says the branch on the row above;
+    filled in for work whose session has gone, where it is the whole answer to
+    "where did that get to". Decided on the server, so this stays a print. */
+ put(c.branch, t.branch_note); shown(c.branch, !!t.branch_note);
+ put(c.was, t.owner_live ? "" : "was " + t.agent);
+ shown(c.was, !t.owner_live);
+ put(c.what, t.what + (t.note ? " — " + t.note : ""));
+ put(c.block, t.blocked_by.length ? "blocked until " + t.blocked_by.join(", ")
+   + " lands" : "");
+ shown(c.block, !!t.blocked_by.length); mark(tr, "blocked", !!t.blocked_by.length);
+ put(c.wait, t.waiting.length ? t.waiting.join(", ") + " waiting on this" : "");
+ shown(c.wait, !!t.waiting.length);
+ /* Held and queued come from the locks themselves — nothing declares them. */
+ var r = [];
+ if(t.holding.length) r.push("holding " + t.holding.join(", "));
+ if(t.queued_for.length) r.push("queued for " + t.queued_for.join(", "));
+ put(c.res, r.join(" · ")); shown(c.res, !!r.length);
+ put(c.files, t.wrote_n + (t.wrote_n === 1 ? " file" : " files") + " since");
+ shown(c.files, !!t.wrote_n);
+ put(c.list, t.wrote.join("\n") +
+   (t.wrote_n > t.wrote.length ? "\n+" + (t.wrote_n - t.wrote.length) + " older" : ""));
+ put(c.when, t.state === "done" ? "done " + ago(t.done_at, it.now) + " ago"
+   : "for " + ago(t.at, it.now));}
 function makeGrp(){var tr = el("tr", "grp");
  tr.c = {t: add(tr, "td")}; tr.c.t.colSpan = 5; return tr;}
 function makeNone(){var tr = el("tr");
@@ -5885,13 +5936,23 @@ function render(d){
  last = d;
  var now = d.now;
  var ss = d.sessions.filter(keep), lk = d.locks.filter(keep),
-     sv = d.serves.filter(keep), ev = d.events.filter(keep);
+     sv = d.serves.filter(keep), ev = d.events.filter(keep),
+     tk = (d.tasks || []).filter(keep);
+ var open = tk.filter(function(t){return t.state !== "done";}).length;
  put(document.getElementById("count"),
    ss.length + " session" + (ss.length==1?"":"s") + " · " +
    ss.reduce(function(n,s){return n + s.agents.length;},0) + " subagents · " +
-   lk.length + " held");
+   lk.length + " held · " + open + " open");
  var w = ss.filter(function(s){return s.waiting;}).length;
  put(document.getElementById("wanting"), w ? "· " + w + " waiting for you" : "");
+ /* The two states nobody can see from the outside and the reader has to act on:
+    work that cannot go on until another agent finishes, and work whose chat has
+    gone and is sitting on a branch. */
+ var st = tk.filter(function(t){return t.blocked_by.length;}).length,
+     dr = tk.filter(function(t){return t.state === "dropped";}).length, s2 = [];
+ if(st) s2.push(st + " blocked");
+ if(dr) s2.push(dr + " dropped");
+ put(document.getElementById("stuck"), s2.length ? "· " + s2.join(" · ") : "");
 
  sync(document.getElementById("filters"),
    [{key:"", label:"all projects"}].concat(d.repos).map(function(r){
@@ -5910,20 +5971,29 @@ function render(d){
    ss.forEach(function(s){if(s.repo === a) la = s.repo_label || a;
                           if(s.repo === b) lb = s.repo_label || b;});
    return la < lb ? -1 : la > lb ? 1 : 0;});
+ function task(t){return {k: "t:" + t.repo + ":" + t.id, kind: "task",
+   t: t, now: now};}
  order.forEach(function(key){
   var group = ss.filter(function(s){return s.repo === key;});
   rows.push({k: "g:" + key, kind: "grp", label: group[0].repo_label || key});
   group.forEach(function(s){
    rows.push({k: "s:" + s.sid, kind: "sess", s: s, now: now});
+   tk.forEach(function(t){if(t.owner_live && t.sid === s.sid) rows.push(task(t));});
    s.agents.forEach(function(a, i){
-    rows.push({k: "a:" + s.sid + ":" + (a.name || i), kind: "kid", a: a});});});});
+    rows.push({k: "a:" + s.sid + ":" + (a.name || i), kind: "kid", a: a});});});
+  /* Work whose session has gone has no row to sit under, and it is what somebody
+     merging most needs to see: a branch with something half-finished on it. */
+  tk.forEach(function(t){
+    if(t.repo === key && !t.owner_live) rows.push(task(t));});});
  if(!ss.length) rows.push({k: "none", kind: "empty", label: "nobody is live"});
  sync(document.getElementById("agents"), rows, function(it){
    return it.kind === "sess" ? makeSess() : it.kind === "kid" ? makeKid()
+     : it.kind === "task" ? makeTask()
      : it.kind === "grp" ? makeGrp() : makeNone();},
   function(node, it, made){
    if(it.kind === "sess") fillSess(node, it);
    else if(it.kind === "kid") fillKid(node, it);
+   else if(it.kind === "task") fillTask(node, it);
    else fillSpan(node, it);});
 
  sync(document.getElementById("serves"),
@@ -6070,7 +6140,7 @@ def board_state(limit=60):
     sessions = load_sessions()
     live_sids = {s["sid"] for s in sessions}
     out = {"now": now(), "sessions": [], "locks": [], "serves": [],
-           "events": [], "repos": []}
+           "events": [], "repos": [], "tasks": []}
 
     # What each session has produced, and where two of them have produced the
     # same file. The overlap is the whole point: two chats that have both edited
@@ -6080,7 +6150,11 @@ def board_state(limit=60):
     # of one repository have in common — there the same file has two absolute
     # paths and one relative one. Only within a repository: sessions in different
     # projects cannot collide, and pairing them would be noise.
-    wrote = {s["sid"]: [rel for _ts, rel in repo_writes(s, 0)] for s in sessions}
+    # Timestamps kept, not thrown away: the ledger asks the same logs what a task
+    # has produced *since it was taken*, and reading them a second time per task
+    # would cost more than everything else on this page.
+    pairs = {s["sid"]: repo_writes(s, 0) for s in sessions}
+    wrote = {sid: [rel for _ts, rel in ps] for sid, ps in pairs.items()}
     clash = {}                      # sid -> {relative path: [other agents]}
     for a in sessions:
         for b in sessions:
@@ -6135,16 +6209,8 @@ def board_state(limit=60):
             "waiting": bool(idle and unread)})
         seen_repos[s.get("repo_key", "")] = s.get("repo_label", "")
 
-    try:
-        names = sorted(os.listdir(LOCKS))
-    except OSError:
-        names = []
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        lock = read_json(os.path.join(LOCKS, name))
-        if not lock:
-            continue
+    raw_locks = all_locks()
+    for lock in raw_locks:
         _, stealable, why = lock_state(lock, sessions)
         out["locks"].append({
             "resource": lock.get("resource"), "agent": lock.get("agent"),
@@ -6214,6 +6280,16 @@ def board_state(limit=60):
                 "churn": len(recent),
                 "churn_roots": sorted({short_path(m.get("root", ""))
                                        for m in recent})})
+
+    # What the agents have declared they are doing, beside what they are
+    # observably doing. Only for repositories somebody is working in — the same
+    # rule the filter list follows, and for the same reason: a repository nobody
+    # is live in has no rows for these to sit under.
+    for repo_key in sorted(roots):
+        out["tasks"].extend(
+            t for t in ledger_view(repo_key, sessions, locks=raw_locks,
+                                   writes=pairs, at=out["now"])
+            if t["fresh"])
 
     for r in log:
         if r.get("i", 0) <= seq - limit:

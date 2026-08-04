@@ -317,4 +317,199 @@ assert_equal 0 "$(led 'len([x for x in d["tasks"] if x["id"] == "t5"])')" \
 assert_equal 1 "$(led 'len([x for x in d["tasks"] if x["id"] == "t7"])')" \
   "and the sweep takes only what it was aimed at"
 
+# ---- the board ---------------------------------------------------------------
+
+snap() {   # <python expression over `d`, `t(id)`, `sess(name)`>
+  python3 -c "
+import importlib.machinery, importlib.util, json, os
+os.environ['AGENTBUS_HOME'] = '$AGENTBUS_HOME'
+ldr = importlib.machinery.SourceFileLoader('ab', '$AB_ROOT/bin/agentbus')
+ab = importlib.util.module_from_spec(importlib.util.spec_from_loader('ab', ldr))
+ldr.exec_module(ab)
+d = ab.board_state()
+def t(tid):
+    return [x for x in d['tasks'] if x['id'] == tid][0]
+def sess(name):
+    return [s for s in d['sessions'] if s['agent'] == name][0]
+print($1)"
+}
+
+new_session sess-e "$REPO"
+E=$(ab sess-e name)
+# Into a file another live session has written too, so the row this task sits
+# under still carries the 2.4.0 collision the reader came for.
+wrote sess-e "$REPO" api/token.py
+# The id is read from what the verb answered rather than assumed: ids are handed
+# out per repository in order, and a test that counts them itself is a test that
+# breaks whenever the file above it takes one more task.
+MINE=$(ab sess-e take "wire the ledger to the page" --needs t7 | head -1 | cut -d' ' -f1)
+assert_contains "$(snap 'json.dumps([x["what"] for x in d["tasks"]])')" \
+  "wire the ledger to the page" "the snapshot the page polls carries the tasks"
+assert_equal "$E" "$(snap 't("'"$MINE"'")["agent"]')" "each with the agent that took it"
+assert_equal True "$(snap 't("'"$MINE"'")["owner_live"]')" \
+  "and whether its session is still there, which is what decides where the row goes"
+assert_equal t7 "$(snap '" ".join(t("'"$MINE"'")["blocked_by"])')" \
+  "the one thing a reader has to act on: work that cannot go on until other work lands"
+assert_equal "$(session_field sess-e repo_key)" "$(snap 't("'"$MINE"'")["repo"]')" \
+  "tagged with its repository, so the page's project filter reaches it"
+assert_equal 2 "$(snap 'len(set(x["repo"] for x in d["tasks"]))')" \
+  "with the other project's ledger read too, since somebody is still working there"
+end_session sess-d
+assert_equal 0 "$(snap 'len([x for x in d["tasks"] if x["repo"] != sess("'"$E"'")["repo"]])')" \
+  "and dropped once nobody is, like every other row on this page — the ledger keeps it, the screen does not"
+
+# Read-only, the first of this board's three invariants, extended to the ledger:
+# it polls every couple of seconds for as long as a tab is open, and rendering a
+# task must not reap, adopt or advance anything.
+#
+# There has to be something for a sweep to take, or this measures nothing — which
+# is what the first version of it did: with no reapable task on the bus, a
+# `sweep_tasks` planted inside `board_state` left the fingerprint identical and
+# the assertion passed. The same trap `test_board.sh` avoids by planting a
+# genuinely reapable session before asking whether the board reaps.
+new_session sess-f "$REPO"
+LOST=$(ab sess-f take "work that will be abandoned" | head -1 | cut -d' ' -f1)
+end_session sess-f
+age "$LOST" 90000
+assert_equal 1 "$(led 'len([x for x in d["tasks"] if x["id"] == "'"$LOST"'"])')" \
+  "a task any ordinary engine run would forget is planted"
+
+ledger_print() {
+  python3 -c "
+import glob, hashlib, os
+h = hashlib.sha1()
+for p in sorted(glob.glob(os.path.join('$AGENTBUS_HOME', 'tasks', '*'))):
+    st = os.stat(p)
+    h.update(os.path.basename(p).encode())
+    h.update(open(p, 'rb').read())
+    h.update(str(st.st_mtime_ns).encode())
+print(h.hexdigest())"
+}
+before=$(ledger_print)
+snap 'len(d["tasks"])' > /dev/null
+snap 'len(d["tasks"])' > /dev/null
+assert_equal "$before" "$(ledger_print)" \
+  "polling the board changes nothing in the ledger — not a state, not an mtime"
+assert_equal 1 "$(led 'len([x for x in d["tasks"] if x["id"] == "'"$LOST"'"])')" \
+  "so an abandoned task is left on disk rather than swept behind the user's back"
+ab sess-e status > /dev/null
+assert_equal 0 "$(led 'len([x for x in d["tasks"] if x["id"] == "'"$LOST"'"])')" \
+  'which status, asked a question by a person, does do'
+
+html=$(python3 -c "
+import importlib.machinery, importlib.util, os
+os.environ['AGENTBUS_HOME'] = '$AGENTBUS_HOME'
+ldr = importlib.machinery.SourceFileLoader('ab', '$AB_ROOT/bin/agentbus')
+ab = importlib.util.module_from_spec(importlib.util.spec_from_loader('ab', ldr))
+ldr.exec_module(ab)
+print(ab.BOARD_HTML)")
+# A fact added to the snapshot and wired to nothing is a cost paid on every poll
+# for a number no reader ever sees. These are the only cover on a host with no
+# node, where the executing check below is skipped — and each names the exact
+# call that draws the field rather than the field, because a field name appears
+# in three or four places and a search for one of those cannot fail for the right
+# reason. Tried: dropping the drawing line while leaving `shown(...)` and the
+# header's own filter behind left a search for `t.blocked_by` perfectly green.
+assert_contains "$html" "put(c.what, t.what" "the page draws what an agent said it was doing"
+assert_contains "$html" '"blocked until " + t.blocked_by' \
+  "and what it cannot get on without"
+assert_contains "$html" "put(c.state, t.state)" \
+  "and whether the work is open, done or dropped"
+assert_contains "$html" 't.waiting.join(", ") + " waiting on this"' \
+  "and who is waiting on it"
+assert_contains "$html" '"holding " + t.holding' \
+  "and what its owner holds, which nothing declared"
+
+# ---- it is served, and the script it serves actually parses ------------------
+#
+# The one that got past every assertion in this suite last time: a page that
+# returns 200 with a script that does not parse renders nothing at all, and no
+# amount of asserting on JSON can see it. BOARD_HTML is Python source, so one
+# unescaped backslash in a JavaScript string is enough.
+
+"$AB_ROOT/bin/agentbus" board --port 0 --no-open > "$TEST_TMP/board.out" 2>&1 &
+BOARD_PID=$!
+trap 'kill $BOARD_PID 2>/dev/null' EXIT
+url=""
+for _ in $(seq 40); do
+  url=$(sed -n 's|.*\(http://127\.0\.0\.1:[0-9]*\)/.*|\1|p' "$TEST_TMP/board.out" | head -1)
+  [ -n "$url" ] && break
+  sleep 0.25
+done
+
+if [ -z "$url" ]; then
+  _bad "the board serves the page the ledger is drawn on" "$(cat "$TEST_TMP/board.out")"
+else
+  get() {   # <path> → "<status> <body>"
+    python3 -c "
+import sys, urllib.error, urllib.request
+try:
+    r = urllib.request.urlopen('$url' + sys.argv[1], timeout=10)
+    print(r.status, r.read().decode('utf-8', 'replace'))
+except urllib.error.HTTPError as e:
+    print(e.code, '')" "$1"
+  }
+  body=$(get /data)
+  assert_contains "$body" "200" "the data endpoint answers"
+  assert_contains "$body" "wire the ledger to the page" "with the ledger in it"
+  printf '%s' "$body" | sed '1s/^200 //' > "$TEST_TMP/data.json"
+
+  get / | sed '1s/^200 //' > "$TEST_TMP/page.html"
+  python3 -c "
+import re, sys
+h = open('$TEST_TMP/page.html').read()
+m = re.search(r'<script>(.*?)</script>', h, re.S)
+open('$TEST_TMP/board.js', 'w').write(m.group(1) if m else '')
+sys.exit(0 if m else 1)" \
+    && _ok "the served page carries a script" \
+    || _bad "the served page carries a script" "no <script> in the served HTML"
+
+  if command -v node > /dev/null 2>&1; then
+    if out=$(node --check "$TEST_TMP/board.js" 2>&1); then
+      _ok "and it parses as JavaScript, so the page renders rather than 200-ing empty"
+    else
+      _bad "and it parses as JavaScript, so the page renders rather than 200-ing empty" "$out"
+    fi
+    # And then it is RUN, against the data the server just served, in the
+    # smallest DOM the page's reconciler actually uses. Everything above this is
+    # a search of the source, and a search cannot tell a field that is drawn from
+    # a field that is merely mentioned — a `fillTask` whose body never executes
+    # still contains every name a grep would look for. Proved: a mutation that
+    # made that function return immediately left every one of those assertions
+    # green.
+    if out=$(node "$AB_ROOT/tests/board-render.js" "$TEST_TMP/board.js" \
+                  "$TEST_TMP/data.json" 2>&1); then
+      _ok "the page renders when it is actually run"
+      rows=$(printf '%s\n' "$out" | grep '^AGENTS \[task' || true)
+      assert_contains "$rows" "wire the ledger to the page" \
+        "drawing a row for what an agent said it was doing"
+      assert_contains "$rows" "blocked until t7 lands" \
+        "and, on that row, what it cannot get on without"
+      assert_contains "$rows" "dropped" \
+        "and marking work whose session has gone, which sits under no session at all"
+      assert_contains "$rows" "waiting on this" \
+        "and telling the agent in the way that somebody is behind it"
+      assert_contains "$rows" "holding db" \
+        "and what its owner holds, which came from the locks and not from the ledger"
+      # Beside, not instead of: the session's own row keeps everything 2.4.0
+      # gave it, so a session that has declared nothing loses nothing.
+      sess_rows=$(printf '%s\n' "$out" | grep '^AGENTS \[\]' || true)
+      assert_contains "$sess_rows" "files written" \
+        "beside a session row that still shows the files it has written"
+      assert_contains "$sess_rows" "also" \
+        "and the ones another session in the same repository has written too"
+      assert_contains "$(printf '%s\n' "$out" | grep '^HEADER')" "open" \
+        "with the header counting the work that is open"
+    else
+      _bad "the page renders when it is actually run" "$out"
+    fi
+  else
+    _ok "and it parses as JavaScript (skipped: no node on this host)"
+    _ok "the page renders when it is actually run (skipped: no node on this host)"
+  fi
+fi
+
+kill $BOARD_PID 2>/dev/null
+trap - EXIT
+
 finish
