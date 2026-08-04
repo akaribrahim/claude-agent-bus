@@ -216,6 +216,9 @@ agentbus handoff [--note ".."]        summarise what you did, for the others
 agentbus claim <res>[,<res>] [--why ".."] [--steal] [--as <you>]
 agentbus wait <res>[,<res>] [--timeout 90]      queue for a held resource
 agentbus release <res>[,<res>] | --all
+agentbus take "<what>" [--needs <task>]         say what you have started
+agentbus take <task>                  pick up work whose session has gone
+agentbus done [<task>] [--note ".."]  say it has landed
 agentbus doing "..."                  one line others see in their roster
 agentbus init-repo [--dry-run|--force|--local]
 agentbus here [<path>]                record which worktree you are working in
@@ -259,6 +262,32 @@ else are what each session has produced and where that collides:
 - **how many bus messages it has not been shown**, and, if it has gone quiet
   holding any, the row is tinted and counted in the header. That is the window
   to go and poke, and it is the one thing on the page asking to be acted on.
+
+None of that can show *intent*. Two chats fixing review findings in one
+repository look identical from outside, and which of them is blocked on the
+other is nowhere on the machine. So the agents write it themselves, in two lines
+per piece of work:
+
+```bash
+agentbus take "fix the review findings in api/"          # → t1
+agentbus take "rebase web onto main once api lands" --needs t1
+agentbus done t1 --note "all four findings closed"
+```
+
+Each task appears **under the session that took it**, so a chat that has
+declared nothing still shows everything above. Only the sentence and the
+reference are typed: the branch, the checkout, the files the task has produced
+since it was taken, what its owner is holding and — from a lock's own queue —
+what it is queued behind are all derived, because a ledger with six fields to
+fill in is one nobody fills in when it matters. Taking and finishing reach the
+other sessions in the repository the way a `post` does, which is the point:
+nobody has to carry messages between chats by hand.
+
+Work whose chat has gone reads as **dropped** and is shown rather than deleted —
+a lock that grants nothing can be deleted because the resource frees itself, and
+work cannot, because the branch is still there. It sits under its repository with
+that branch named, and `agentbus take <task>` picks it up. Ids are per
+repository. The header counts what is open, blocked and dropped.
 
 The feed draws a line where you last looked away. That mark lives in your
 browser, not on the bus.
@@ -316,8 +345,10 @@ even read the payload when you are the only session. On hosts without bash the
 installer wires the hooks straight to Python instead.
 
 State lives in `~/.claude/agent-bus/` — sessions, cursors, locks, ownership,
-service ownership, an append-only `events.jsonl`, and the derived files the fast
-path reads. Never in the plugin directory, so updating never loses it.
+service ownership, one task ledger per repository, an append-only `events.jsonl`,
+and the derived files the fast path reads. Never in the plugin directory, so
+updating never loses it, and never in the repository either: a ledger one chat
+commits and another rebases away is not a ledger.
 
 Locks are soft (taken automatically, released when the command ends, stealable
 once expired) or hard (`claim`, 45 minutes, only stealable with `--steal`). A
@@ -355,6 +386,11 @@ free.
   resource nobody guards, and a pattern that stops matching fails silently.
   `agentbus doctor` reports resources that have never matched, which is the only
   way to notice.
+- **The task ledger is only as good as the habit.** Everything derivable is
+  derived precisely because agents forget, but the two lines that are typed can
+  still go untyped — and then the board says nothing was taken. What it will not
+  do is lie: a task nobody closed goes on showing what its owner is really
+  writing, and one whose chat ended reads as dropped by itself.
 - **Locks see Bash tools only.** A shared service reached through an MCP tool, or
   a file written by something other than `Edit`/`Write`, is invisible to them.
 - **Subagents share their parent's writes.** Locks, presence and messages treat

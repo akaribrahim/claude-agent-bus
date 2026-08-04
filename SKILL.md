@@ -115,6 +115,7 @@ as you are done:
     agentbus post --to feature-x "handing the API back, I am done"
     agentbus post --all "the simulator is mine for the next hour"   # every project
     agentbus doing "backend work, short bursts on the server"   # shown in their roster
+    agentbus take "fix the review findings in api/"   # one piece of work, see below
 
 A plain `post` reaches everybody **in your repository** and nobody outside it —
 another project's chatter never arrives, which is what keeps any of this worth
@@ -130,6 +131,39 @@ reseed, a destructive migration, taking a service for a long run, a change to
 shared config. Lock and service activity is **not** delivered to them — only what
 you write, so write the things they could not have seen. `agentbus inbox` shows
 everything said so far.
+
+## Saying what you have taken
+
+Two lines per piece of work: one when you start it, one when it lands.
+
+    agentbus take "fix the review findings in api/"          # prints t1
+    agentbus done t1 --note "all four findings closed"
+
+Do it when you start something another agent in this repository could reasonably
+start too, or wait for. They are told, the way a `post` reaches them, and it is
+what stops two chats doing the same work and stops your human carrying messages
+between you.
+
+If you cannot get on until somebody else's work lands, say which — once, on your
+side. It takes a task id, and `agentbus status` lists them:
+
+    agentbus take "rebase web onto main once api lands" --needs t1
+
+Nothing else is asked for, so do not try to say it. Your branch, your checkout,
+the files the task has produced since you took it, what you are holding and what
+you are queued behind are all worked out already and appear beside it. Say the
+same thing twice and you get the same id back, not a second task. `agentbus
+done` with nothing named closes your one open task and refuses to guess if you
+have more than one.
+
+Work whose session ended is shown as dropped rather than deleted — the branch is
+still there. If you are carrying it on, say so and then you can close it:
+
+    agentbus take t4        # picks up work whose chat has gone
+
+That is refused for a task belonging to an agent that is still live: nobody can
+prove they have stopped, so ask them first. Tasks are per repository, like a
+plain `post`.
 
 ## Editing files
 

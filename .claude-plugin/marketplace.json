@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Coordination for parallel Claude Code sessions on one machine.",
-    "version": "2.4.0"
+    "version": "2.5.0"
   },
   "plugins": [
     {
       "name": "agent-bus",
       "source": "./",
       "description": "Machine-wide coordination for parallel Claude Code sessions: presence, shared-resource locks, service ownership, declared file ownership, an interference guard, handoff summaries, and messaging between agents.",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "author": {
         "name": "Ibrahim Akar"
       },

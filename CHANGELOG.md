@@ -2,6 +2,83 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.5.0 — 2026-08-04
+
+The agents can now say **what they have taken and what they are waiting for**,
+and it goes on the board beside what they are observably doing.
+
+2.4.0 gave the board everything that can be seen from the outside: each
+session's branch, how far ahead of the trunk, the files it wrote, which of them
+another chat wrote too, and which window is sitting idle on unread messages.
+What none of that can show is intent. Two chats fixing review findings in one
+repository, told to "coordinate between yourselves and get both of you to
+main", both look identical from outside — and which of them is blocked on the
+other existed nowhere except in the head of the person watching, who was
+carrying messages between chats by hand.
+
+    agentbus take "fix the review findings in api/"          # → t1
+    agentbus take "rebase web onto main once api lands" --needs t1
+    agentbus done t1 --note "all four findings closed"
+
+**Two lines per piece of work, and nothing else asked for.** Everything a form
+would have wanted is worked out from what the bus already records: who took it,
+which branch and checkout they are in, the files the task has produced since it
+was taken, what its owner is holding, and — from a lock's own `queue` — what
+its owner is queued behind. A "blocked by" that the queue already implies is
+not declared a second time. The only typed fields are the sentence and, at
+most, one task it has to wait for, because nothing on disk can infer either: a
+file change is visible and an intention is not, and a dependency between two
+pieces of work is not a contention over a resource, so there is no lock to
+queue for.
+
+That is deliberate rather than tidy. The reason is in 2.3.0: `AGENTBUS_OFF`
+became a reflex, 88 uses in 48 hours of which 76 overrode nothing. A ledger
+with six fields to fill in is one nobody fills in on the afternoon it would
+have mattered.
+
+- **A task whose chat has gone reads as dropped immediately**, and is *shown*
+  rather than deleted. A lock that grants nothing is deleted on sight because
+  the resource frees itself; work does not — the branch it was started on is
+  still there, and it is exactly what somebody merging is looking for. The
+  state is derived from the live session list, so there is no moment in which
+  the ledger claims a session that has ended is still working, and no sweep in
+  between. `agentbus take t4` picks it up; it is refused off a session that is
+  still live, which the refusal says, with the name to ask.
+- **`take` and `done` are delivered** to the other sessions in the repository,
+  the way a `post` is. That is the point: the person watching stops being the
+  router. Finishing something names the agents it unblocked.
+- On the board, each task sits **under the session that took it**, so a chat
+  that has declared nothing still shows its branch, its files and its
+  collisions exactly as before. Work whose chat has gone sits under its
+  repository with the branch it was left on. The header counts what is open,
+  what is blocked and what was dropped.
+- Scoped **per repository**, like a plain `post` and unlike `--all`: two chats
+  merging into one trunk is the case, a task graph across projects is not. Ids
+  are per repository, which is what keeps them short enough to type.
+
+**Cost.** No work was added to the path a tool call pays: nothing in `PreToolUse`,
+`PostToolBatch` or `PostToolUse` reads the ledger. The new housekeeping runs where
+session reaping already does — session start, once a turn, session end — and takes
+12 microseconds on a machine with no tasks and 213 with a hundred of them. The
+shell fast path in front of all of it is unchanged at about 5 ms, and that is what
+most tool calls actually pay.
+
+A hook that does wake the engine got about 2.5 ms slower, and for the honest
+reason rather than an algorithmic one: the engine grew by 637 lines, and a hook is
+handed a script rather than an import, so Python recompiles the whole file every
+time and is never allowed to cache the result. Measured separately, those 637
+lines cost 2.33 ms to compile — which is the whole of it. The same trade 2.1.0
+recorded.
+
+Also fixed, found while checking that: **`AGENTBUS_HOME=` — set and empty — put
+the entire bus in whatever directory the caller was standing in.** An empty
+variable is not an absent one, and a relative path is what `os.path.join("", …)`
+produces. Nothing errored; presence and every guard simply stopped working,
+because no other process could find any of it, and a `live-count` and a
+`guard-tokens` appeared in a repository to be committed. Both fast paths already
+substituted on empty, so the gate was looking in one place while the engine wrote
+to another — the same shape as the executable-bit divergence closed in 2.1.0.
+
 ## 2.4.0 — 2026-08-04
 
 `agentbus board` answers the two questions that cost time when several chats are
