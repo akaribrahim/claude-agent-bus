@@ -282,6 +282,34 @@ gate "no state directory at all: both agree" pre-tool "$BASH_P"
 slept "and neither wakes the engine looking for one"
 GATE_ENV=""
 
+# An AGENTBUS_HOME that is set and EMPTY, which is the same shape of divergence
+# and was live until 2.5.0. An empty value is not an absent one:
+# `os.environ.get(k, default)` hands back the empty string and
+# `os.path.join("", "sessions")` is a RELATIVE path, so the engine put the whole
+# bus — session records, locks, and the two derived files this gate reads — in
+# whatever directory the caller happened to be standing in. Nothing errored.
+# Presence and every guard simply stopped working, because no other process could
+# find any of it, and a `live-count` and a `guard-tokens` turned up in somebody's
+# repository to be committed. Both fast paths already substituted on empty
+# (`or` here, `${…:-…}` in the shell one), so the gate looked in one place while
+# the engine wrote to another — exactly the executable-bit divergence above.
+#
+# Asked of the value each file derives, with nothing run: the whole point of the
+# answer is that it is the real bus, and a test may not go near that.
+derived_home() {   # <file under bin/> → the bus it derives from an empty variable
+  python3 -c "
+import importlib.machinery, importlib.util, os
+os.environ['AGENTBUS_HOME'] = ''
+ldr = importlib.machinery.SourceFileLoader('probe', '$AB_ROOT/bin/$1')
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader('probe', ldr))
+ldr.exec_module(m)
+print(m.BUS)"
+}
+assert_equal "$HOME/.claude/agent-bus" "$(derived_home agentbus)" \
+  "an empty AGENTBUS_HOME sends the engine to the real bus, not to the cwd"
+assert_equal "$(derived_home hook.py)" "$(derived_home agentbus)" \
+  "and the Python gate in front of it looks in the same place"
+
 # ---- the events that are never gated ----------------------------------------
 #
 # Once per session, per user turn, or per subagent. Cheap enough to be always

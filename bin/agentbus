@@ -71,7 +71,17 @@ import time
 
 IS_WIN = sys.platform.startswith("win")
 HOME = os.path.expanduser("~")
-BUS = os.environ.get("AGENTBUS_HOME", os.path.join(HOME, ".claude", "agent-bus"))
+# `or`, not a default: `os.environ.get` returns the empty string for a variable
+# that is set and empty, and `os.path.join("", "sessions")` is a RELATIVE path —
+# so `AGENTBUS_HOME=` put the entire bus in whatever directory the caller
+# happened to be standing in. Every part of it: session records, locks, and the
+# two derived files the fast path reads. Nothing errored. Presence and the guards
+# simply stopped working, because no other process could find any of it, and a
+# `live-count` and a `guard-tokens` appeared in somebody's repository to be
+# committed. Easy to reach from a script — `AGENTBUS_HOME="$SOME_UNSET_VAR"` is
+# one typo — and it fails silently, which is the shape this plugin exists to
+# refuse.
+BUS = os.environ.get("AGENTBUS_HOME") or os.path.join(HOME, ".claude", "agent-bus")
 SESSIONS = os.path.join(BUS, "sessions")
 CURSORS = os.path.join(BUS, "cursors")
 HOTFOR = os.path.join(BUS, "hot-for")
