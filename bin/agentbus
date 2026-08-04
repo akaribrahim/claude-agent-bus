@@ -5224,16 +5224,22 @@ def cli_watch(args):
         print()
 
 
-BOARD_HTML = """<!doctype html>
+# Raw, because this is JavaScript and CSS rather than Python text: a `\n` written
+# in here for a JavaScript string would otherwise be parsed by Python on the way
+# past, and the page would arrive with a real newline inside a string literal —
+# which is a syntax error, and a page whose script does not parse renders nothing
+# at all while still serving a perfectly valid-looking 200.
+BOARD_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>agent-bus</title>
 <style>
 :root{--bg:#fbfbfa;--panel:#fff;--ink:#1a1a19;--dim:#6b6b68;--line:#e6e5e1;
- --accent:#3b6ea5;--red:#b4453a;--amber:#a8712a;--green:#3f7a4d;--violet:#6b4f9e;}
+ --accent:#3b6ea5;--red:#b4453a;--amber:#a8712a;--green:#3f7a4d;--violet:#6b4f9e;
+ --mark:#fbf0c4;--wait:#fdf7ea;}
 @media(prefers-color-scheme:dark){:root{--bg:#161614;--panel:#1e1e1c;--ink:#eceae5;
  --dim:#98958d;--line:#302f2b;--accent:#7aa8d8;--red:#e0796c;--amber:#d9a05b;
- --green:#7fb98c;--violet:#a98fd6;}}
+ --green:#7fb98c;--violet:#a98fd6;--mark:#413c26;--wait:#26231a;}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
@@ -5294,97 +5300,314 @@ section>h2{margin:0;padding:10px 14px;font-size:11px;font-weight:600;letter-spac
 .k-lock .who,.k-join .who,.k-leave .who{color:var(--dim)}
 .empty{padding:14px;color:var(--dim)}
 #lost{display:none;background:var(--red);color:#fff;padding:6px 20px;font-size:13px}
+/* A value that has just moved says so for a moment and is then left alone. This
+   is only possible because rows are kept rather than rebuilt: after a wholesale
+   redraw everything is equally new and nothing can be marked as changed. A page
+   that pulses on every poll is one somebody stops looking at. */
+@keyframes hit{from{background:var(--mark)}to{background:transparent}}
+.hit{animation:hit 1.6s ease-out}
+@keyframes arrive{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}
+.arrive{animation:arrive .4s ease-out}
+@media(prefers-reduced-motion:reduce){.hit,.arrive{animation:none}}
+/* Idle, and holding messages it has never been shown: the one row on the page
+   that is asking to be acted on rather than watched. */
+tr.waiting{background:var(--wait)}
+tr.waiting .name{color:var(--amber)}
+.tag.want{border-color:var(--amber);color:var(--amber);font-weight:600}
+tr.grp td{padding:6px 14px;background:var(--bg);color:var(--dim);font-size:11px;
+ font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+.files{cursor:pointer;color:var(--dim);font-size:12px;text-decoration:underline dotted}
+.list{display:none;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim);
+ font-size:.86em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.list.open{display:block}
+.clash{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
+.since{display:flex;align-items:center;gap:10px;cursor:pointer;
+ padding:5px 14px;color:var(--accent);font-size:11px;letter-spacing:.06em;
+ text-transform:uppercase;border-bottom:1px solid var(--line)}
+.since::after{content:"";flex:1;height:1px;background:var(--accent);opacity:.35}
 </style></head><body>
-<header><h1>agent-bus</h1><span class="count" id="count">…</span></header>
+<header><h1>agent-bus</h1><span class="count" id="count">…</span>
+ <span class="count warn" id="wanting"></span></header>
 <div id="lost">connection lost — did `agentbus board` stop?</div>
 <main>
  <section><h2>Projects</h2><div id="filters"></div></section>
- <section><h2>Live agents</h2><div id="agents"></div></section>
- <section class="full"><h2>Services</h2><div id="serves"></div></section>
+ <section><h2>Live agents</h2><table><thead><tr><th>Agent</th><th>Branch</th>
+  <th>Worktree</th><th>Doing</th><th>Seen</th></tr></thead>
+  <tbody id="agents"></tbody></table></section>
+ <section class="full"><h2>Services</h2><table><thead><tr><th>Service</th>
+  <th>Serving</th><th>Started by</th><th>Held by</th><th>State</th></tr></thead>
+  <tbody id="serves"></tbody></table></section>
  <section class="full"><h2>Feed</h2><div id="feed"></div></section>
 </main>
 <script>
+/* Keyed, incremental updates — hand-rolled, because the self-contained rule is
+   absolute and this is fifty lines.
+
+   The board polls for as long as a tab is open. The old page rebuilt every
+   section from a string on each poll, which threw away text selection
+   mid-sentence, closed anything the reader had opened, reset scrolling inside
+   those blocks, and made it impossible to show a change AS a change: after a
+   wholesale redraw everything is equally new. So each row is created once under
+   a stable key — the session id, the resource, the event's sequence number — and
+   afterwards only the fields that actually differ are written.
+
+   Nothing here builds markup out of data either. Every value goes in as text, so
+   no branch name, worktree path or message can arrive as HTML. */
 var repo = localStorage.getItem("ab-repo") || "";
+var seen = +(localStorage.getItem("ab-seen") || 0);   /* where the reader was */
+var newest = 0, first = true, last = null;
+
 function ago(ts, now){var d = Math.max(0, now - ts);
  if(d < 60) return d + "s"; if(d < 3600) return Math.floor(d/60) + "m";
  if(d < 86400) return Math.floor(d/3600) + "h" + ("0"+Math.floor(d%3600/60)).slice(-2);
  return Math.floor(d/86400) + "d";}
 function clock(ts){var d = new Date(ts*1000);
  return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2);}
-function esc(s){var e = document.createElement("div"); e.textContent = s == null ? "" : s;
- return e.innerHTML;}
 function keep(x){return !repo || x.repo === repo;}
+
+function el(tag, cls, text){var n = document.createElement(tag);
+ if(cls) n.className = cls; if(text != null) n.textContent = text; return n;}
+function add(p, tag, cls, text){return p.appendChild(el(tag, cls, text));}
+function gap(p){p.appendChild(document.createTextNode(" ")); return p;}
+/* Write a value only when it is not the one already there. Touching the DOM for
+   an unchanged value is what a diff is for; it also destroys a selection inside
+   the node being written. */
+function put(node, text){
+ text = text == null ? "" : String(text);
+ if(node.__v === text) return;
+ var moved = node.__v !== undefined;
+ node.__v = text; node.textContent = text;
+ if(moved) flash(node);
+}
+function flash(node){
+ if(first) return;            /* the first paint is not a change */
+ node.classList.remove("hit");
+ void node.offsetWidth;       /* restart the animation instead of leaving the
+                                 class on a node that has already played it */
+ node.classList.add("hit");
+}
+function shown(node, on){var v = on ? "" : "none";
+ if(node.style.display !== v) node.style.display = v;}
+function mark(node, cls, on){
+ if(node.classList.contains(cls) === !!on) return;
+ node.classList.toggle(cls, !!on);
+ if(on) flash(node);
+}
+/* Match rows to items by key: build what is new, update what is already there,
+   drop what has gone, and move only the nodes whose position really changed. */
+function sync(parent, items, make, fill){
+ var have = parent.__rows || (parent.__rows = {}), live = {}, prev = null, i;
+ for(i = 0; i < items.length; i++){
+  var it = items[i], k = String(it.k), node = have[k], made = !node;
+  if(made) node = have[k] = make(it);
+  live[k] = 1;
+  var want = prev ? prev.nextSibling : parent.firstChild;
+  if(node !== want) parent.insertBefore(node, want);
+  fill(node, it, made);       /* after insertion: a fill may need to measure */
+  prev = node;
+ }
+ Object.keys(have).forEach(function(k){
+  if(!live[k]){parent.removeChild(have[k]); delete have[k];}});
+}
+
+/* ---- projects ------------------------------------------------------------ */
+function makeProj(it){var b = el("button", "proj");
+ b.c = {nm: add(b, "span", "nm")};
+ b.appendChild(el("br"));
+ b.c.meta = add(b, "span", "meta");
+ b.onclick = function(){repo = it.key;
+  localStorage.setItem("ab-repo", repo); if(last) render(last);};
+ return b;}
+function fillProj(b, it){put(b.c.nm, it.label); put(b.c.meta, it.meta);
+ mark(b, "on", it.key === repo);}
+
+/* ---- live agents --------------------------------------------------------- */
+function makeSess(){var tr = el("tr"), c = {}, td = add(tr, "td");
+ c.dot = add(td, "span", "dot"); c.name = add(gap(td), "span", "name");
+ c.want = add(gap(td), "span", "tag want", "waiting");
+ td = add(tr, "td", "mono");
+ c.branch = add(td, "span"); c.ahead = add(gap(td), "span", "tag");
+ c.root = add(tr, "td", "mono");
+ td = add(tr, "td");
+ c.doing = add(td, "div"); c.owns = add(td, "div", "meta");
+ c.files = add(td, "div", "files"); c.list = add(td, "div", "list");
+ c.clash = add(td, "div", "bad clash");
+ c.files.onclick = function(){c.list.classList.toggle("open");};
+ td = add(tr, "td", "meta");
+ c.seen = add(td, "span"); c.unread = add(gap(td), "span", "warn");
+ tr.c = c; return tr;}
+function fillSess(tr, it){var s = it.s, c = tr.c;
+ mark(c.dot, "stale", s.idle);
+ put(c.name, s.agent);
+ shown(c.want, s.waiting); mark(tr, "waiting", s.waiting);
+ put(c.branch, s.branch || "-");
+ /* null: not counted yet — the poll runs no git and waits for nothing. "": this
+    tree has no default branch to be ahead of, so there is nothing to say. */
+ put(c.ahead, s.ahead_of ? "+" + s.ahead : (s.ahead_of === null ? "…" : ""));
+ c.ahead.title = s.ahead_of ? s.ahead + " ahead of " + s.ahead_of
+   : (s.ahead_of === null ? "not counted yet" : "");
+ shown(c.ahead, s.ahead_of !== "");
+ put(c.root, s.root);
+ put(c.doing, s.doing || "—");
+ put(c.owns, s.owns ? "owns " + s.owns : ""); shown(c.owns, !!s.owns);
+ put(c.files, s.wrote_n + (s.wrote_n === 1 ? " file" : " files") + " written");
+ shown(c.files, !!s.wrote_n);
+ put(c.list, s.wrote.join("\n") +
+   (s.wrote_n > s.wrote.length ? "\n+" + (s.wrote_n - s.wrote.length) + " older" : ""));
+ put(c.clash, s.clash.map(function(x){
+   return x.path + " — also " + x.also.join(", ");}).join("\n"));
+ shown(c.clash, !!s.clash.length);
+ put(c.seen, ago(s.beat, it.now) + (s.idle ? " idle" : ""));
+ put(c.unread, s.unread ? s.unread + " unread" : ""); shown(c.unread, !!s.unread);}
+function makeKid(){var tr = el("tr", "kid"), c = {};
+ c.name = add(tr, "td"); c.branch = add(tr, "td", "mono");
+ c.root = add(tr, "td", "mono"); c.type = add(tr, "td"); add(tr, "td");
+ tr.c = c; return tr;}
+function fillKid(tr, it){var a = it.a, c = tr.c;
+ put(c.name, a.name); put(c.branch, a.branch || "-");
+ put(c.root, a.root); put(c.type, a.type || "");}
+function makeGrp(){var tr = el("tr", "grp");
+ tr.c = {t: add(tr, "td")}; tr.c.t.colSpan = 5; return tr;}
+function makeNone(){var tr = el("tr");
+ tr.c = {t: add(tr, "td", "empty")}; tr.c.t.colSpan = 5; return tr;}
+function fillSpan(tr, it){put(tr.c.t, it.label);}
+
+/* ---- services ------------------------------------------------------------ */
+function makeServe(){var tr = el("tr"), c = {}, td = add(tr, "td");
+ c.res = add(td, "span", "name mono"); c.port = add(gap(td), "span", "meta mono");
+ c.desc = add(td, "div", "meta");
+ c.root = add(tr, "td", "mono");
+ c.by = add(tr, "td", "meta");
+ td = add(tr, "td");
+ c.holder = add(td, "span", "name"); c.held = add(gap(td), "span", "meta");
+ c.free = add(td, "span", "ok", "free"); c.why = add(td, "div", "meta");
+ td = add(tr, "td");
+ c.state = add(td, "span"); c.churn = add(td, "div", "warn");
+ tr.c = c; return tr;}
+function fillServe(tr, it){var s = it.s, c = tr.c;
+ put(c.res, s.resource);
+ put(c.port, s.port ? ":" + s.port : ""); shown(c.port, !!s.port);
+ put(c.desc, s.desc); shown(c.desc, !!s.desc);
+ put(c.root, s.root || "—"); put(c.by, s.by || "—");
+ put(c.holder, s.held_by);
+ put(c.held, s.held_by ? ago(s.held_since, it.now) +
+   (s.held_mode === "hard" ? " hard" : "") : "");
+ put(c.why, s.held_why); shown(c.why, !!(s.held_by && s.held_why));
+ shown(c.holder, !!s.held_by); shown(c.held, !!s.held_by);
+ shown(c.free, !s.held_by);
+ put(c.state, s.alive ? "running" : (s.movable ? "not started" : "not a service"));
+ mark(c.state, "ok", s.alive); mark(c.state, "meta", !s.alive);
+ put(c.churn, s.churn >= 3 ? "moved " + s.churn + "× between " +
+   s.churn_roots.join(" and ") : "");
+ shown(c.churn, s.churn >= 3);}
+
+/* ---- feed ---------------------------------------------------------------- */
+function makeEv(it){var d = el("div", "ev k-" + it.e.kind), c = {};
+ c.t = add(d, "span", "t");
+ c.who = add(d, "span", "who"); c.name = add(c.who, "span");
+ c.kind = add(add(c.who, "div"), "span", "meta");
+ c.txt = add(d, "span", "txt");
+ c.txt.onclick = function(){c.txt.classList.toggle("open");};
+ d.c = c; if(!first) d.classList.add("arrive"); return d;}
+function fillEv(d, it, made){var e = it.e, c = d.c;
+ put(c.t, clock(e.ts));
+ put(c.name, e.agent + (e.to ? " → " + e.to : ""));
+ put(c.kind, e.kind);
+ put(c.txt, e.text);
+ /* Only measurable once it is in the document, and an event's text never
+    changes afterwards, so this is asked once per event and not once per poll. */
+ if(made && c.txt.scrollHeight > c.txt.clientHeight + 2) c.txt.classList.add("clip");}
+function makeSince(){var d = el("div", "since", "since you last looked");
+ d.title = "click to clear"; d.onclick = looked; return d;}
+
+/* The divider is the reader's own business, so it lives in this browser and
+   nowhere else: the server is read-only and remembers nothing about whoever is
+   watching, and a cursor kept there would be one two tabs had to share.
+
+   The mark moves when the reader stops looking — and only if they were looking
+   in the first place. A board opened in a background tab, or in a window that is
+   not the front one, is handed a blur it never earned, and taking that as "read"
+   throws away the one thing the divider was for. */
+var watching = document.hasFocus() && !document.hidden;
+function looked(){
+ if(!newest) return;
+ seen = newest; localStorage.setItem("ab-seen", String(newest));
+ if(last) render(last);
+}
+function away(){if(!watching) return; watching = false; looked();}
+window.addEventListener("focus", function(){watching = true;});
+window.addEventListener("blur", away);
+document.addEventListener("visibilitychange", function(){
+ if(document.hidden) away(); else if(document.hasFocus()) watching = true;});
+
 function render(d){
+ last = d;
  var now = d.now;
  var ss = d.sessions.filter(keep), lk = d.locks.filter(keep),
      sv = d.serves.filter(keep), ev = d.events.filter(keep);
- document.getElementById("count").textContent =
+ put(document.getElementById("count"),
    ss.length + " session" + (ss.length==1?"":"s") + " · " +
    ss.reduce(function(n,s){return n + s.agents.length;},0) + " subagents · " +
-   lk.length + " held";
- var f = document.getElementById("filters");
- var rows = [{key:"", label:"all projects"}].concat(d.repos);
- f.innerHTML = rows.map(function(r){
-   var n = d.sessions.filter(function(s){return !r.key || s.repo === r.key;}).length;
-   var h = d.locks.filter(function(l){return !r.key || l.repo === r.key;}).length;
-   return '<button class="proj' + (r.key === repo ? " on" : "") +
-     '" data-k="' + esc(r.key) + '"><span class="nm">' + esc(r.label) + '</span>' +
-     '<br><span class="meta">' + n + " live" + (h ? " · " + h + " held" : "") +
-     '</span></button>';}).join("");
- Array.prototype.forEach.call(f.children, function(b){
-   b.onclick = function(){repo = b.dataset.k;
-     localStorage.setItem("ab-repo", repo); render(d);};});
+   lk.length + " held");
+ var w = ss.filter(function(s){return s.waiting;}).length;
+ put(document.getElementById("wanting"), w ? "· " + w + " waiting for you" : "");
 
- document.getElementById("agents").innerHTML = ss.length ?
-  '<table><thead><tr><th>Agent</th><th>Branch</th><th>Worktree</th>' +
-  '<th>Doing</th><th>Seen</th></tr></thead><tbody>' +
-  ss.map(function(s){
-   var r = '<tr><td><span class="dot' + (s.idle?" stale":"") + '"></span> ' +
-    '<span class="name">' + esc(s.agent) + '</span></td>' +
-    '<td class="mono">' + esc(s.branch || "-") + '</td>' +
-    '<td class="mono">' + esc(s.root) + '</td>' +
-    '<td>' + (esc(s.doing) || '<span class="meta">—</span>') +
-    (s.owns ? '<br><span class="meta">owns ' + esc(s.owns) + '</span>' : '') + '</td>' +
-    '<td class="meta">' + ago(s.beat, now) + (s.idle ? " idle" : "") + '</td></tr>';
-   return r + s.agents.map(function(a){
-    return '<tr class="kid"><td>' + esc(a.name) + '</td><td class="mono">' +
-     esc(a.branch || "-") + '</td><td class="mono">' + esc(a.root) +
-     '</td><td>' + esc(a.type || "") + '</td><td></td></tr>';}).join("");
-  }).join("") + '</tbody></table>'
-  : '<div class="empty">nobody is live</div>';
+ sync(document.getElementById("filters"),
+   [{key:"", label:"all projects"}].concat(d.repos).map(function(r){
+     var n = d.sessions.filter(function(s){return !r.key || s.repo === r.key;}).length;
+     var h = d.locks.filter(function(l){return !r.key || l.repo === r.key;}).length;
+     return {k: "p:" + r.key, key: r.key, label: r.label,
+             meta: n + " live" + (h ? " · " + h + " held" : "")};}),
+   makeProj, fillProj);
 
- document.getElementById("serves").innerHTML = sv.length ?
-  '<table><thead><tr><th>Service</th><th>Serving</th><th>Started by</th>' +
-  '<th>Held by</th><th>State</th></tr></thead><tbody>' +
-  sv.map(function(s){
-   var state = s.alive ? '<span class="ok">running</span>'
-     : (s.movable ? '<span class="meta">not started</span>'
-                  : '<span class="meta">not a service</span>');
-   if(s.churn >= 3) state += '<br><span class="warn">moved ' + s.churn +
-     '× between ' + s.churn_roots.map(esc).join(" and ") + '</span>';
-   var holder = s.held_by
-     ? '<span class="name">' + esc(s.held_by) + '</span> <span class="meta">' +
-       ago(s.held_since, now) + (s.held_mode === "hard" ? " hard" : "") + '</span>' +
-       (s.held_why ? '<br><span class="meta">' + esc(s.held_why) + '</span>' : '')
-     : '<span class="ok">free</span>';
-   return '<tr><td><span class="name mono">' + esc(s.resource) + '</span>' +
-    (s.port ? ' <span class="meta mono">:' + s.port + '</span>' : '') +
-    (s.desc ? '<br><span class="meta">' + esc(s.desc) + '</span>' : '') + '</td>' +
-    '<td class="mono">' + (esc(s.root) || '<span class="meta">—</span>') + '</td>' +
-    '<td class="meta">' + (esc(s.by) || "—") + '</td>' +
-    '<td>' + holder + '</td><td>' + state + '</td></tr>';}).join("") +
-  '</tbody></table>'
-  : '<div class="empty">this repository declares no shared resources ' +
-    '(<span class="mono">agentbus init-repo</span>)</div>';
- document.getElementById("feed").innerHTML = ev.length ? ev.map(function(e){
-  return '<div class="ev k-' + esc(e.kind) + '"><span class="t">' + clock(e.ts) +
-   '</span><span class="who">' + esc(e.agent) + (e.to ? " → " + esc(e.to) : "") +
-   '<br><span class="meta">' + esc(e.kind) + '</span></span>' +
-   '<span class="txt">' + esc(e.text) + '</span></div>';}).join("")
-  : '<div class="empty">nothing yet</div>';
- Array.prototype.forEach.call(document.querySelectorAll(".txt"), function(t){
-   if(t.scrollHeight > t.clientHeight + 2) t.classList.add("clip");
-   t.onclick = function(){t.classList.toggle("open");};});
+ /* Grouped by repository, because sessions in different projects cannot collide
+    with each other and the collisions are what the reader is here for. */
+ var rows = [], order = [];
+ ss.forEach(function(s){if(order.indexOf(s.repo) < 0) order.push(s.repo);});
+ order.sort(function(a, b){
+   var la = "", lb = "";
+   ss.forEach(function(s){if(s.repo === a) la = s.repo_label || a;
+                          if(s.repo === b) lb = s.repo_label || b;});
+   return la < lb ? -1 : la > lb ? 1 : 0;});
+ order.forEach(function(key){
+  var group = ss.filter(function(s){return s.repo === key;});
+  rows.push({k: "g:" + key, kind: "grp", label: group[0].repo_label || key});
+  group.forEach(function(s){
+   rows.push({k: "s:" + s.sid, kind: "sess", s: s, now: now});
+   s.agents.forEach(function(a, i){
+    rows.push({k: "a:" + s.sid + ":" + (a.name || i), kind: "kid", a: a});});});});
+ if(!ss.length) rows.push({k: "none", kind: "empty", label: "nobody is live"});
+ sync(document.getElementById("agents"), rows, function(it){
+   return it.kind === "sess" ? makeSess() : it.kind === "kid" ? makeKid()
+     : it.kind === "grp" ? makeGrp() : makeNone();},
+  function(node, it, made){
+   if(it.kind === "sess") fillSess(node, it);
+   else if(it.kind === "kid") fillKid(node, it);
+   else fillSpan(node, it);});
+
+ sync(document.getElementById("serves"),
+   sv.length ? sv.map(function(s){
+     return {k: "v:" + s.repo + ":" + s.resource, kind: "serve", s: s, now: now};})
+   : [{k: "none", kind: "empty",
+       label: "this repository declares no shared resources (agentbus init-repo)"}],
+   function(it){return it.kind === "serve" ? makeServe() : makeNone();},
+   function(node, it){
+     if(it.kind === "serve") fillServe(node, it); else fillSpan(node, it);});
+
+ newest = ev.length ? ev[0].i : 0;
+ /* Only when something really has arrived since the reader last looked away: a
+    divider with nothing above it is a line drawn for its own sake. */
+ var items = [], divided = false, fresh = seen && ev.length && ev[0].i > seen;
+ ev.forEach(function(e){
+  if(fresh && !divided && e.i <= seen){items.push({k: "since"}); divided = true;}
+  items.push({k: "e:" + e.i, e: e});});
+ if(fresh && !divided) items.push({k: "since"});
+ if(!ev.length) items = [{k: "none", label: "nothing yet"}];
+ sync(document.getElementById("feed"), items, function(it){
+   return it.e ? makeEv(it) : it.k === "since" ? makeSince()
+     : el("div", "empty", it.label);},
+  function(node, it, made){if(it.e) fillEv(node, it, made);});
+ first = false;
 }
 function tick(){fetch("/data").then(function(r){return r.json();}).then(function(d){
   document.getElementById("lost").style.display = "none"; render(d);})
@@ -5559,7 +5782,9 @@ def board_state(limit=60):
             "owns": owns_summary(s["sid"], limit=6), "agents": subs,
             "ahead": ahead, "ahead_of": base,
             "wrote": mine[:BOARD_FILES], "wrote_n": len(mine),
-            "clash": [{"path": p, "with": sorted(set(who))}
+            # `also`, not `with`: the page reads this key in JavaScript, where
+            # `with` is a reserved word and only legal after a dot by accident.
+            "clash": [{"path": p, "also": sorted(set(who))}
                       for p, who in sorted(clash.get(s["sid"], {}).items())],
             "unread": unread,
             # The one thing on the page that asks to be acted on. A session that

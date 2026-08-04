@@ -123,7 +123,7 @@ assert_equal 1 "$(state 'len(who("'"$A"'")["clash"])')" \
   "one of which the other session has written too"
 assert_equal shared.py "$(state 'who("'"$A"'")["clash"][0]["path"]')" \
   "named as the repository sees it, so two worktrees line up on one path"
-assert_equal "$B" "$(state '" ".join(who("'"$A"'")["clash"][0]["with"])')" \
+assert_equal "$B" "$(state '" ".join(who("'"$A"'")["clash"][0]["also"])')" \
   "and the collision names the other one"
 assert_equal shared.py "$(state 'who("'"$B"'")["clash"][0]["path"]')" \
   "which the other session is told about too, since either could be merged first"
@@ -137,7 +137,7 @@ C=$(ab sess-c name)
 wrote sess-c "$REPO2" shared.py
 assert_equal 0 "$(state 'len(who("'"$C"'")["clash"])')" \
   "the same path in another repository is not a collision"
-assert_equal "$B" "$(state '" ".join(who("'"$A"'")["clash"][0]["with"])')" \
+assert_equal "$B" "$(state '" ".join(who("'"$A"'")["clash"][0]["also"])')" \
   "and nobody from another project is named beside the session that did collide"
 
 # ---- how far ahead of the trunk, without paying for it on the poll ----------
@@ -289,6 +289,37 @@ assert_not_contains "$html" 'src="http' "the page loads no external script"
 assert_not_contains "$html" 'href="http' "and no external stylesheet or font"
 assert_not_contains "$html" "cdn." "and nothing from a CDN"
 assert_contains "$html" "prefers-color-scheme" "it renders in dark mode too"
+
+# ---- the page is updated, not rebuilt ---------------------------------------
+#
+# It polls for as long as a tab is open. Assigning innerHTML would replace the
+# DOM each time: a selection dies mid-sentence, anything the reader had opened
+# snaps shut, and nothing can be shown as having CHANGED, because after a
+# wholesale redraw everything is equally new. Keeping every value out of markup
+# is also what makes it impossible for a branch name or a message to arrive as
+# HTML, so this one line stands in for both.
+
+assert_not_contains "$html" "innerHTML" \
+  "the page never builds markup from data, so a poll cannot replace the DOM"
+# The one that bit: BOARD_HTML is Python source, and an unescaped \n written for
+# a JavaScript string is converted on the way past. The page then arrives with a
+# real newline inside a string literal, which is a syntax error — and a page whose
+# script does not parse renders nothing at all while still serving a valid 200.
+assert_contains "$html" 'join("\n")' \
+  "and its newline escapes survive Python's own parsing of the source"
+
+# Whether a value is drawn WELL needs a browser, and this file has none — these
+# only catch the regression that does not need one: a fact added to the snapshot
+# and wired to nothing, which is a cost paid on every poll for a number no reader
+# ever sees. They say "reads" because that is all a search of the source can know.
+assert_contains "$html" "s.ahead_of" "the page reads how far ahead of the trunk"
+assert_contains "$html" "s.clash" "and the files two sessions have both written"
+assert_contains "$html" "s.unread" "and how many messages a session has not seen"
+assert_contains "$html" "s.waiting" "and which session is waiting to be poked"
+# The divider is per-reader, so it is remembered in the browser: the server is
+# read-only, and a cursor kept there would be one two tabs had to fight over.
+assert_contains "$html" 'localStorage.getItem("ab-seen")' \
+  "and remembers where the reader was in the browser, not on the server"
 
 # ---- it serves, and only to this machine ------------------------------------
 
