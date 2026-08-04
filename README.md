@@ -245,7 +245,23 @@ agentbus board          # the same thing as a page: http://127.0.0.1:8787
 Projects down the left, the live agents beside them, then every declared
 service — which worktree it is serving, who started it, and who is holding it
 or that it is free — and the message feed, refreshing itself every couple of
-seconds.
+seconds. Rows are updated in place rather than redrawn, so a selection survives
+a poll and a value that changes says so for a moment.
+
+The agents are grouped by repository, because two things you cannot see anywhere
+else are what each session has produced and where that collides:
+
+- **how far ahead of the trunk** each checkout is, counted against the default
+  branch the repository itself names rather than an assumed `main`;
+- **the files it has written**, and the ones **another live session in the same
+  repository has written too** — which is what you want before merging two
+  chats' work, not during;
+- **how many bus messages it has not been shown**, and, if it has gone quiet
+  holding any, the row is tinted and counted in the header. That is the window
+  to go and poke, and it is the one thing on the page asking to be acted on.
+
+The feed draws a line where you last looked away. That mark lives in your
+browser, not on the bus.
 
 Sessions are named after their chats. A session registers the moment it opens,
 when its branch is the only thing to go on, so it starts as `feat-login` or

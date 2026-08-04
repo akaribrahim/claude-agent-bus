@@ -2,6 +2,43 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.4.0 — 2026-08-04
+
+`agentbus board` answers the two questions that cost time when several chats are
+running at once: **what has each session produced, and which window needs
+poking.**
+
+Before this it could say who was live and in which checkout. It could not say
+that two chats had both edited one file — you found that out during the merge —
+and a session sitting idle on messages it had never been shown looked exactly
+like one with nothing to do, so every chat got messaged instead of the one that
+was waiting.
+
+- Live agents are **grouped by repository**, and each session now shows **how far
+  ahead of the trunk** it is, **the files it has written**, and **the ones
+  another live session in the same repository has written too**, named as the
+  repository sees them so two worktrees line up on one path.
+- The default branch is **derived, not assumed** — `origin/HEAD` as the
+  repository recorded it, then this machine's `init.defaultBranch`, then a
+  conventional name that really exists. A worktree of a repository with no remote
+  is counted correctly; one with no commits says so instead of guessing.
+- **Idle with unread messages** is now the one thing on the page asking to be
+  acted on: the row is tinted and the header counts it. The count is the same one
+  that session will be handed at its next turn, not a second opinion.
+- The feed draws a **line where you last looked away**. It lives in your browser,
+  so the bus stays read-only and two tabs have nothing to fight over.
+- The page is **updated in place rather than rebuilt**. It used to replace its own
+  DOM every couple of seconds, which killed text selection mid-sentence, closed
+  anything you had expanded, and made it impossible to show a change *as* a
+  change. Now a value that moves carries a brief highlight and an arriving message
+  fades in. Still no CDN, no font, no remote anything — and no value goes onto the
+  page as markup any more, so a branch name or a message cannot arrive as HTML.
+
+Counting commits means running git, so the poll does not: the numbers are cached
+for ten seconds per checkout, refreshed in the background, and reported as not
+yet counted rather than holding the page up. On a machine with five live sessions
+in three repositories a poll costs about 11 ms and runs no git at all.
+
 ## 2.3.0 — 2026-08-04
 
 Stop announcing a step over the guard that stepped over nothing.
