@@ -63,6 +63,7 @@ import time
 #   hot-for/<sid>         paths other live sessions wrote lately (fast-path filter)
 #   writes/<sid>.log      "<epoch> <abs path>" per write, for collision checks
 #   locks/<key>.json      one held resource
+#   tasks/<repo>.json     what the agents in one repo have taken, and what waits
 #   repos/<repo>.json     which resources exist in a repo and what claims them
 #   events.jsonl          append-only stream, the thing agents actually read
 #   events.seq            id of the last event; the fast path compares to cursors
@@ -93,6 +94,7 @@ AGENTS = os.path.join(BUS, "agents")
 HINTS = os.path.join(BUS, "hints")
 SERVES = os.path.join(BUS, "serves")
 MATCHED = os.path.join(BUS, "matched")
+TASKS = os.path.join(BUS, "tasks")
 REPOS = os.path.join(BUS, "repos")
 EVENTS = os.path.join(BUS, "events.jsonl")
 SEQFILE = os.path.join(BUS, "events.seq")
@@ -108,6 +110,12 @@ HARD_TTL = 45 * 60        # explicitly claimed lock
 COLLIDE_WINDOW = 15 * 60  # two sessions editing one file inside this window collide
 MAX_DELIVER = 12          # events shown at once; the rest are summarised
 ROTATE_AT = 5000          # events.jsonl lines before trimming
+# A finished task stays on the board for long enough to be seen landing, and in
+# the ledger for long enough that somebody arriving tomorrow can still find out
+# what happened to a branch. Both far outlive any lock TTL on purpose: a lock is
+# about a resource that frees itself, a task is about work that does not.
+TASK_SHOW = 30 * 60
+TASK_TTL = 24 * 3600
 
 # Deliberately shorter than COLLIDE_WINDOW: a collision is about two sessions
 # working the same file at all, while this is about a failure happening RIGHT
@@ -178,11 +186,16 @@ def ensure_dirs():
     runs on every single invocation. On macOS that is 74 microseconds for all
     thirteen; on a Windows host with endpoint scanning it was measured at 12
     milliseconds, because every one of them is a syscall an agent inspects. One
-    `isdir` answers the same question 79 times more cheaply."""
-    if os.path.isdir(MATCHED):
+    `isdir` answers the same question 79 times more cheaply.
+
+    The one checked is the one created LAST, and a directory added later has to
+    become both — an existing bus already has `matched/`, so leaving the check
+    where it was would mean the new directory was never created on any machine
+    this plugin was already installed on."""
+    if os.path.isdir(TASKS):
         return            # the last one created: if it exists, they all do
     for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS, AUTOCLAIM,
-              OWNS, AGENTS, HINTS, SERVES, MATCHED):
+              OWNS, AGENTS, HINTS, SERVES, MATCHED, TASKS):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -545,6 +558,7 @@ def refresh_derived(sessions=None):
     sweep_locks(sessions)
     sweep_autoclaims()
     sweep_hints()
+    sweep_tasks(sessions)
     rebuild_hot(sessions)
 
 
@@ -1485,7 +1499,12 @@ def rotate_events():
 # automatic claims lasting one command, "took 'api'" / "released 'api'" would be
 # two context injections per scoped run carrying nothing anyone can act on. They
 # stay in the stream for `status` and `inbox`; they just do not get delivered.
-DELIVERED_KINDS = {"note", "serve", "handoff"}
+#
+# `task` is: it is a sentence an agent chose to write, not machinery announcing
+# itself, and the whole reason for writing it is that another chat should not
+# start the same work or should learn that what it was waiting for has landed.
+# Two lines per piece of work is what the roster costs today for one.
+DELIVERED_KINDS = {"note", "serve", "handoff", "task"}
 
 
 def interesting_to(rec, me):
@@ -1770,6 +1789,307 @@ def held_by(sid):
     except OSError:
         pass
     return out
+
+
+def all_locks():
+    """Every lock on the bus, raw. One listdir for the callers that need several
+    questions answered about the same set — who holds what, and who is queued
+    behind whom — rather than one apiece."""
+    out = []
+    try:
+        names = sorted(os.listdir(LOCKS))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        lock = read_json(os.path.join(LOCKS, name))
+        if lock:
+            out.append(lock)
+    return out
+
+
+# ------------------------------------------------------------------ tasks ----
+#
+# A lock says "I am using this right now". Ownership says "this part of the tree
+# is mine". Neither says what an agent is *trying to do*, or that it cannot get
+# on until somebody else has finished — and with several chats open on one
+# repository that is the half a person ends up holding in their head, routing by
+# hand: "coordinate between yourselves, how do I get both of you to main".
+#
+# The agents write this, not the person watching, and that decides its shape.
+# Agents forget, and it was measured here rather than guessed at: `AGENTBUS_OFF`
+# became a reflex, 88 uses in 48 hours of which 76 overrode nothing at all. The
+# same failure with the sign flipped is a ledger that is empty exactly when the
+# machine is busiest. So an agent types one line when it starts something and one
+# when it finishes, and everything a declaration would have to repeat is derived
+# from what the bus already records:
+#
+#   who owns a task, its branch, its worktree   the session record
+#   what it has produced                        the write log, from when it was taken
+#   which resources its owner holds             the locks
+#   what its owner is queued behind             a lock's own `queue`
+#   whether its owner is still there            the live session list
+#
+# What is left, and all that is typed, is *what am I doing* and *which other task
+# has to land first*. Neither can be inferred from anything on disk: the bus can
+# see a file change and cannot see an intention, and a dependency between two
+# pieces of work is not a contention over a resource — there is no lock to queue
+# for and nothing to wait on.
+#
+# Per repository, like a plain `post` and unlike `--all`: two chats merging into
+# one trunk is the case, and a task graph spanning projects is not. So ids only
+# have to be unique within a repository, which is what keeps them short enough
+# for an agent to type.
+
+TASK_REF = re.compile(r"^t[0-9]+$")
+
+
+def tasks_path(repo_key):
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", repo_key or "none")
+    return os.path.join(TASKS, "%s.json" % safe)
+
+
+def tasks_mutex(repo_key):
+    """One repository's ledger, held while it is read-modify-written.
+
+    Named from the repository rather than the file so that `sweep_tasks`, which
+    starts from a filename, can take the same one — which is why the ledger
+    records its own repo key."""
+    return Mutex("tasks-" + re.sub(r"[^A-Za-z0-9]", "_", repo_key or "none")[:40])
+
+
+def load_ledger(repo_key):
+    led = read_json(tasks_path(repo_key)) or {}
+    return {"repo": led.get("repo") or repo_key or "",
+            "next": int(led.get("next", 1) or 1),
+            "tasks": [t for t in led.get("tasks", []) if isinstance(t, dict)]}
+
+
+def save_ledger(led):
+    return write_json(tasks_path(led.get("repo")), led)
+
+
+def next_task_id(led):
+    tid = "t%d" % led["next"]
+    led["next"] += 1
+    return tid
+
+
+def find_task(led, tid):
+    for t in led["tasks"]:
+        if t.get("id") == tid:
+            return t
+    return None
+
+
+def task_files(t, owner, writes=None):
+    """The repository-relative files written since this task was taken.
+
+    Derived, never declared — an agent that had to list what it had touched
+    would list it wrong, and the bus has recorded every write per session since
+    long before this existed. A finished task carries the answer as it stood
+    when it was closed, because `forget_session` takes the write log with it and
+    the question "what did that produce" outlives the chat that produced it.
+
+    `writes` is for a caller that has already read the logs: the board reads
+    every live session's once per poll and would otherwise read one again per
+    task."""
+    if t.get("state") == "done":
+        return list(t.get("wrote") or []), int(t.get("wrote_n", 0) or 0)
+    if owner is None:
+        # The owner is gone, and its write log went with it. The branch is the
+        # answer to "where did that work get to", which is why the ledger keeps
+        # a dropped task rather than deleting it.
+        return list(t.get("wrote") or []), int(t.get("wrote_n", 0) or 0)
+    since = int(t.get("at", 0) or 0)
+    pairs = writes.get(owner["sid"]) if writes is not None else None
+    if pairs is None:
+        pairs = repo_writes(owner, 0)
+    rel = [p for ts, p in pairs if ts >= since]
+    return rel[:BOARD_FILES], len(rel)
+
+
+def ledger_view(repo_key, sessions, locks=None, writes=None, at=None):
+    """One repository's tasks, with everything derivable filled in. Writes nothing.
+
+    The single place that decides what a task's state is, because the board, the
+    session-start banner and `agentbus status` all have to agree — three readers
+    working it out for themselves is the one-decision-in-two-places defect this
+    repository spent a whole plan collapsing.
+
+    Nothing here reaps or repairs anything: the board renders this on a
+    two-second poll, and a window that refreshes by itself may not perform
+    maintenance. `sweep_tasks` does that, from the hooks a person's own actions
+    drive.
+
+    A headless merge worker is the obvious next reader: a task whose state is
+    `done`, whose owner's branch is ahead of the trunk, and which nothing else is
+    waiting on, is a merge candidate. It should read this and never write the
+    ledger — closing somebody else's task is a declaration, and only the party
+    that did the work can make it."""
+    led = load_ledger(repo_key)
+    if not led["tasks"]:
+        return []
+    if locks is None:
+        locks = all_locks()
+    ts = at or now()
+    live = {s["sid"]: s for s in sessions}
+    finished = {t.get("id") for t in led["tasks"] if t.get("state") == "done"}
+    # Who is waiting on whom, from the single declaration on the waiting side.
+    # The other direction is not asked for and must not be: two sides of one
+    # fact is how they come to disagree.
+    waiters = {}
+    for t in led["tasks"]:
+        if t.get("state") == "open" and t.get("sid") in live:
+            for ref in t.get("needs") or []:
+                if ref not in finished:
+                    waiters.setdefault(ref, []).append(t.get("agent") or "?")
+    out = []
+    for t in led["tasks"]:
+        owner = live.get(t.get("sid"))
+        state = t.get("state") or "open"
+        if state == "open" and owner is None:
+            # Derived, not swept, and derived rather than stored so that there is
+            # no moment at all in which the ledger says a session that has gone
+            # is still working. The same line `board_state` already draws about
+            # an orphaned lock.
+            state = "dropped"
+        rel, rel_n = task_files(t, owner, writes)
+        aid = t.get("agent_id") or ""
+        held = sorted({plain_name(l.get("resource"))
+                       for l in locks
+                       if l.get("sid") == t.get("sid")
+                       and (l.get("agent_id") or "") == aid})
+        # Queued behind somebody, from the lock's own queue. Declaring this
+        # would be the same decision in two places, and the wrong one would be
+        # the declaration: a queue entry is written by the wait that is actually
+        # blocked. Only the sid is recorded in a queue, so a subagent's wait
+        # cannot be told from its parent's — the same limit `enqueue` has.
+        queued = sorted({"%s (%s)" % (plain_name(l.get("resource")),
+                                      l.get("agent") or "?")
+                         for l in locks
+                         for q in l.get("queue") or []
+                         if q.get("sid") == t.get("sid")})
+        blocked = [r for r in (t.get("needs") or []) if r not in finished]
+        branch = (owner or {}).get("branch") or t.get("branch") or ""
+        out.append({
+            "id": t.get("id"), "what": t.get("what") or "", "repo": repo_key,
+            "sid": t.get("sid"), "agent": t.get("agent") or "?",
+            "state": state, "owner_live": owner is not None,
+            "at": int(t.get("at", 0) or 0),
+            "done_at": int(t.get("done_at", 0) or 0),
+            "note": t.get("note") or "", "from": t.get("from") or "",
+            "branch": branch, "root": short_path(t.get("root") or ""),
+            # Only when it is not already on the row above: a task under its own
+            # session repeating that session's branch is noise, and a task whose
+            # session has gone has no row above it at all.
+            "branch_note": "" if (owner is not None
+                                  and branch == (owner.get("branch") or "")
+                                  ) else branch,
+            "wrote": rel, "wrote_n": rel_n,
+            "needs": list(t.get("needs") or []), "blocked_by": blocked,
+            "waiting": sorted(set(waiters.get(t.get("id")) or [])),
+            "holding": held, "queued_for": queued,
+            # A task that finished long ago is history: still in the ledger so
+            # that somebody arriving tomorrow can find out what happened to a
+            # branch, off the screen so that the screen is about now.
+            "fresh": not (state == "done"
+                          and ts - int(t.get("done_at", 0) or 0) > TASK_SHOW)})
+    return out
+
+
+def sweep_tasks(sessions):
+    """Tasks nobody will ever come back to.
+
+    The job `sweep_locks` and `sweep_hints` do, with a deliberately different
+    rule. A lock that grants nothing is deleted the moment it is noticed,
+    because the resource frees itself and a stale lock actively misleads. A task
+    does not free itself: it is the only written record that some work was
+    started, and the branch it was started on is still there. Deleting it the
+    moment its chat closed would throw away exactly what somebody merging two
+    chats' work needs — so an ownerless task is *shown as orphaned* by
+    `ledger_view`, which needs no write at all, and only ages out of the ledger
+    a day later.
+
+    An open task whose owner is still live is never swept however old it is:
+    long-running work is not litter."""
+    cutoff = now() - TASK_TTL
+    live = {s["sid"] for s in sessions}
+    try:
+        names = os.listdir(TASKS)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(TASKS, name)
+        led = read_json(path)
+        if not led:
+            continue
+        tasks = [t for t in led.get("tasks", []) if isinstance(t, dict)]
+        keep = [t for t in tasks
+                if t.get("sid") in live
+                or max(int(t.get("done_at", 0) or 0),
+                       int(t.get("at", 0) or 0)) >= cutoff]
+        if len(keep) == len(tasks):
+            if not tasks:
+                # An empty ledger is kept for a day so that ids stay monotonic
+                # while anything in the event stream still refers to them.
+                try:
+                    if os.path.getmtime(path) < cutoff:
+                        os.unlink(path)
+                except OSError:
+                    pass
+            continue
+        with tasks_mutex(led.get("repo") or ""):
+            current = load_ledger(led.get("repo") or "")
+            gone = {t.get("id") for t in tasks} - {t.get("id") for t in keep}
+            current["tasks"] = [t for t in current["tasks"]
+                               if t.get("id") not in gone]
+            save_ledger(current)
+
+
+def task_line(t, ts=None):
+    """One task as a line of text, for `status` and the session-start banner."""
+    ts = ts or now()
+    bits = []
+    if t["state"] == "done":
+        # `ago` already carries its own "ago", and says "just now" without one.
+        bits.append("done %s" % ago(t["done_at"]))
+    elif t["state"] == "dropped":
+        bits.append("DROPPED — %s is gone" % t["agent"])
+    else:
+        bits.append("open %s" % held_for(t["at"]))
+    if t["wrote_n"]:
+        bits.append("%d file%s" % (t["wrote_n"], "" if t["wrote_n"] == 1 else "s"))
+    if t["branch"]:
+        bits.append("on %s" % t["branch"])
+    if t["holding"]:
+        bits.append("holding %s" % ", ".join(t["holding"]))
+    if t["queued_for"]:
+        bits.append("queued for %s" % ", ".join(t["queued_for"]))
+    if t["blocked_by"]:
+        bits.append("BLOCKED until %s lands" % ", ".join(t["blocked_by"]))
+    if t["waiting"]:
+        bits.append("%s waiting on it" % ", ".join(t["waiting"]))
+    if t["note"]:
+        bits.append('"%s"' % t["note"])
+    who = t["agent"] if t["state"] != "dropped" else "was %s" % t["agent"]
+    return "  - %-4s %s — %s (%s)" % (t["id"], t["what"], who, ", ".join(bits))
+
+
+def tasks_text(me, sessions, locks=None):
+    """What the agents in this repository have taken, for a reader who is one of
+    them. The board is the same facts for the person watching."""
+    rows = [t for t in ledger_view(me.get("repo_key", ""), sessions, locks=locks)
+            if t["fresh"]]
+    if not rows:
+        return ""
+    ts = now()
+    lines = ["What the agents in this repo have taken:"]
+    lines.extend(task_line(t, ts) for t in rows)
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------- ownership ----
@@ -2906,8 +3226,10 @@ def command_targets(cmd, depth=0):
 CLAIMING_VERBS = ("run", "claim", "serve")
 PASSTHROUGH_VERBS = ("wait", "release")
 # Verbs that take no resource but still need to know which party ran them, so
-# the guard has to leave a hint for these too.
-PARTY_VERBS = ("here",)
+# the guard has to leave a hint for these too. `take` and `done` write a name
+# into the ledger every other agent reads, and a subagent's work filed under its
+# parent is the same wrong answer as a lock filed there.
+PARTY_VERBS = ("here", "take", "done")
 
 
 def command_opts_out(cmd):
@@ -3207,7 +3529,10 @@ RULES = (
     "are blocked with the reason. Useful: `agentbus status`, "
     "`agentbus serve <res>` to point a service at your worktree, "
     "`agentbus run <res> -- <cmd>` to do that and run one command, "
-    "`agentbus post \"...\"` to tell the others something they cannot see. "
+    "`agentbus post \"...\"` to tell the others something they cannot see, "
+    "`agentbus take \"...\"` when you start a piece of work and `agentbus done` "
+    "when it lands, so the others can see what is taken and what they are "
+    "waiting for without being asked. "
     "If you are working in a checkout other than the one this chat opened in, "
     "run `agentbus here` from it once — otherwise the others are told you are "
     "somewhere you are not, and the guards judge you there."
@@ -3439,6 +3764,9 @@ def hook_session_start(payload):
     lk = locks_text(rec, sessions)
     if lk:
         blocks.append(lk)
+    tk = tasks_text(rec, sessions)
+    if tk:
+        blocks.append(tk)
     pending = deliver(rec)
     if pending:
         blocks.append(pending)
@@ -4873,6 +5201,9 @@ def cli_status(_args):
     lk = locks_text(me, sessions)
     print(lk if lk else "No shared resources declared for this repo "
                         "(`agentbus init-repo` to add some).")
+    tasks = tasks_text(me, sessions)
+    if tasks:
+        print("\n" + tasks)
     owned = ownership_text_block(me, sessions)
     if owned:
         print("\n" + owned)
@@ -4912,7 +5243,7 @@ def positional(args):
             skip = False
             continue
         if a.startswith("--"):
-            if a in ("--why", "--to", "--timeout", "--as", "--note"):
+            if a in ("--why", "--to", "--timeout", "--as", "--note", "--needs"):
                 skip = True
             continue
         out.append(a)
@@ -6317,6 +6648,222 @@ def cli_doing(args):
     print("noted")
 
 
+def task_record(me, tid, what, needs):
+    """A new ledger entry, with everything about it that is measured rather than
+    typed: who is acting, where they are standing, and which branch that is."""
+    return {"id": tid, "what": what, "sid": me.get("sid"),
+            "agent": me.get("agent"), "agent_id": me.get("agent_id") or "",
+            "branch": me.get("branch") or "", "root": me.get("root") or "",
+            "at": now(), "state": "open", "needs": needs,
+            "done_at": 0, "note": "", "wrote": [], "wrote_n": 0, "from": ""}
+
+
+def cli_take(args):
+    """Say what you have started. One line, and the rest is worked out.
+
+    The board could already show what a session had *done* — its branch, how far
+    ahead, the files it wrote, which of them clash with another chat's. What it
+    could not show is intent: that this chat has the api findings and that one
+    cannot rebase until they land. That only existed in the head of the person
+    watching, who was routing it by hand between chats.
+
+    So it is deliberately one short sentence and at most one reference. Every
+    field a form would have asked for is derived — see the tasks section — and
+    the reason is not tidiness: agents forget, measurably, and a ledger with six
+    fields to fill in is one nobody fills in on the afternoon it would have
+    mattered."""
+    me = acting(need_me(), args)
+    pos = positional(args)
+    what = " ".join(pos).strip()
+    if not what:
+        print('usage: agentbus take "<what you have started>" [--needs <task>] '
+              '[--as <you>]\n'
+              '       agentbus take <task>   pick up work whose session has gone',
+              file=sys.stderr)
+        sys.exit(1)
+    # `take t3` picks up an entry that already exists. Decided by shape rather
+    # than by a flag because the two are never confusable in practice — nobody
+    # describes what they are doing as "t3" — and a flag would be a third thing
+    # to remember on the line this exists to keep to one.
+    if len(pos) == 1 and TASK_REF.match(pos[0]):
+        print(take_over(me, pos[0]))
+        return
+    repo = me.get("repo_key", "")
+    with tasks_mutex(repo):
+        led = load_ledger(repo)
+        ref = opt(args, "--needs", "")
+        needs = []
+        if ref:
+            other = find_task(led, ref)
+            if not other:
+                # Refused rather than recorded. A reference to a task that does
+                # not exist can never be satisfied, so the board would show this
+                # one as blocked for ever by something nobody can finish.
+                print("agent-bus: no task '%s' in this repository. `agentbus "
+                      "status` lists them, and `--needs` only takes a task id — "
+                      "if the agent you are waiting for has not said what they "
+                      "are doing, ask them to:\n"
+                      "  agentbus post --to <agent> \"take what you are on so I "
+                      "can see when it lands\"" % ref, file=sys.stderr)
+                sys.exit(1)
+            needs = [other["id"]]
+        # Running the same line twice is not two pieces of work. An agent that
+        # re-reads its instructions and says the same thing again is the common
+        # case, not a mistake worth an error.
+        for t in led["tasks"]:
+            if (t.get("state") == "open" and t.get("sid") == me.get("sid")
+                    and (t.get("what") or "") == what[:200]):
+                if needs and needs[0] not in (t.get("needs") or []):
+                    t["needs"] = list(t.get("needs") or []) + needs
+                    save_ledger(led)
+                print("%s (already yours)" % t.get("id"))
+                return
+        tid = next_task_id(led)
+        led["tasks"].append(task_record(me, tid, what[:200], needs))
+        if not save_ledger(led):
+            print("agent-bus: could not write the ledger", file=sys.stderr)
+            sys.exit(1)
+    tail = ""
+    if needs:
+        tail = " — needs %s first" % needs[0]
+    emit(me.get("sid"), me.get("agent"), repo, "task",
+         "took %s: %s%s" % (tid, what[:200], tail))
+    print("%s%s" % (tid, tail))
+    print("`agentbus done %s` when it lands." % tid)
+
+
+def take_over(me, tid):
+    """Pick up a task whose session has gone. Returns the line to print.
+
+    Returns it rather than printing it because only the CLI verbs and the two
+    hook emitters may write to stdout — one stray `print` in a helper corrupts a
+    session's view of every hook result, and `tests/check_syntax.py` is what
+    keeps that true by construction.
+
+    The counterpart of showing an ownerless task rather than deleting it: the
+    work is on a branch that still exists, and somebody has to be able to say
+    they are carrying it on and then close it. Never off a session that is still
+    live, for the reason `same_party` refuses to adopt an anonymous lock —
+    nobody can prove the other agent has stopped, and a silent takeover is worse
+    than a refusal that names who to ask."""
+    repo = me.get("repo_key", "")
+    sessions = load_sessions()
+    with tasks_mutex(repo):
+        led = load_ledger(repo)
+        t = find_task(led, tid)
+        if not t:
+            print("agent-bus: no task '%s' in this repository. `agentbus status` "
+                  "lists them." % tid, file=sys.stderr)
+            sys.exit(1)
+        if t.get("state") == "done":
+            print("agent-bus: '%s' is finished (%s). `agentbus take \"...\"` for "
+                  "new work." % (tid, t.get("what")), file=sys.stderr)
+            sys.exit(1)
+        holder = next((s for s in sessions if s["sid"] == t.get("sid")), None)
+        if holder is not None and t.get("sid") != me.get("sid"):
+            print("agent-bus: '%s' is %s's and they are still live. Ask them "
+                  "before you carry it:\n"
+                  "  agentbus post --to %s \"are you still on %s? I can take it\"\n"
+                  "Nothing is taken off an agent that can still speak for itself."
+                  % (tid, t.get("agent"), t.get("agent"), tid), file=sys.stderr)
+            sys.exit(1)
+        was = t.get("agent")
+        t["from"] = was if was != me.get("agent") else t.get("from") or ""
+        t.update(sid=me.get("sid"), agent=me.get("agent"),
+                 agent_id=me.get("agent_id") or "",
+                 branch=me.get("branch") or "", root=me.get("root") or "",
+                 state="open")
+        # From now, not from when the other agent started: what this reader wants
+        # from the file list is what the task has produced since it changed hands.
+        t["at"] = now()
+        if not save_ledger(led):
+            print("agent-bus: could not write the ledger", file=sys.stderr)
+            sys.exit(1)
+        what = t.get("what")
+    emit(me.get("sid"), me.get("agent"), repo, "task",
+         "picked up %s from %s: %s" % (tid, was, what))
+    return "%s is yours — %s (was %s)" % (tid, what, was)
+
+
+def cli_done(args):
+    """Say it has landed. The other half of the one line, and the only other
+    thing an agent is asked for.
+
+    Cannot be derived, and it is worth being clear about why rather than
+    inferring it badly: a session that has stopped writing files might be
+    finished, might be thinking, and might be waiting for a review. The bus can
+    see a file change; it cannot see an intention being satisfied."""
+    me = acting(need_me(), args)
+    pos = positional(args)
+    repo = me.get("repo_key", "")
+    with tasks_mutex(repo):
+        led = load_ledger(repo)
+        # By session, not by party. A lock is refused to a sibling because two
+        # agents driving one device at once destroys something; closing a task
+        # destroys nothing, and refusing a parent's `done` because its subagent
+        # typed the `take` would be friction with no failure behind it. Who
+        # actually closed it is recorded either way.
+        mine = [t for t in led["tasks"]
+                if t.get("state") == "open" and t.get("sid") == me.get("sid")]
+        if pos:
+            t = find_task(led, pos[0])
+            if not t:
+                print("agent-bus: no task '%s' in this repository. `agentbus "
+                      "status` lists them." % pos[0], file=sys.stderr)
+                sys.exit(1)
+            if t.get("state") == "done":
+                print("%s was already done." % t.get("id"))
+                return
+            if t.get("sid") != me.get("sid"):
+                print("agent-bus: '%s' is %s's, not yours. `agentbus take %s` "
+                      "picks it up if their session has gone, and then you can "
+                      "finish it." % (pos[0], t.get("agent"), pos[0]),
+                      file=sys.stderr)
+                sys.exit(1)
+        elif not mine:
+            print("agent-bus: you have not taken anything in this repository. "
+                  "`agentbus take \"<what you are doing>\"` first.",
+                  file=sys.stderr)
+            sys.exit(1)
+        elif len(mine) > 1:
+            print("agent-bus: you have %d open — say which:\n%s"
+                  % (len(mine), "\n".join("  agentbus done %s   (%s)"
+                                          % (t.get("id"), t.get("what"))
+                                          for t in mine)), file=sys.stderr)
+            sys.exit(1)
+        else:
+            t = mine[0]
+        rel = [p for _ts, p in repo_writes(me, int(t.get("at", 0) or 0))]
+        t["state"] = "done"
+        t["done_at"] = now()
+        t["note"] = opt(args, "--note", "")[:200]
+        # Recorded now because it stops being answerable later: the write log is
+        # deleted with the session, and "what did that task produce" is the
+        # question somebody merging asks tomorrow.
+        t["wrote"], t["wrote_n"] = rel[:BOARD_FILES], len(rel)
+        if not save_ledger(led):
+            print("agent-bus: could not write the ledger", file=sys.stderr)
+            sys.exit(1)
+        tid, what, note, wrote_n = t["id"], t.get("what"), t["note"], t["wrote_n"]
+        # Everybody this unblocks, from their own declaration. They are named in
+        # the one line rather than sent a second: the ledger is per repository, so
+        # every waiter is already in the audience a plain post reaches.
+        waiting = sorted({o.get("agent") or "?" for o in led["tasks"]
+                          if o.get("state") == "open"
+                          and tid in (o.get("needs") or [])})
+    bits = []
+    if wrote_n:
+        bits.append("%d file%s" % (wrote_n, "" if wrote_n == 1 else "s"))
+    if note:
+        bits.append(note)
+    if waiting:
+        bits.append("%s can go on" % ", ".join(waiting))
+    emit(me.get("sid"), me.get("agent"), repo, "task",
+         "finished %s: %s%s" % (tid, what,
+                                (" — " + "; ".join(bits)) if bits else ""))
+    print("done %s%s" % (tid, (" — " + "; ".join(bits)) if bits else ""))
+
+
 def cli_handoff(args):
     """Hand over deliberately, rather than waiting for the session to end.
 
@@ -7103,7 +7650,8 @@ COMMANDS = {
     "own": cli_own, "disown": cli_disown, "handoff": cli_handoff,
     "watch": cli_watch, "board": cli_board, "here": cli_here,
     "port": cli_port, "env": cli_env,
-    "doing": cli_doing, "init-repo": cli_init_repo, "doctor": cli_doctor,
+    "doing": cli_doing, "take": cli_take, "done": cli_done,
+    "init-repo": cli_init_repo, "doctor": cli_doctor,
     "register": cli_register, "install": cli_install, "serve": cli_serve,
     "serves": cli_serves, "forget": cli_forget,
 }
@@ -7134,6 +7682,9 @@ USAGE = """agentbus — coordination between parallel Claude Code sessions
   claim <res> [--why ".."] [--steal] [--as <you>]
   wait <res> [--timeout 90]    queue for a held resource
   release <res> | --all
+  take "<what>" [--needs <task>]   say what you have started
+  take <task>                  pick up work whose session has gone
+  done [<task>] [--note ".."]  say it has landed
   handoff [--note "..."]       summarise what you did, for the others
   doing "..."                  one line others see in their roster
   name [<new>]                 read or set this session's name
