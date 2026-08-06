@@ -2,6 +2,86 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.7.0 — 2026-08-06
+
+**"What is going on in this project?"** — answered by a picture of the machine
+instead of a table of it. `agentbus board` now draws a strip of ground per
+checkout, full width, with the worktree path on its left and the agents working
+in that tree standing on it.
+
+Whoever stands on one strip shares that tree. That is the sentence the old page
+could not say: it listed live agents in a table, and a table can tell you who is
+live but not who is in the same working copy as whom — which is the reason two of
+them ever collide, and the first thing you want to know before merging their
+work.
+
+    demo-app        3 agents · 2 checkouts
+    ~/work/demo-app          [figure] pale-otter   main  7 files written  holds simulator
+                                      "porting the attribution tests"
+                                      t9  admin list: pagination + saved filters
+                                          blocked until t8 lands
+                                          holding simulator · queued for db
+                                      shared/db.py — also brisk-heron
+                             [figure] brisk-heron  main  3 files written  holds db
+                             [figure] quiet-vole   main  4 unread
+    ~/work/demo-fix          [figure] slow-marten  fix/timeouts  +2        +2 clear onto the trunk
+
+- **Projects are ordered by how many agents they have, busiest first**, and so are
+  the checkouts inside a project. Five agents in one repository and one each in
+  four others is the ordinary shape of a machine running several chats; the crowd
+  belongs at the top rather than wherever the alphabet puts it.
+- **A band is as tall as what is in it.** One quiet agent is a strip. Five agents
+  wrap onto as many lines as they need at full size and the band grows — nothing
+  is squeezed to fit a row. An agent with a sentence about what it is doing gets
+  twice the width of one that has said nothing, and a checkout with one agent in
+  it gives that agent the whole strip.
+- **Every part of a figure is a field.** Its shape, eyes, crest, lean and colour
+  are its *name*, hashed, so the same agent is the same figure on every reload, in
+  every tab and on the second monitor — nothing to configure and nothing to
+  maintain. The courses under its feet are commits past the trunk, the sheets it
+  carries are files it has written, and it only has arms while it is holding
+  something. A figure recedes when its session has gone quiet, and is ringed when
+  it is quiet **and** holding messages it has never been shown, which is the one
+  state on the page asking to be acted on rather than watched. Click one for every
+  field of it as text you can select.
+- **What the agents are doing is the headline, not a cell.** What a session said
+  in its own words, and under it the work it declared: what it is blocked on, who
+  is waiting for it, what it holds, what it is queued behind.
+- **A file two live sessions have both written is drawn between them** — a tether,
+  labelled with the path, and said in words on both figures as well.
+
+Six things the board has been computing on every poll and showing nobody are now
+on the page:
+
+- **how many of a session's commands took a shared resource**, which was the only
+  sign anywhere that a chat has been reaching for the machine;
+- **the prerequisites a task declared that have already landed** — `--needs t7`
+  stops being mentioned the moment t7 lands, so work that named one looked like
+  work that named none;
+- **the agent a piece of work was carried from**, when it changed hands;
+- **the checkout abandoned work was taken in**, which is where somebody has to go
+  and look, beside the branch it is sitting on;
+- **finished work that is not a landing candidate, and why** — the verb has
+  printed that under its own heading since 2.6.0 and the page did not;
+- and a **checkout whose last agent has left keeps its strip**, with nobody
+  standing on it, because that is where the work somebody has to pick up is.
+
+Everything the page promised before it still promises. It is served to the
+loopback address and nowhere else, it is entirely self-contained — no CDN, no
+external font, no library, every shape authored inline — and watching it changes
+nothing on the bus. Rows are still updated in place rather than redrawn, so a
+selection survives a poll; nothing pulses, every animation is entered by a value
+changing, and `prefers-reduced-motion` keeps each state readable instead of
+deleting it. The whole page is shorter than the one it replaces on both of the
+payloads it was built against.
+
+Under the tests: the harness that runs the page's own script against the page's
+own data could not previously execute a line of a page that draws — the first
+shape threw — so every assertion about a drawn figure would have passed while
+measuring nothing. It now has the parts a drawing page uses and runs the frame
+the page asks for before reading what came out, and it prints keyed rows at any
+depth so a task drawn under the agent that declared it is a line of its own.
+
 ## 2.6.0 — 2026-08-05
 
 **"Can these two land together?"** — answered by git, for free, without touching

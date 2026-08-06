@@ -250,14 +250,37 @@ agentbus watch          # a live line per event, in the terminal
 agentbus board          # the same thing as a page: http://127.0.0.1:8787
 ```
 
-Projects down the left, the live agents beside them, then every declared
-service — which worktree it is serving, who started it, and who is holding it
-or that it is free — and the message feed, refreshing itself every couple of
-seconds. Rows are updated in place rather than redrawn, so a selection survives
-a poll and a value that changes says so for a moment.
+The page is **a strip of ground per checkout**, full width, with the worktree
+path on its left and the agents working in that tree standing on it. Whoever
+stands on one strip shares that tree, which is the fact a grid of equal cards
+cannot state. Projects are ordered by how many agents they have, busiest first,
+and so are the checkouts inside a project — five agents in one repository and one
+each in four others is the ordinary shape of a machine running several chats, and
+the crowd belongs at the top.
 
-The agents are grouped by repository, because two things you cannot see anywhere
-else are what each session has produced and where that collides:
+A band is as tall as what is in it. One quiet agent is a strip; five agents wrap
+onto as many lines as they need at full size, and an agent with a sentence about
+what it is doing is given twice the width of one that has said nothing. Nothing
+is squeezed to fit a row.
+
+Each agent is drawn as a figure whose shape, eyes, crest, lean and colour are its
+**name**, hashed — so the same agent is the same figure on every reload, in every
+tab and on the second monitor, with no table anybody maintains. The courses under
+its feet are commits past the trunk, the sheets it carries are files it has
+written, and it only has arms when it is holding something. A figure recedes when
+its session has gone quiet, and gets a ring when it is quiet **and** holding
+messages it has never been shown — the one state on the page asking to be acted
+on rather than watched. Click one for every field of it, as text you can select.
+
+Below the yard: what would land, every declared service — which worktree it is
+serving, who started it, and who is holding it or that it is free — and the
+message feed. It refreshes itself every couple of seconds and rows are updated in
+place rather than redrawn, so a selection survives a poll and a value that
+changes says so for a moment.
+
+The bands are per checkout rather than per repository because two things you
+cannot see anywhere else are what each session has produced and where that
+collides:
 
 - **how far ahead of the trunk** each checkout is, counted against the default
   branch the repository itself names rather than an assumed `main`;
@@ -265,8 +288,16 @@ else are what each session has produced and where that collides:
   repository has written too** — which is what you want before merging two
   chats' work, not during;
 - **how many bus messages it has not been shown**, and, if it has gone quiet
-  holding any, the row is tinted and counted in the header. That is the window
-  to go and poke, and it is the one thing on the page asking to be acted on.
+  holding any, the figure is ringed and counted in the header. That is the window
+  to go and poke, and it is the one thing on the page asking to be acted on;
+- **how many of its commands took a shared resource**, which is the only sign
+  anywhere that a session has been reaching for the machine at all.
+
+A file two live sessions have both written is the one fact on the page about a
+*pair*, so it is the one thing drawn as a line: a tether between the two figures,
+labelled with the path, measured off the laid-out page in one frame. It is also
+said in words on both of them, because a line between two figures is no use to
+somebody who cannot see it.
 
 None of that can show *intent*. Two chats fixing review findings in one
 repository look identical from outside, and which of them is blocked on the
@@ -279,20 +310,26 @@ agentbus take "rebase web onto main once api lands" --needs t1
 agentbus done t1 --note "all four findings closed"
 ```
 
-Each task appears **under the session that took it**, so a chat that has
-declared nothing still shows everything above. Only the sentence and the
-reference are typed: the branch, the checkout, the files the task has produced
-since it was taken, what its owner is holding and — from a lock's own queue —
-what it is queued behind are all derived, because a ledger with six fields to
-fill in is one nobody fills in when it matters. Taking and finishing reach the
+Each task appears **on the agent that took it**, beside what the bus watched that
+agent do rather than instead of it, so a chat that has declared nothing still
+shows everything above. Only the sentence and the reference are typed: the branch,
+the checkout, the files the task has produced since it was taken, what its owner
+is holding and — from a lock's own queue — what it is queued behind are all
+derived, because a ledger with six fields to fill in is one nobody fills in when
+it matters. It also says what the work was **built on that has already landed**,
+which `--needs` alone stops mentioning the moment the thing lands, and who the
+work was **carried from** if it changed hands. Taking and finishing reach the
 other sessions in the repository the way a `post` does, which is the point:
 nobody has to carry messages between chats by hand.
 
 Work whose chat has gone reads as **dropped** and is shown rather than deleted —
 a lock that grants nothing can be deleted because the resource frees itself, and
-work cannot, because the branch is still there. It sits under its repository with
-that branch named, and `agentbus take <task>` picks it up. Ids are per
-repository. The header counts what is open, blocked and dropped.
+work cannot, because the branch is still there. It is drawn standing on the
+ground it was taken in, with its branch and its checkout named, and `agentbus
+take <task>` picks it up; a checkout whose last agent has left keeps its strip
+with nobody on it, because that is where the work somebody has to pick up is
+actually sitting. Ids are per repository. The header counts what is open, blocked
+and dropped.
 
 The feed draws a line where you last looked away. That mark lives in your
 browser, not on the bus.
@@ -336,9 +373,12 @@ to merge.
 **It writes nothing.** Not a merge, not a checkout, not an index refresh, not a
 stash. `git merge-tree` merges two commits in memory, and even the tree it
 produces is redirected into a temporary directory so the object store comes out
-byte-identical. The same view is on the board, computed off the poll, with the
-command printed as text and nothing there to press: a control that spends model
-calls when clicked is a different kind of object from a window that only watches.
+byte-identical. The same view is on the board twice over: a badge on the right of
+each checkout's own strip saying what that tree would land, and the whole table
+below the yard — the pairs that would fight, the finished work that is *not* ready
+and why, and the command printed as text with nothing there to press. A control
+that spends model calls when clicked is a different kind of object from a window
+that only watches.
 
 ### And if you want it done
 
