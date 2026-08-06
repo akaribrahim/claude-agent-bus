@@ -110,6 +110,13 @@ HARD_TTL = 45 * 60        # explicitly claimed lock
 COLLIDE_WINDOW = 15 * 60  # two sessions editing one file inside this window collide
 MAX_DELIVER = 12          # events shown at once; the rest are summarised
 ROTATE_AT = 5000          # events.jsonl lines before trimming
+# Which revision of `git_facts` produced a record's repo_key. Bumped when the
+# derivation changes its answer for the same directory, which is the signal
+# `heal_derived` needs to re-derive a key written by a version that got it wrong.
+# 2: before this, a relative `--git-common-dir` was resolved against the root
+# instead of the cwd, so any session working below its repository root was keyed
+# and labelled from a directory above the repository.
+KEY_REV = 2
 # A finished task stays on the board for long enough to be seen landing, and in
 # the ledger for long enough that somebody arriving tomorrow can still find out
 # what happened to a branch. Both far outlive any lock TTL on purpose: a lock is
@@ -369,11 +376,90 @@ def git_facts(cwd):
         key = "path:" + hashlib.sha1(cwd.encode()).hexdigest()[:8]
         return cwd, key, os.path.basename(cwd.rstrip("/")) or "?", ""
     if not os.path.isabs(common):
-        common = os.path.normpath(os.path.join(root, common))
+        # Against `cwd`, NOT against `root`. `git rev-parse` prints paths
+        # relative to the directory it was RUN in, and only the main worktree
+        # ever gets a relative answer: `.git` from the top, `../../.git` from two
+        # directories down (a linked worktree is always told an absolute path,
+        # because its common dir is in another checkout entirely). Resolving that
+        # against the root climbed as far ABOVE the repository as the cwd was
+        # BELOW it, and the key and label then came from a directory that merely
+        # contains the project.
+        #
+        # Both halves of that were live on 2026-08-06. A session working in
+        # `<root>/packages/api` was keyed under the name of the folder holding
+        # every project on the machine, while three sessions at the root of the
+        # SAME working copy held the real key — so they filed their locks in
+        # different places, did not contend for the one database, and the guard
+        # told each of them it was free. And two unrelated projects side by side
+        # in that folder, each with a session the same depth below its own root,
+        # collapsed onto ONE key — false contention, and each project's messages
+        # delivered into the other's context.
+        #
+        # Nothing looked wrong, because `--show-toplevel` is absolute and the
+        # recorded root was right the whole time. Only the two derived fields
+        # were wrong, and those are the ones nobody reads by eye.
+        candidates = [os.path.normpath(os.path.join(cwd, common)),
+                      os.path.normpath(os.path.join(root, common))]
+        # git's convention first, and the old base kept only as a fallback for a
+        # git that ever prints relative-to-toplevel instead: a common dir that
+        # does not exist on disk is proof the base was wrong, and that is cheaper
+        # to check than to reason about across git versions.
+        common = next((c for c in candidates if os.path.exists(c)), candidates[0])
     common = os.path.realpath(common)
     label = os.path.basename(os.path.dirname(common)) or "repo"
     key = "%s:%s" % (label, hashlib.sha1(common.encode()).hexdigest()[:6])
     return root, key, label, branch
+
+
+def heal_derived(rec, path):
+    """Re-derive a record's repo key when an older, wrong derivation wrote it.
+
+    A record holds two different kinds of thing, and the whole of this function
+    is the distinction between them. `cwd` is a STATEMENT about where this party
+    is working — declared with `agentbus here`, or inferred from its payloads —
+    and it is what `pinned` protects and what the relocation guards in
+    `_follow_cwd` and `_follow_agent_cwd` protect. `repo_key`, `repo_label`,
+    `root` and `branch` are not statements. They are git's ANSWER about that
+    directory, and an answer that disagrees with its own question is not a
+    declaration to be defended but a mistake to be corrected.
+
+    So: the demonstrable checkout wins over the recorded key, and it wins only
+    ever by re-deriving in place from the record's OWN cwd. That is why this may
+    be done without consulting either guard. Nothing about where the party is
+    working changes — `cwd` is read off the record rather than from a caller who
+    could be anywhere, so there is no untrusted move to refuse, and a pinned
+    record heals for the same reason: the pin says which directory, and this asks
+    git what that directory is. Deleting a guard was never needed; the guards
+    were simply never asked this question.
+
+    Who is allowed to correct it: the party itself, on its own next hook. Never
+    another session. A wrong key is not visible to its neighbours — it is why
+    they cannot see IT — and reaching into somebody else's record to fix what you
+    inferred about their checkout is how one bad inference becomes everybody's.
+
+    Stamped, not verified. Checking the key on every hook costs a git subprocess
+    (~11ms measured) in every session on this machine, for an answer that cannot
+    change once it is right; this plugin's shell fast path exists because 40ms a
+    tool call was judged too much to spend. So a record carries the revision that
+    derived it and is re-derived once, when that revision is behind.
+
+    A cwd that has since been deleted is left alone. `git_facts` cannot run there
+    and would answer with the `path:` fallback, which would replace a wrong key
+    with a differently wrong one — and take the recorded root with it."""
+    if not rec or rec.get("keyrev") == KEY_REV:
+        return rec
+    cwd = rec.get("cwd")
+    if cwd and os.path.isdir(cwd):
+        root, repo_key, label, branch = git_facts(cwd)
+        rec.update({"root": root, "repo_key": repo_key,
+                    "repo_label": label, "branch": branch})
+        # Not the agent name, which `register` also derives from the label. Other
+        # sessions address this one by the name they have already seen, and a
+        # rename mid-chat to repair a hash nobody reads would cost more than it
+        # fixed. The name is a handle; the key is an identity.
+        rec["keyrev"] = KEY_REV
+        write_json(path, rec)
+    return rec
 
 
 def repo_relative(path, root):
@@ -713,6 +799,15 @@ def _follow_cwd(rec, cwd, trusted=True):
     another terminal could be anywhere — so from there a move is followed only
     within the same repository. That still covers the case this exists for,
     because every worktree of one repository shares its key."""
+    # Before the early return below, deliberately. A key written by an older,
+    # wrong derivation does not repair itself by being left alone: `register`
+    # re-derives only at SessionStart or when a session has no record at all, and
+    # the next line returns on a cwd equal to the record's — which, for a session
+    # that is not moving, is every payload it ever sends. Between the two, a chat
+    # that registered under the wrong derivation kept its wrong key, and its
+    # immunity from its neighbours' locks, until its human closed it.
+    if rec.get("sid"):
+        rec = heal_derived(rec, os.path.join(SESSIONS, "%s.json" % rec["sid"]))
     if not cwd or cwd == rec.get("cwd"):
         return rec
     if rec.get("pinned"):
@@ -1300,7 +1395,7 @@ def register_agent(sid, aid, agent_type=None, cwd=None):
            "name": subagent_name(parent.get("agent"), sid),
            "parent": parent.get("agent"), "cwd": cwd, "root": root,
            "repo_key": repo_key, "repo_label": label, "branch": branch,
-           "started": now(), "seen": now()}
+           "keyrev": KEY_REV, "started": now(), "seen": now()}
     write_json(agent_path(sid, aid), rec)
     # Its cursor starts at the end of the stream: a subagent that lives for two
     # minutes does not want the last hour of the repository's chatter.
@@ -1372,6 +1467,13 @@ def _follow_agent_cwd(rec, cwd, trusted=True):
     — any *other* cwd overwrote what it had declared, on the next tool call. The
     flag exists at both levels now, and a pinned agent is left alone here for
     the reason `_follow_cwd` leaves a pinned session alone."""
+    # The same repair one level down, and it matters MORE here: a subagent's
+    # record is written once at SubagentStart and `register_agent` is reached
+    # again only if the record is missing, so nothing else would ever re-derive
+    # it. A subagent launched into a subdirectory would hold a wrong key for its
+    # whole life, and its own parent could not hear it.
+    if rec and rec.get("sid") and rec.get("agent_id"):
+        rec = heal_derived(rec, agent_path(rec["sid"], rec["agent_id"]))
     if not rec or not cwd or cwd == rec.get("cwd"):
         return rec
     if rec.get("pinned"):
@@ -3572,8 +3674,13 @@ def register(payload):
     fields = {"sid": sid, "pid": claude_pid(),
               "started": rec.get("started") or now()}
     if not rec.get("pinned") or existing is None:
+        # Stamped with the derivation only where the derived fields are actually
+        # written. A pinned record that keeps its own location is deliberately
+        # left unstamped, so `heal_derived` re-derives its key from the directory
+        # it declared rather than from the cwd this payload happens to carry.
         fields.update({"cwd": cwd, "root": root, "repo_key": repo_key,
-                       "repo_label": label, "branch": branch})
+                       "repo_label": label, "branch": branch,
+                       "keyrev": KEY_REV})
     rec.update(fields)
     if existing is None:
         rec.pop("pinned", None)     # a fresh chat has not said where it is yet
@@ -7889,7 +7996,8 @@ def cli_here(args):
         # to read, and the declaration survived only until a payload arrived
         # with a cwd that was neither the agent's record nor its parent's.
         rec.update({"cwd": where, "root": root, "repo_key": repo_key,
-                    "repo_label": label, "branch": branch, "pinned": True})
+                    "repo_label": label, "branch": branch, "pinned": True,
+                    "keyrev": KEY_REV})
         write_json(agent_path(me["sid"], aid), rec)
         who = rec.get("name")
     else:
@@ -7898,7 +8006,8 @@ def cli_here(args):
         rec = read_json(os.path.join(SESSIONS, "%s.json" % record["sid"])) or record
         rec["sid"] = record["sid"]
         rec.update({"cwd": where, "root": root, "repo_key": repo_key,
-                    "repo_label": label, "branch": branch, "pinned": True})
+                    "repo_label": label, "branch": branch, "pinned": True,
+                    "keyrev": KEY_REV})
         write_json(os.path.join(SESSIONS, "%s.json" % record["sid"]),
                    require_record(rec, "cli_here"))
         who = rec.get("agent")

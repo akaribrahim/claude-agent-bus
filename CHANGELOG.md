@@ -123,6 +123,42 @@ measuring nothing. It now has the parts a drawing page uses and runs the frame
 the page asks for before reading what came out, and it prints keyed rows at any
 depth so a task drawn under the agent that declared it is a line of its own.
 
+### And a session in a subdirectory was filed under the wrong repository
+
+Two chats in one working copy did not contend, and neither was told. A session
+whose shell sat a couple of directories below the top of the repository —
+`packages/api`, `web/admin`, anywhere below the root — was filed under a
+repository key derived from a directory *above* the project, so the guard
+treated it as a different repository from the chat sitting at the root. They
+could reach for the same database, the same git index and the same simulator,
+and each was told it was free. Their messages did not reach each other either,
+because a plain `agentbus post` is delivered by repository.
+
+`git rev-parse --git-common-dir` answers **relative to the directory it was run
+in**, and this read it relative to the repository root instead — so the path
+climbed as far above the project as the shell was below it, and the repository
+was named after whatever directory it landed on. Two unrelated projects with
+sessions at the same depth collapsed onto one key, which is the same fault
+pointing the other way: false contention between codebases that share nothing,
+and one project's messages delivered into another.
+
+It was invisible because the *checkout* was always right — only the name and the
+key were wrong, and nothing on screen showed the key.
+
+- Derived from the shell's own directory now, with the old answer kept as a
+  fallback only when it is the one that exists on disk.
+- **Records already carrying a wrong key correct themselves** on that session's
+  next hook, before any command it runs can be judged — a chat does not have to
+  be restarted, and a pinned session heals while staying pinned. `agentbus here`
+  says which directory; this asks git what that directory *is*, so the two do not
+  compete.
+- Correcting is done by the party itself, from its own record, never by a
+  neighbour and never by moving anybody: the checkout is a statement and is
+  defended, while the repository name is git's answer about it and an answer that
+  disagrees with its own question is a mistake to fix.
+- Per-machine port overrides were being read from a file named after the wrong
+  key, and are not any more.
+
 ## 2.6.0 — 2026-08-05
 
 **"Can these two land together?"** — answered by git, for free, without touching
