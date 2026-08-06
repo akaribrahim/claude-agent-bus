@@ -396,6 +396,44 @@ ab sess-e status > /dev/null
 assert_equal 0 "$(led 'len([x for x in d["tasks"] if x["id"] == "'"$LOST"'"])')" \
   'which status, asked a question by a person, does do'
 
+# A prerequisite that HAS landed. `needs` and `blocked_by` are the same list
+# right up until the thing the work was built on is finished, and after that the
+# difference between them is the only place anything can say what this work
+# assumes — a page drawing `blocked_by` alone shows work that named a
+# prerequisite as though it had named none.
+DEP=$(ab sess-e take "add the fixture loader" | head -1 | cut -d' ' -f1)
+ab sess-e done "$DEP" > /dev/null
+BUILT=$(ab sess-e take "use the fixture loader" --needs "$DEP" | head -1 | cut -d' ' -f1)
+assert_equal "$DEP" "$(snap '" ".join(t("'"$BUILT"'")["needs"])')" \
+  "a task keeps the prerequisite it declared after that prerequisite lands"
+assert_equal "" "$(snap '" ".join(t("'"$BUILT"'")["blocked_by"])')" \
+  "and stops being blocked by it, which is what makes the two lists different"
+
+# Work that changed hands. The agent on the row is whoever has it now, so the
+# name of the chat that started it is the only way a reader can join what they
+# are looking at to what they remember reading.
+# In the other worktree on purpose: a session that joins the same repository on
+# the same branch after the first one has gone is handed the same generated name,
+# and "carried from" is deliberately blank when the name has not changed — so a
+# fixture built in one checkout would have measured nothing at all.
+new_session sess-h "$REPO"
+H=$(ab sess-h name)
+HANDED=$(ab sess-h take "move the seed data" | head -1 | cut -d' ' -f1)
+end_session sess-h
+new_session sess-i "$WT"
+ab sess-i take "$HANDED" > /dev/null
+
+# A checkout with nobody in it and something left on it. The page draws a strip
+# of ground per checkout, and a checkout whose chat has closed is where the work
+# somebody has to pick up is actually sitting — so the strip has to survive its
+# last agent leaving rather than disappearing with it.
+SPARE=$(make_worktree "$REPO" ledgerspare)
+new_session sess-j "$SPARE"
+ab sess-j take "split the migration" > /dev/null
+end_session sess-j
+assert_equal "$H" "$(snap 't("'"$HANDED"'")["from"]')" \
+  "carried work remembers the agent it came from"
+
 html=$(python3 -c "
 import importlib.machinery, importlib.util, os
 os.environ['AGENTBUS_HOME'] = '$AGENTBUS_HOME'
@@ -500,6 +538,28 @@ sys.exit(0 if m else 1)" \
         "and the ones another session in the same repository has written too"
       assert_contains "$(printf '%s\n' "$out" | grep '^HEADER')" "open" \
         "with the header counting the work that is open"
+      assert_contains "$rows" "built on $DEP, landed" \
+        "and, beside what a task is still waiting for, what it was built on that has landed"
+      # Where work went when its chat closed. The branch is half the answer; the
+      # other half is the checkout it was taken in, which is the only thing that
+      # says where to go and look.
+      gone=$(printf '%s\n' "$out" | grep '^AGENTS \[task gone' || true)
+      assert_contains "$gone" "was $C" \
+        "naming the agent whose chat has gone, on work nobody is holding"
+      assert_contains "$gone" "$WT" "and the checkout that work was taken in"
+      assert_contains "$rows" "carried from $H" \
+        "and, on work that changed hands, the agent it was carried from"
+      # The strip for a checkout nobody is standing in. Counted, not searched:
+      # the band's text contains the abandoned work either way, and only the
+      # absence of a character row says the ground is empty.
+      spare=$(printf '%s\n' "$out" | awk -v p="$SPARE" '
+        /^AGENTS \[band/ { on = index($0, p) > 0 }
+        on { print }
+        /^AGENTS \[prj/ { on = 0 }')
+      assert_contains "$spare" "split the migration" \
+        "a checkout nobody is standing in keeps its strip, with the work left on it"
+      assert_equal 0 "$(printf '%s\n' "$spare" | grep -c '^AGENTS \[\] ' || true)" \
+        "and nothing standing on that ground, which is the fact it is drawn for"
     else
       _bad "the page renders when it is actually run" "$out"
     fi

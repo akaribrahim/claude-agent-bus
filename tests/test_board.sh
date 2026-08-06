@@ -321,6 +321,29 @@ assert_contains "$html" "s.waiting" "and which session is waiting to be poked"
 assert_contains "$html" 'localStorage.getItem("ab-seen")' \
   "and remembers where the reader was in the browser, not on the server"
 
+# ---- the shape of the page: a strip of ground per checkout -------------------
+#
+# The band is the whole claim of this page: whoever stands on one strip shares
+# that tree, and the strip is full width with the path on its left because a grid
+# of equal cards can say who is live and not who is standing where. So the
+# fixture has to carry the case that distinguishes them — one project with
+# several agents spread over two checkouts, and another with a single agent —
+# because a page that drew one card per agent would satisfy every assertion about
+# the agents and none about where they are.
+#
+# The quiet project is named to sort FIRST alphabetically and LAST by population.
+# With both projects one agent each, or with the names the other way round, an
+# ordering assertion would pass against a page that never sorted at all.
+new_session sess-g "$REPO"
+G=$(ab sess-g name)
+ab sess-g doing "reading the ledger" > /dev/null
+QUIET=$(make_repo alpharepo)
+commit_all "$QUIET"
+new_session sess-q "$QUIET"
+Q=$(ab sess-q name)
+assert_equal 1 "$(state 'who("'"$B"'")["guarded"]')" \
+  "the snapshot counts the commands a session took a shared resource for"
+
 # ---- it serves, and only to this machine ------------------------------------
 
 if ! command -v python3 > /dev/null; then
@@ -391,6 +414,101 @@ else:
     *)    _bad "a connection from this machine's LAN address is refused" \
             "the board answered on a non-loopback address" ;;
   esac
+
+  # ---- and then it is RUN, against the data it just served ------------------
+  #
+  # Everything above about the page is a search of its source, and a search
+  # cannot tell a band that is drawn from a class name that is mentioned. This
+  # runs the served script over the served snapshot in the smallest DOM the
+  # page's reconciler uses and reads what came out.
+  get /data | sed '1s/^200 //' > "$TEST_TMP/data.json"
+  get / | sed '1s/^200 //' > "$TEST_TMP/page.html"
+  python3 -c "
+import re, sys
+h = open('$TEST_TMP/page.html').read()
+m = re.search(r'<script>(.*?)</script>', h, re.S)
+open('$TEST_TMP/board.js', 'w').write(m.group(1) if m else '')
+sys.exit(0 if m else 1)" \
+    && _ok "the served page carries a script" \
+    || _bad "the served page carries a script" "no <script> in the served HTML"
+
+  if ! command -v node > /dev/null 2>&1; then
+    _ok "and it parses as JavaScript (skipped: no node on this host)"
+    _ok "the page draws its bands when it is run (skipped: no node on this host)"
+  else
+    if out=$(node --check "$TEST_TMP/board.js" 2>&1); then
+      _ok "and it parses as JavaScript"
+    else
+      _bad "and it parses as JavaScript" "$out"
+    fi
+    if out=$(node "$AB_ROOT/tests/board-render.js" "$TEST_TMP/board.js" \
+                  "$TEST_TMP/data.json" 2>&1); then
+      _ok "the page draws its bands when it is run"
+      bands=$(printf '%s\n' "$out" | grep '^AGENTS \[band' || true)
+      chars=$(printf '%s\n' "$out" | grep '^AGENTS \[\]' || true)
+      prjs=$(printf '%s\n' "$out" | grep '^AGENTS \[prj' || true)
+      # Who is standing on which strip: the character rows that follow a band
+      # line and precede the next one, COUNTED. Searching a strip's text for an
+      # agent's name finds it whether that agent is standing there or is only
+      # named by somebody else's collision — which is exactly how "they stand on
+      # separate strips" passes while they do not. It is what this assertion did
+      # twice before it counted rows instead.
+      standing() {   # <worktree path> → the characters on that strip
+        printf '%s\n' "$out" | awk -v p="$1" '
+          /^AGENTS \[band/ { on = index($0, p) > 0; next }
+          /^AGENTS \[prj/  { on = 0 }
+          on && /^AGENTS \[\] / { print }'
+      }
+      here=$(printf '%s\n' "$bands" | grep -F "$REPO" || true)
+      there=$(printf '%s\n' "$bands" | grep -F "$WT2" || true)
+      assert_contains "$here" "$REPO" \
+        "a strip of ground per checkout, labelled with the worktree"
+      assert_contains "$there" "$WT2" \
+        "including the second worktree of the same repository"
+      assert_equal 2 "$(standing "$REPO" | grep -c . || true)" \
+        "the agents that share a checkout stand on one strip"
+      assert_contains "$(standing "$REPO")" "$A" "one of them named there"
+      assert_contains "$(standing "$REPO")" "$G" "and the other beside it"
+      assert_contains "$here" "2 agents here" \
+        "and the strip says how many are standing on it"
+      assert_equal 1 "$(standing "$WT2" | grep -c . || true)" \
+        "while an agent in another worktree stands on a strip of its own"
+      assert_contains "$(printf '%s\n' "$prjs" | head -1)" "$(basename "$REPO")" \
+        "the project with the most agents is drawn first"
+      assert_contains "$(printf '%s\n' "$prjs" | head -1)" "3 agents · 2 checkouts" \
+        "counting its agents and its checkouts"
+      assert_contains "$(printf '%s\n' "$prjs" | tail -1)" "$(basename "$QUIET")" \
+        "and the single-agent project after it, not in alphabetical order"
+      assert_contains "$chars" "wiring the board" \
+        "what an agent said it was doing, on the character that said it"
+      assert_contains "$chars" "1 claim" \
+        "and how many of its commands took a shared resource"
+
+      # The figure is the agent's NAME, hashed — the same face on every reload,
+      # in every tab and on the second monitor, with no table to maintain. Asked
+      # of the page's own function in the page's own scope, because a test that
+      # reimplemented the hash would agree with itself and nothing else.
+      cp "$TEST_TMP/board.js" "$TEST_TMP/idprobe.js"
+      cat >> "$TEST_TMP/idprobe.js" <<'JS'
+console.log("ID " + JSON.stringify([idOf("windlass"), idOf("windlass"),
+                                    idOf("halyard")]));
+JS
+      three=$(node "$AB_ROOT/tests/board-render.js" "$TEST_TMP/idprobe.js" \
+                   "$TEST_TMP/data.json" 2>&1 | sed -n 's/^ID //p')
+      assert_equal yes "$(python3 -c "
+import json, sys
+a = json.loads(sys.argv[1])
+print('yes' if a[0] == a[1] and a[0]['hue'] is not None else 'no')" "$three")" \
+        "one agent's figure is the same figure every time it is drawn"
+      assert_equal yes "$(python3 -c "
+import json, sys
+a = json.loads(sys.argv[1])
+print('yes' if a[0] != a[2] else 'no')" "$three")" \
+        "and two agents are not drawn as the same figure"
+    else
+      _bad "the page draws its bands when it is run" "$out"
+    fi
+  fi
 fi
 
 kill $BOARD_PID 2>/dev/null

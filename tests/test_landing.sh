@@ -517,6 +517,12 @@ sys.exit(0 if m else 1)" \
       assert_contains "$rows" "→ main" "under the repository and the trunk it would land on"
       assert_contains "$rows" "agentbus integrate --yes" \
         "with the command printed for the human to run"
+      # Finished, and still not on the list. Without this the reader is left with
+      # "I marked that done, so where is it" and the page has no answer — the
+      # verb has printed it under its own heading since 2.6.0 and the page did
+      # not draw it at all.
+      assert_contains "$rows" "not ready: nothing on it that main does not have" \
+        "and the finished work that is not a candidate, with the reason"
       # Printed as text on a row, not wired to anything. A row that could start a
       # paid session is the thing this section must never become.
       assert_not_contains "$rows" "[button" "and nothing on it is a control"

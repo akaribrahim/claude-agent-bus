@@ -5585,129 +5585,304 @@ BOARD_HTML = r"""<!doctype html>
 <style>
 :root{--bg:#fbfbfa;--panel:#fff;--ink:#1a1a19;--dim:#6b6b68;--line:#e6e5e1;
  --accent:#3b6ea5;--red:#b4453a;--amber:#a8712a;--green:#3f7a4d;--violet:#6b4f9e;
- --mark:#fbf0c4;--wait:#fdf7ea;}
+ --mark:#fbf0c4;--wait:#fdf7ea;--ground:#d8d4c8;--plinth:#cfcbbf;
+ --id-s:40%;--id-l:40%;--halo:rgba(168,113,42,.13);--fw:52px;--fh:76px}
 @media(prefers-color-scheme:dark){:root{--bg:#161614;--panel:#1e1e1c;--ink:#eceae5;
  --dim:#98958d;--line:#302f2b;--accent:#7aa8d8;--red:#e0796c;--amber:#d9a05b;
- --green:#7fb98c;--violet:#a98fd6;--mark:#413c26;--wait:#26231a;}}
+ --green:#7fb98c;--violet:#a98fd6;--mark:#413c26;--wait:#26231a;--ground:#3a3833;
+ --plinth:#3b3a34;--id-s:32%;--id-l:68%;--halo:rgba(217,160,91,.13)}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
 code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
-header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);
- padding:12px 20px;display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
+header{position:sticky;top:0;z-index:6;background:var(--bg);
+ border-bottom:1px solid var(--line);padding:11px 20px;display:flex;gap:14px;
+ align-items:baseline;flex-wrap:wrap}
 h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
-.count{color:var(--dim)}
-.dot{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--green)}
-.dot.stale{background:var(--dim)}
-main{padding:20px;display:grid;gap:18px;grid-template-columns:minmax(0,3fr) minmax(0,7fr)}
-.full{grid-column:1/-1}
-@media(max-width:900px){main{grid-template-columns:1fr}.full{grid-column:auto}}
-/* projects, down the left */
-.proj{display:block;width:100%;text-align:left;font:inherit;cursor:pointer;
- background:transparent;border:0;border-bottom:1px solid var(--line);
- padding:9px 14px;color:inherit}
-.proj:last-child{border-bottom:0}
-.proj.on{background:var(--ink);color:var(--bg)}
-.proj.on .meta{color:var(--bg);opacity:.72}
-.proj .nm{font-weight:600}
-/* tables */
+.count{color:var(--dim);font-size:13px}
+.callout{font-size:13px;font-weight:600}
+.callout.want{color:var(--amber)} .callout.bad{color:var(--red)}
+.spacer{flex:1}
+/* The project filter was a column down the left, which cost the widest thing on
+   the page a third of its width. It is a row of pills instead: the same filter,
+   and the bands get the whole window. */
+#filters{display:flex;gap:5px;flex-wrap:wrap}
+.proj{font:inherit;font-size:12px;background:transparent;color:var(--dim);
+ border:1px solid var(--line);border-radius:99px;padding:2px 10px;cursor:pointer;
+ white-space:nowrap}
+.proj.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.proj .pmeta{opacity:.72;margin-left:5px}
+#lost{display:none;background:var(--red);color:#fff;padding:6px 20px;font-size:13px}
+
+/* ---- the yard: a strip of ground per checkout ---------------------------- */
+/* Whoever stands on one strip shares that tree. That is the whole spatial
+   claim, and it is why the strip is full width and the path is on the left:
+   a grid of equal cards can say who is live but not who is standing where. */
+.yard{padding:13px 20px 4px}
+#agents{position:relative}
+.prj{display:flex;align-items:baseline;gap:9px;margin:13px 0 1px}
+.prj:first-child{margin-top:0}
+.prj .pn{font-size:13px;font-weight:600;letter-spacing:.01em}
+.prj .pm{font-size:12px;color:var(--dim)}
+.prj .rule{flex:1;height:1px;background:var(--line)}
+/* Three columns and two rows: who is standing here, what was left here, and
+   what this checkout would land. Every one of them is `auto` or content-sized,
+   so a band with one quiet agent is a strip and a band with five is tall. The
+   mockup gave them all the same generous rhythm, and that was most of what the
+   direction cost in height against a page that packs them. */
+.band{display:grid;gap:0 14px;padding:3px 0 2px;align-items:start;
+ grid-template-columns:minmax(120px,178px) minmax(0,1fr) auto;
+ grid-template-areas:"place floor gate" "place left gate"}
+.place{grid-area:place;padding-top:calc(var(--fh) - 34px)}
+.place .pt{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+ color:var(--dim);overflow-wrap:anywhere;-webkit-user-select:all;user-select:all;
+ line-height:1.4}
+.place .pc{font-size:11px;color:var(--dim);margin-top:2px}
+/* Characters never shrink to fit: they wrap. Five agents in one checkout flow
+   onto as many lines as they need at full size and the band grows to hold them.
+   Width follows how much there is to say — an agent with a sentence about what
+   it is doing, or work it has declared, takes two of the floor's columns and a
+   quiet one takes a single column, which is still a whole character. That is
+   what stops a row from being as tall as its busiest member and as empty as its
+   quietest. auto-fit, not auto-fill: a checkout with one agent in it collapses
+   the columns nobody is standing in and gives that agent the whole strip. */
+.floor{grid-area:floor;position:relative;display:grid;align-items:start;
+ row-gap:10px;grid-template-columns:repeat(auto-fit,minmax(196px,1fr))}
+.floor>div[data-say]{grid-column:span 2}
+/* The ground. Drawn per plot with no column gap between plots, so the segments
+   join into one strip, and set exactly at the height of the figures' feet. */
+.floor>div{position:relative;padding-right:14px}
+.floor>div::before{content:"";position:absolute;left:0;right:0;top:var(--fh);
+ height:2px;background:var(--ground)}
+/* A checkout with nobody in it still has ground, and something is standing to
+   land off it. A bare strip says that; dropping the row would say nothing. */
+.floor.bare{min-height:calc(var(--fh) + 2px)}
+.floor.bare::after{content:"";position:absolute;left:0;width:230px;
+ top:var(--fh);height:2px;background:var(--ground)}
+.left{grid-area:left;display:grid;row-gap:8px;margin-top:7px;
+ grid-template-columns:repeat(auto-fill,minmax(322px,1fr))}
+.gate{grid-area:gate;padding-top:calc(var(--fh) - 30px);text-align:right;
+ max-width:260px;display:grid;row-gap:6px}
+.left:empty,.gate:empty{display:none}
+@media(max-width:860px){.floor>div[data-say]{grid-column:auto}}
+
+/* ---- one agent ---------------------------------------------------------- */
+/* Every part of it is a field. The shell, the eyes, the crest, the lean and the
+   hue are the NAME, hashed, so the same agent is the same figure on every
+   reload and on the second monitor. The courses under its feet are commits past
+   the trunk, the sheets are files written, the arms exist only when something is
+   held. One mark that carries no fact, and it is disclosed: the contact shadow,
+   there so the figure reads as standing ON its worktree rather than above it. */
+.ch{position:relative;display:flex;align-items:flex-start;gap:9px;cursor:pointer}
+.ch .art{position:relative;flex:none;height:var(--fh);
+ min-width:calc(var(--fw) + 24px);display:flex;justify-content:center;
+ align-items:flex-end}
+.fig{width:var(--fw);height:auto;overflow:visible;display:block}
+.fig .shell{fill:hsl(var(--h),var(--id-s),var(--id-l));fill-opacity:.19;
+ stroke:hsl(var(--h),var(--id-s),var(--id-l));stroke-width:1.7;
+ stroke-linejoin:round}
+.fig .ink{fill:hsl(var(--h),var(--id-s),var(--id-l))}
+.fig .line{fill:none;stroke:hsl(var(--h),var(--id-s),var(--id-l));
+ stroke-width:1.7;stroke-linecap:round}
+.fig .plinth{fill:var(--plinth)}
+.fig .sheet{fill:var(--panel);stroke:var(--dim);stroke-width:1.1}
+.fig .shadow{fill:var(--ink);opacity:.12}
+/* Quiet for longer than the idle window: the figure recedes and says how long.
+   Receding means that and nothing else. */
+.ch.idle .fig{opacity:.58;filter:saturate(.5)}
+.ch.idle .nm{color:var(--dim);font-weight:500}
+/* Idle AND holding messages it has never been shown — the one state on the page
+   that is asking to be acted on rather than watched, so it is the only thing
+   that gets a ring, and the ring is still once it is there. */
+.halo{position:absolute;left:50%;bottom:1px;transform:translateX(-50%);
+ width:calc(var(--fw) + 22px);height:calc(var(--fw) + 22px);border-radius:50%;
+ border:1.5px solid var(--amber);background:var(--halo);display:none}
+.ch.wait .halo{display:block}
+.ch.wait .fig{opacity:1;filter:none}
+.ch.wait .nm{color:var(--amber)}
+.subs{position:absolute;left:50%;bottom:0;display:flex;align-items:flex-end;
+ margin-left:calc(var(--fw)/2 - 9px)}
+.subs .fig{width:calc(var(--fw)*.5);opacity:.7;margin-left:-5px}
+.info{flex:1;min-width:0;padding-top:calc(var(--fh) - 54px)}
+.top{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+.nm{font-size:13px;font-weight:600;line-height:1.25;overflow-wrap:anywhere}
+.tags{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
+.tag{display:inline-flex;align-items:center;gap:3px;font-size:11px;
+ line-height:1.55;padding:0 6px;border-radius:99px;border:1px solid var(--line);
+ color:var(--dim);white-space:nowrap;max-width:100%}
+.tag .i{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1.5;
+ stroke-linecap:round;stroke-linejoin:round;flex:none}
+.tag.br{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink);
+ white-space:normal;overflow-wrap:anywhere}
+.tag.mail{border-color:var(--amber);color:var(--amber);font-weight:600}
+.tag.own{border-color:var(--violet);color:var(--violet);font-weight:600}
+.tag.claim .i{fill:currentColor;stroke:none;opacity:.5}
+/* What this project's agents are doing is the reason this shape was chosen over
+   a denser one, so it gets the room. Observed first, in its own words; declared
+   work under it, never instead of it. */
+.doing{position:relative;font-size:12px;line-height:1.38;margin-top:5px;
+ background:var(--panel);border:1px solid var(--line);border-radius:9px;
+ padding:4px 9px;overflow-wrap:anywhere;max-width:640px;display:inline-block}
+.doing::after{content:"";position:absolute;left:-4.5px;top:9px;width:7px;height:7px;
+ background:var(--panel);border-left:1px solid var(--line);
+ border-bottom:1px solid var(--line);transform:rotate(45deg)}
+.task{margin-top:5px;font-size:12px;line-height:1.38;padding-left:9px;
+ border-left:2px solid var(--line);max-width:640px}
+.task .hd{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.task .tid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600}
+.task .what{overflow-wrap:anywhere;min-width:0}
+.task .m{color:var(--dim);font-size:11px;overflow-wrap:anywhere}
+.task .bad{color:var(--red);font-weight:600;font-size:11px}
+.task.blocked{border-left-color:var(--red)}
+.task.gone{border-left-color:var(--red);border-left-style:dashed}
+.tag.st-done{border-color:var(--green);color:var(--green)}
+.tag.st-dropped{border-color:var(--red);color:var(--red);font-weight:600}
+.clash{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
+.info .clash{font-size:11px;margin-top:4px}
+.seen{font-size:11px;color:var(--dim);margin-top:3px}
+.files{cursor:pointer;text-decoration:underline dotted}
+.task .files{display:inline-block;color:var(--dim);font-size:11px;margin-top:2px}
+.list{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim);font-size:11px;
+ font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:2px}
+/* what this checkout would land, on the right of its own strip */
+.g{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;
+ border:1px solid var(--green);color:var(--green);border-radius:99px;
+ padding:1px 9px;white-space:normal;text-align:left}
+.g .i{width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:1.5;
+ stroke-linecap:round;stroke-linejoin:round;flex:none}
+.g.bad{border-color:var(--red);color:var(--red)}
+.gb{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+ color:var(--dim);margin-top:3px;overflow-wrap:anywhere}
+.gw{font-size:11px;color:var(--amber);margin-top:2px}
+
+/* ---- two sessions wrote one file, drawn between the two of them --------- */
+/* The only fact on this page that is about a PAIR, so it is the only one drawn
+   as a line rather than said in a cell. Measured off the laid-out figures, in
+   one frame, and it costs the server nothing. It is said in words on both
+   characters as well: a line between two figures is unreadable to somebody who
+   cannot see it, and colour may not be the only carrier of a fact. */
+.tethers{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
+.tethers path{fill:none;stroke:var(--red);stroke-width:1.6;stroke-dasharray:4 3}
+.tethers text{fill:var(--red);font-size:11px;
+ font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* ---- the sections that were already right ------------------------------- */
+main{padding:6px 20px 20px;display:grid;gap:14px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+ overflow:hidden}
+section>h2{margin:0;padding:9px 13px;font-size:11px;font-weight:600;
+ letter-spacing:.09em;text-transform:uppercase;color:var(--dim);
+ border-bottom:1px solid var(--line)}
 table{width:100%;border-collapse:collapse}
-th{text-align:left;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
- color:var(--dim);padding:7px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
-td{padding:8px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+th{text-align:left;font-size:11px;font-weight:600;letter-spacing:.06em;
+ text-transform:uppercase;color:var(--dim);padding:7px 13px;
+ border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:7px 13px;border-bottom:1px solid var(--line);vertical-align:top;
+ font-size:13px}
 tr:last-child td{border-bottom:0}
 td.mono{font-size:.86em}
-.kid td:first-child{padding-left:30px}
-.kid td{color:var(--dim)}
-section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-section>h2{margin:0;padding:10px 14px;font-size:11px;font-weight:600;letter-spacing:.09em;
- text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line)}
-.rows{padding:4px 0}
-.row{padding:9px 14px;border-bottom:1px solid var(--line)}
-.row:last-child{border-bottom:0}
-.row .top{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+tr.grp td{padding:6px 13px;background:var(--bg);color:var(--dim);font-size:11px;
+ font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+tr.land .mono{font-weight:600}
+tr.pair td{padding:6px 13px;color:var(--dim);font-size:12px}
 .name{font-weight:600}
 .meta{color:var(--dim);font-size:12px}
-.sub{padding-left:18px;border-left:2px solid var(--line);margin:6px 0 0 4px}
-.sub .row{padding:5px 0;border:0}
-.tag{font-size:11px;padding:1px 7px;border-radius:99px;border:1px solid var(--line);color:var(--dim)}
 .warn{color:var(--amber)} .bad{color:var(--red)} .ok{color:var(--green)}
-.feed{grid-column:1/-1}
-.ev{display:grid;grid-template-columns:62px 150px 1fr;gap:10px;padding:7px 14px;
+.empty{padding:12px 13px;color:var(--dim);font-size:12px}
+.ev{display:grid;grid-template-columns:62px 148px 1fr;gap:10px;padding:6px 13px;
  border-bottom:1px solid var(--line);align-items:start}
 @media(max-width:640px){.ev{grid-template-columns:56px 1fr}.ev .who{grid-column:2}}
 .ev:last-child{border-bottom:0}
 .ev .t{color:var(--dim);font-size:12px}
 .ev .who{font-size:12px;font-weight:600;overflow-wrap:anywhere}
-.ev .txt{white-space:pre-wrap;overflow-wrap:anywhere;max-height:4.6em;overflow:hidden;
- position:relative;cursor:pointer}
+.ev .txt{white-space:pre-wrap;overflow-wrap:anywhere;max-height:4.6em;
+ overflow:hidden;position:relative;cursor:pointer;font-size:13px}
 .ev .txt.open{max-height:none}
-.ev .txt.clip::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.5em;
- background:linear-gradient(transparent,var(--panel))}
+.ev .txt.clip::after{content:"";position:absolute;left:0;right:0;bottom:0;
+ height:1.5em;background:linear-gradient(transparent,var(--panel))}
 .k-block .who{color:var(--red)} .k-serve .who{color:var(--amber)}
 .k-handoff .who{color:var(--violet)} .k-note .who{color:var(--accent)}
+.k-task .who{color:var(--green)}
 .k-lock .who,.k-join .who,.k-leave .who{color:var(--dim)}
-.empty{padding:14px;color:var(--dim)}
-#lost{display:none;background:var(--red);color:#fff;padding:6px 20px;font-size:13px}
-/* A value that has just moved says so for a moment and is then left alone. This
-   is only possible because rows are kept rather than rebuilt: after a wholesale
-   redraw everything is equally new and nothing can be marked as changed. A page
-   that pulses on every poll is one somebody stops looking at. */
-@keyframes hit{from{background:var(--mark)}to{background:transparent}}
-.hit{animation:hit 1.6s ease-out}
-@keyframes arrive{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}
-.arrive{animation:arrive .4s ease-out}
-@media(prefers-reduced-motion:reduce){.hit,.arrive{animation:none}}
-/* Idle, and holding messages it has never been shown: the one row on the page
-   that is asking to be acted on rather than watched. */
-tr.waiting{background:var(--wait)}
-tr.waiting .name{color:var(--amber)}
-.tag.want{border-color:var(--amber);color:var(--amber);font-weight:600}
-tr.grp td{padding:6px 14px;background:var(--bg);color:var(--dim);font-size:11px;
- font-weight:600;letter-spacing:.06em;text-transform:uppercase}
-/* Declared intent, under the session it belongs to and indented like a
-   subagent, so a session that has declared nothing still shows its branch, its
-   files and its clashes exactly as before. The ledger enriches the row; it does
-   not stand in for it. */
-tr.task td:first-child{padding-left:30px}
-tr.task .tid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600}
-tr.task .what{overflow-wrap:anywhere}
-tr.blocked{background:var(--wait)}
-/* What would happen if the finished work landed together. Read-only, like the
-   rest of the page, and deliberately with nothing here to press: the command is
-   printed as text because a control that spends model calls when it is clicked
-   is a different kind of object from a window that only watches. */
-tr.land .mono{font-weight:600}
-tr.pair td{padding:6px 14px;color:var(--dim);font-size:12px}
-.tag.st-done{border-color:var(--green);color:var(--green)}
-.tag.st-dropped{border-color:var(--red);color:var(--red);font-weight:600}
-.files{cursor:pointer;color:var(--dim);font-size:12px;text-decoration:underline dotted}
-.list{display:none;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim);
- font-size:.86em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.list.open{display:block}
-.clash{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
-.since{display:flex;align-items:center;gap:10px;cursor:pointer;
- padding:5px 14px;color:var(--accent);font-size:11px;letter-spacing:.06em;
- text-transform:uppercase;border-bottom:1px solid var(--line)}
+.since{display:flex;align-items:center;gap:10px;cursor:pointer;padding:5px 13px;
+ color:var(--accent);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+ border-bottom:1px solid var(--line)}
 .since::after{content:"";flex:1;height:1px;background:var(--accent);opacity:.35}
+
+/* ---- one character, every field of it, selectable ---------------------- */
+#panel{position:fixed;right:0;top:0;bottom:0;width:340px;background:var(--panel);
+ border-left:1px solid var(--line);padding:16px 18px;overflow:auto;display:none;
+ z-index:9;box-shadow:-14px 0 34px rgba(0,0,0,.10)}
+#panel.open{display:block}
+#panel h3{margin:0 0 2px;font-size:15px}
+#panel .close{position:absolute;right:12px;top:12px;background:transparent;
+ border:1px solid var(--line);border-radius:99px;color:var(--dim);font:inherit;
+ font-size:11px;padding:1px 9px;cursor:pointer}
+#panel dl{margin:12px 0 0;display:grid;grid-template-columns:74px 1fr;
+ gap:6px 12px;font-size:12px}
+#panel dt{color:var(--dim);font-size:11px;letter-spacing:.05em;
+ text-transform:uppercase;padding-top:2px}
+#panel dd{margin:0;overflow-wrap:anywhere;white-space:pre-wrap}
+#panel dd.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+ font-size:12px;-webkit-user-select:all;user-select:all}
+#panel .ptop{display:flex;gap:12px;align-items:flex-start}
+#panel .pfig{width:54px}
+
+/* ---- motion: state changes only, each one plays once ------------------- */
+/* The page is open for hours. Nothing here pulses, and every animation is
+   entered by a value CHANGING — which is only possible because rows are kept
+   rather than rebuilt: after a wholesale redraw everything is equally new. */
+@keyframes hit{from{background:var(--mark)}to{background:transparent}}
+@keyframes arrive{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+@keyframes bloom{from{transform:translateX(-50%) scale(.6);opacity:0}
+ 55%{opacity:1}to{transform:translateX(-50%) scale(1);opacity:1}}
+@keyframes draw{from{stroke-dashoffset:130}to{stroke-dashoffset:0}}
+.hit{animation:hit 1.6s ease-out}
+.arrive{animation:arrive .34s cubic-bezier(.16,.84,.3,1)}
+.ch.wait .halo{animation:bloom .9s cubic-bezier(.16,.84,.3,1)}
+.tethers path{animation:draw .6s ease-out}
+@media(prefers-reduced-motion:reduce){
+ /* The ring, the tether and the highlight ARE the encoding, so only their
+    entrances go, and the highlight stays put instead of fading out. */
+ .hit,.arrive,.ch.wait .halo,.tethers path{animation:none}
+ .hit{background:var(--mark)}}
 </style></head><body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+ <symbol id="i-mail" viewBox="0 0 16 16">
+  <rect x="1.4" y="3.4" width="13.2" height="9.2" rx="1.6"/>
+  <path d="M2 4.6 8 9.2 14 4.6"/></symbol>
+ <symbol id="i-key" viewBox="0 0 16 16">
+  <circle cx="5" cy="5.4" r="3.1"/><path d="M7.2 7.6 13.4 13.8"/>
+  <path d="M10.6 13 12.2 11.4"/></symbol>
+ <symbol id="i-sheet" viewBox="0 0 16 16">
+  <path d="M3.6 1.8h6l3 3v9.4a1 1 0 0 1-1 1H4.6a1 1 0 0 1-1-1V2.8a1 1 0 0 1 1-1Z"/>
+  <path d="M9.4 1.9v3.2h3.1"/></symbol>
+ <symbol id="i-up" viewBox="0 0 16 16">
+  <path d="M8 13.4V3.2"/><path d="M3.8 7.2 8 2.9l4.2 4.3"/></symbol>
+ <symbol id="i-gate" viewBox="0 0 16 16">
+  <path d="M2 13.6V4.2"/><path d="M2 4.6h9.6l2.4 2.3-2.4 2.3H2"/></symbol>
+ <symbol id="i-claim" viewBox="0 0 16 16">
+  <path d="M8 1.8 14 4.4v4.2c0 3-2.5 5.1-6 5.8-3.5-.7-6-2.8-6-5.8V4.4Z"/></symbol>
+ <symbol id="i-sub" viewBox="0 0 16 16">
+  <circle cx="8" cy="4.4" r="2.6"/><path d="M2.8 13.6a5.2 5.2 0 0 1 10.4 0"/></symbol>
+</defs></svg>
 <header><h1>agent-bus</h1><span class="count" id="count">…</span>
- <span class="count warn" id="wanting"></span>
- <span class="count bad" id="stuck"></span></header>
+ <span class="callout want" id="wanting"></span>
+ <span class="callout bad" id="stuck"></span>
+ <span class="spacer"></span>
+ <div id="filters"></div></header>
 <div id="lost">connection lost — did `agentbus board` stop?</div>
+<div class="yard"><div id="agents"></div></div>
 <main>
- <section><h2>Projects</h2><div id="filters"></div></section>
- <section><h2>Live agents</h2><table><thead><tr><th>Agent</th><th>Branch</th>
-  <th>Worktree</th><th>Doing</th><th>Seen</th></tr></thead>
-  <tbody id="agents"></tbody></table></section>
- <section class="full"><h2>Services</h2><table><thead><tr><th>Service</th>
-  <th>Serving</th><th>Started by</th><th>Held by</th><th>State</th></tr></thead>
-  <tbody id="serves"></tbody></table></section>
- <section class="full"><h2>Landing</h2><table><thead><tr><th>Branch</th>
+ <section><h2>Landing</h2><table><thead><tr><th>Branch</th>
   <th>Ahead</th><th>Onto trunk</th><th>Checkout</th><th>Finished work</th></tr>
   </thead><tbody id="landing"></tbody></table></section>
- <section class="full"><h2>Feed</h2><div id="feed"></div></section>
+ <section><h2>Services</h2><table><thead><tr><th>Service</th>
+  <th>Serving</th><th>Started by</th><th>Held by</th><th>State</th></tr></thead>
+  <tbody id="serves"></tbody></table></section>
+ <section><h2>Feed</h2><div id="feed"></div></section>
 </main>
+<div id="panel"></div>
 <script>
 /* Keyed, incremental updates — hand-rolled, because the self-contained rule is
    absolute and this is fifty lines.
@@ -5717,8 +5892,9 @@ tr.pair td{padding:6px 14px;color:var(--dim);font-size:12px}
    mid-sentence, closed anything the reader had opened, reset scrolling inside
    those blocks, and made it impossible to show a change AS a change: after a
    wholesale redraw everything is equally new. So each row is created once under
-   a stable key — the session id, the resource, the event's sequence number — and
-   afterwards only the fields that actually differ are written.
+   a stable key — the session id, the checkout, the resource, the event's
+   sequence number — and afterwards only the fields that actually differ are
+   written.
 
    Nothing here builds markup out of data either. Every value goes in as text, so
    no branch name, worktree path or message can arrive as HTML. */
@@ -5733,6 +5909,7 @@ function ago(ts, now){var d = Math.max(0, now - ts);
 function clock(ts){var d = new Date(ts*1000);
  return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2);}
 function keep(x){return !repo || x.repo === repo;}
+function many(n, one){return n + " " + one + (n === 1 ? "" : "s");}
 
 function el(tag, cls, text){var n = document.createElement(tag);
  if(cls) n.className = cls; if(text != null) n.textContent = text; return n;}
@@ -5757,6 +5934,7 @@ function flash(node){
 }
 function shown(node, on){var v = on ? "" : "none";
  if(node.style.display !== v) node.style.display = v;}
+function hidden(node){return node.style.display === "none";}
 function mark(node, cls, on){
  if(node.classList.contains(cls) === !!on) return;
  node.classList.toggle(cls, !!on);
@@ -5779,89 +5957,245 @@ function sync(parent, items, make, fill){
   if(!live[k]){parent.removeChild(have[k]); delete have[k];}});
 }
 
-/* ---- projects ------------------------------------------------------------ */
-function makeProj(it){var b = el("button", "proj");
- b.c = {nm: add(b, "span", "nm")};
- b.appendChild(el("br"));
- b.c.meta = add(b, "span", "meta");
- b.onclick = function(){repo = it.key;
-  localStorage.setItem("ab-repo", repo); if(last) render(last);};
- return b;}
-function fillProj(b, it){put(b.c.nm, it.label); put(b.c.meta, it.meta);
- mark(b, "on", it.key === repo);}
+/* ---- who this agent is --------------------------------------------------- */
+/* Derived from the name and nothing else, so the same agent is the same figure
+   on every reload, in every tab and on the second monitor — no table anybody
+   has to maintain, and no server round trip. FNV-1a, salted once per trait so
+   two traits of one name are independent. What leaves this function is a small
+   integer: integers are all that reach the drawing, so a name can never arrive
+   as markup by this route either. */
+function fnv(s){var h = 2166136261 >>> 0;
+ for(var i = 0; i < s.length; i++){
+  h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0;}
+ h ^= h >>> 15; h = Math.imul(h, 2246822507) >>> 0;
+ h ^= h >>> 13; return h >>> 0;}
+function trait(name, salt, n){return fnv(salt + "" + name) % n;}
+/* Muted on purpose: an identity colour must never be mistaken for one of the
+   page's four state colours. Dull is WHO, bright is WHAT IS HAPPENING. */
+var HUES = [8, 32, 55, 96, 128, 158, 186, 208, 232, 262, 292, 330];
+function idOf(name){name = name || "?";
+ return {hue: HUES[trait(name, "hue", HUES.length)],
+         shell: trait(name, "shell", 5), eyes: trait(name, "eyes", 5),
+         crest: trait(name, "crest", 5), lean: trait(name, "lean", 5) - 2};}
 
-/* ---- live agents --------------------------------------------------------- */
-function makeSess(){var tr = el("tr"), c = {}, td = add(tr, "td");
- c.dot = add(td, "span", "dot"); c.name = add(gap(td), "span", "name");
- c.want = add(gap(td), "span", "tag want", "waiting");
- td = add(tr, "td", "mono");
- c.branch = add(td, "span"); c.ahead = add(gap(td), "span", "tag");
- c.root = add(tr, "td", "mono");
- td = add(tr, "td");
- c.doing = add(td, "div"); c.owns = add(td, "div", "meta");
- c.files = add(td, "div", "files"); c.list = add(td, "div", "list");
- c.clash = add(td, "div", "bad clash");
- c.files.onclick = function(){c.list.classList.toggle("open");};
- td = add(tr, "td", "meta");
- c.seen = add(td, "span"); c.unread = add(gap(td), "span", "warn");
- tr.c = c; return tr;}
-function fillSess(tr, it){var s = it.s, c = tr.c;
- mark(c.dot, "stale", s.idle);
- put(c.name, s.agent);
- shown(c.want, s.waiting); mark(tr, "waiting", s.waiting);
- put(c.branch, s.branch || "-");
+var NS = "http://www.w3.org/2000/svg";
+function sv(tag, attrs, parent){var n = document.createElementNS(NS, tag);
+ for(var k in attrs) n.setAttribute(k, attrs[k]);
+ if(parent) parent.appendChild(n); return n;}
+var SHELL = [
+ "M10 56C10 31 13 15 24 15S38 31 38 56Z",
+ "M12 56V27a12 12 0 0 1 24 0v29Z",
+ "M13.5 56 16.5 22Q24 13 31.5 22L34.5 56Z",
+ "M24 13 37 22V45L24 56 11 45V22Z",
+ "M12 56V20q0-5 5-5h14q5 0 5 5v36Z"];
+var CREST = [
+ null,
+ function(g){sv("path", {"class": "line", d: "M24 15V7"}, g);
+  sv("circle", {"class": "ink", cx: 24, cy: 5.4, r: 2}, g);},
+ function(g){sv("path", {"class": "line", d: "M19 16 16 9M29 16 32 9"}, g);},
+ function(g){sv("path", {"class": "ink", d: "M23 14V4.6L30.5 12.4Z"}, g);},
+ function(g){sv("rect", {"class": "ink", x: 13.5, y: 10.5, width: 21,
+  height: 3, rx: 1.5}, g);}];
+function eyes(g, k){
+ if(k === 0){sv("circle", {"class": "ink", cx: 18.6, cy: 33, r: 2.9}, g);
+  sv("circle", {"class": "ink", cx: 29.4, cy: 33, r: 2.9}, g);}
+ else if(k === 1){
+  sv("rect", {"class": "ink", x: 17.1, y: 29, width: 3, height: 8, rx: 1.5}, g);
+  sv("rect", {"class": "ink", x: 27.9, y: 29, width: 3, height: 8, rx: 1.5}, g);}
+ else if(k === 2){
+  sv("circle", {"class": "line", cx: 18.6, cy: 33, r: 3.2}, g);
+  sv("circle", {"class": "line", cx: 29.4, cy: 33, r: 3.2}, g);}
+ else if(k === 3){
+  sv("path", {"class": "line", d: "M15 34.6q3.6-4.8 7.2 0"}, g);
+  sv("path", {"class": "line", d: "M25.8 34.6q3.6-4.8 7.2 0"}, g);}
+ else {sv("rect", {"class": "ink", x: 15.6, y: 30.4, width: 16.8, height: 5.4,
+  rx: 2.7}, g);}
+}
+function figure(name){
+ var id = idOf(name);
+ var s = sv("svg", {"class": "fig", viewBox: "0 0 48 68"});
+ s.style.setProperty("--h", id.hue + "deg");
+ sv("ellipse", {"class": "shadow", cx: 24, cy: 63.6, rx: 13.5, ry: 2.6}, s);
+ s.__plinth = sv("g", {}, s);
+ var g = sv("g", {transform: "rotate(" + id.lean + " 24 56)"}, s);
+ sv("path", {"class": "shell", d: SHELL[id.shell]}, g);
+ eyes(g, id.eyes);
+ if(CREST[id.crest]) CREST[id.crest](g);
+ s.__stack = sv("g", {}, s);
+ s.__arms = sv("g", {}, g);
+ return s;
+}
+/* Commits this checkout is past its trunk, as courses under its feet. Capped:
+   the sixth course says nothing the fifth did not, and the exact number is on
+   the chip beside it. Nothing is drawn when the answer is nothing. */
+function plinth(s, n){
+ var g = s.__plinth, k = Math.min(n || 0, 5), i;
+ if(g.__n === k) return; g.__n = k;
+ while(g.firstChild) g.removeChild(g.firstChild);
+ for(i = 0; i < k; i++)
+  sv("rect", {"class": "plinth", x: 11.5 - i * .8, y: 56.4 + i * 1.9,
+   width: 25 + i * 1.6, height: 1.5, rx: .7}, g);
+}
+/* Files written, as a stack of sheets it is carrying. Capped for the same
+   reason; the chip has the count. */
+function stack(s, n){
+ var g = s.__stack, k = Math.min(n || 0, 5), i;
+ if(g.__n === k) return; g.__n = k;
+ while(g.firstChild) g.removeChild(g.firstChild);
+ for(i = 0; i < k; i++)
+  sv("rect", {"class": "sheet", x: 0.8, y: 49.6 - i * 2.6, width: 9.6,
+   height: 6.4, rx: 1}, g);
+}
+/* Arms appear only to hold something. Empty hands mean it holds no lock, and
+   that is a fact worth being able to see from across the room. */
+function arms(s, holding){
+ var g = s.__arms;
+ if(g.__h === !!holding) return; g.__h = !!holding;
+ while(g.firstChild) g.removeChild(g.firstChild);
+ if(!holding) return;
+ sv("path", {"class": "line", d: "M12.4 41q-3.2 4 .8 7.2M35.6 41q3.2 4-.8 7.2"}, g);
+ sv("rect", {"class": "shell", x: 15.6, y: 44.4, width: 16.8, height: 8, rx: 2}, g);
+ sv("circle", {"class": "ink", cx: 20, cy: 48.4, r: 1.5}, g);
+ sv("path", {"class": "line", d: "M23.6 48.4h6"}, g);
+}
+function icon(parent, id){
+ var s = sv("svg", {"class": "i", viewBox: "0 0 16 16"}, parent);
+ sv("use", {href: "#" + id}, s).setAttributeNS(
+  "http://www.w3.org/1999/xlink", "xlink:href", "#" + id);
+ return s;
+}
+function chip(parent, cls, ico){
+ var t = add(parent, "span", "tag " + cls);
+ if(ico) icon(t, ico);
+ t.__t = add(t, "span");
+ return t;
+}
+/* A file list is opened by the reader, so it is held open with an inline style
+   rather than a class: the test DOM can see that one and cannot see CSS, and a
+   list hidden by a stylesheet would have every assertion about it passing while
+   nobody could read it. */
+function expander(files, list){
+ shown(list, false);
+ files.onclick = function(ev){
+  if(ev && ev.stopPropagation) ev.stopPropagation();
+  shown(list, hidden(list));};
+}
+
+/* ---- one agent, standing on its checkout -------------------------------- */
+function makeCh(){
+ var plot = el("div");           /* the plot of ground it is standing on */
+ var d = add(plot, "div", "ch"), c = {};
+ c.art = add(d, "div", "art");
+ c.halo = add(c.art, "span", "halo");
+ c.fig = null;                   /* built on the first fill: needs the name */
+ c.subs = add(c.art, "div", "subs");
+ c.info = add(d, "div", "info");
+ var top = add(c.info, "div", "top");
+ c.nm = add(top, "div", "nm");
+ c.tags = add(top, "div", "tags");
+ c.br = chip(c.tags, "br");
+ c.ahead = chip(c.tags, "ahead", "i-up");
+ c.files = chip(c.tags, "files", "i-sheet");
+ c.mail = chip(c.tags, "mail", "i-mail");
+ c.own = chip(c.tags, "own", "i-key");
+ c.claim = chip(c.tags, "claim", "i-claim");
+ c.sub = chip(c.tags, "sub", "i-sub");
+ c.doing = add(c.info, "div", "doing");
+ c.tasks = add(c.info, "div", "tk");
+ c.clash = add(c.info, "div", "clash bad");
+ c.list = add(c.info, "div", "list");
+ expander(c.files, c.list);
+ c.seen = add(c.info, "div", "seen");
+ plot.__ch = d; plot.c = c;
+ if(!first) d.classList.add("arrive");
+ return plot;
+}
+function fillCh(plot, it){
+ var s = it.s, c = plot.c, d = plot.__ch;
+ if(!c.fig){
+  c.fig = figure(s.agent);
+  c.art.insertBefore(c.fig, c.subs);
+  d.onclick = function(){openPanel(s.agent);};
+  d.title = s.agent + " — " + s.root;
+ }
+ CHARS[s.agent] = c.art;
+ sync(c.subs, s.agents.map(function(a, i){
+   return {k: "sa:" + (a.name || i), a: a};}),
+  function(x){return figure(x.a.name || "sub");}, function(){});
+ mark(d, "idle", !!s.idle);
+ mark(d, "wait", !!s.waiting);
+ put(c.nm, s.agent);
+ if(s.doing || it.tk.length) plot.setAttribute("data-say", "1");
+ else plot.removeAttribute("data-say");
+ put(c.br.__t, s.branch || "no branch");
  /* null: not counted yet — the poll runs no git and waits for nothing. "": this
-    tree has no default branch to be ahead of, so there is nothing to say. */
- put(c.ahead, s.ahead_of ? "+" + s.ahead : (s.ahead_of === null ? "…" : ""));
- c.ahead.title = s.ahead_of ? s.ahead + " ahead of " + s.ahead_of
+    tree has no default branch to be ahead of. 0: it is on the trunk. The last
+    two are nothing to say, and the first is worth saying. */
+ var known = s.ahead_of !== null && s.ahead_of !== "";
+ put(c.ahead.__t, known ? (s.ahead ? "+" + s.ahead : "") : "…");
+ c.ahead.title = known ? s.ahead + " commits past " + s.ahead_of
    : (s.ahead_of === null ? "not counted yet" : "");
- shown(c.ahead, s.ahead_of !== "");
- put(c.root, s.root);
- put(c.doing, s.doing || "—");
- put(c.owns, s.owns ? "owns " + s.owns : ""); shown(c.owns, !!s.owns);
- put(c.files, s.wrote_n + (s.wrote_n === 1 ? " file" : " files") + " written");
+ shown(c.ahead, s.ahead_of === null || (known && !!s.ahead));
+ plinth(c.fig, known ? s.ahead : 0);
+ put(c.files.__t, many(s.wrote_n, "file") + " written");
  shown(c.files, !!s.wrote_n);
- put(c.list, s.wrote.join("\n") +
-   (s.wrote_n > s.wrote.length ? "\n+" + (s.wrote_n - s.wrote.length) + " older" : ""));
+ stack(c.fig, s.wrote_n);
+ put(c.mail.__t, s.unread + " unread"); shown(c.mail, !!s.unread);
+ put(c.own.__t, "holds " + s.owns); shown(c.own, !!s.owns);
+ arms(c.fig, !!s.owns);
+ /* How many of this session's commands took a shared resource. Nothing else on
+    the page says a session has been reaching for the machine at all. */
+ put(c.claim.__t, many(s.guarded, "claim"));
+ c.claim.title = s.guarded + " commands took a shared resource";
+ shown(c.claim, !!s.guarded);
+ put(c.sub.__t, s.agents.length === 1 ? s.agents[0].name
+   : many(s.agents.length, "subagent"));
+ c.sub.title = s.agents.map(function(a){
+   return a.name + (a.type ? " — " + a.type : "");}).join("\n");
+ shown(c.sub, !!s.agents.length);
+ /* Observed, in the session's own words, and given the room: what this
+    project's agents are doing is why the page is this shape. */
+ put(c.doing, s.doing); shown(c.doing, !!s.doing);
+ sync(c.tasks, it.tk.map(function(t){
+   return {k: "t:" + t.id, t: t, now: it.now};}), makeTask, fillTask);
  put(c.clash, s.clash.map(function(x){
    return x.path + " — also " + x.also.join(", ");}).join("\n"));
  shown(c.clash, !!s.clash.length);
- put(c.seen, ago(s.beat, it.now) + (s.idle ? " idle" : ""));
- put(c.unread, s.unread ? s.unread + " unread" : ""); shown(c.unread, !!s.unread);}
-function makeKid(){var tr = el("tr", "kid"), c = {};
- c.name = add(tr, "td"); c.branch = add(tr, "td", "mono");
- c.root = add(tr, "td", "mono"); c.type = add(tr, "td"); add(tr, "td");
- tr.c = c; return tr;}
-function fillKid(tr, it){var a = it.a, c = tr.c;
- put(c.name, a.name); put(c.branch, a.branch || "-");
- put(c.root, a.root); put(c.type, a.type || "");}
-/* ---- what an agent says it is doing -------------------------------------- */
-function makeTask(){var tr = el("tr", "task"), c = {}, td = add(tr, "td");
- c.tid = add(td, "span", "tid"); c.state = add(gap(td), "span", "tag");
- c.branch = add(tr, "td", "mono");
- c.was = add(tr, "td", "meta");
- td = add(tr, "td");
- c.what = add(td, "div", "what"); c.block = add(td, "div", "bad");
- c.wait = add(td, "div", "meta"); c.res = add(td, "div", "meta");
- c.files = add(td, "div", "files"); c.list = add(td, "div", "list");
- c.files.onclick = function(){c.list.classList.toggle("open");};
- c.when = add(tr, "td", "meta");
- tr.c = c; return tr;}
-function fillTask(tr, it){var t = it.t, c = tr.c;
+ put(c.list, s.wrote.join("\n") +
+   (s.wrote_n > s.wrote.length ? "\n+" + (s.wrote_n - s.wrote.length) + " older" : ""));
+ put(c.seen, s.idle ? "quiet " + ago(s.beat, it.now) : "");
+ shown(c.seen, !!s.idle);
+}
+
+/* ---- what an agent said it was doing ------------------------------------ */
+/* Under the character that declared it when there is one, and standing on the
+   ground it was taken on when its chat has gone — which is the state somebody
+   merging most needs and the one nothing else on the page can show. */
+function makeTask(){
+ var n = el("div", "task"), c = {}, hd = add(n, "div", "hd");
+ c.tid = add(hd, "span", "tid"); c.state = add(hd, "span", "tag");
+ c.what = add(hd, "span", "what");
+ c.block = add(n, "div", "bad");
+ c.wait = add(n, "div", "m");
+ c.res = add(n, "div", "m");
+ c.after = add(n, "div", "m");
+ c.from = add(n, "div", "m");
+ c.was = add(n, "div", "m");
+ c.files = add(n, "div", "files"); c.list = add(n, "div", "list");
+ expander(c.files, c.list);
+ c.when = add(n, "div", "m");
+ n.c = c; return n;
+}
+function fillTask(n, it){var t = it.t, c = n.c;
  put(c.tid, t.id);
  put(c.state, t.state); mark(c.state, "st-done", t.state === "done");
  mark(c.state, "st-dropped", t.state === "dropped");
  shown(c.state, t.state !== "open");
- /* Blank under its own session, which already says the branch on the row above;
-    filled in for work whose session has gone, where it is the whole answer to
-    "where did that get to". Decided on the server, so this stays a print. */
- put(c.branch, t.branch_note); shown(c.branch, !!t.branch_note);
- put(c.was, t.owner_live ? "" : "was " + t.agent);
- shown(c.was, !t.owner_live);
  put(c.what, t.what + (t.note ? " — " + t.note : ""));
  put(c.block, t.blocked_by.length ? "blocked until " + t.blocked_by.join(", ")
    + " lands" : "");
- shown(c.block, !!t.blocked_by.length); mark(tr, "blocked", !!t.blocked_by.length);
+ shown(c.block, !!t.blocked_by.length); mark(n, "blocked", !!t.blocked_by.length);
+ mark(n, "gone", !t.owner_live);
  put(c.wait, t.waiting.length ? t.waiting.join(", ") + " waiting on this" : "");
  shown(c.wait, !!t.waiting.length);
  /* Held and queued come from the locks themselves — nothing declares them. */
@@ -5869,13 +6203,59 @@ function fillTask(tr, it){var t = it.t, c = tr.c;
  if(t.holding.length) r.push("holding " + t.holding.join(", "));
  if(t.queued_for.length) r.push("queued for " + t.queued_for.join(", "));
  put(c.res, r.join(" · ")); shown(c.res, !!r.length);
- put(c.files, t.wrote_n + (t.wrote_n === 1 ? " file" : " files") + " since");
- shown(c.files, !!t.wrote_n);
+ /* Everything it declared it was built on, minus what it is still waiting for:
+    the prerequisites that have already landed. Without this, work that named
+    three and is blocked on one looks as though it named one. */
+ var landed = t.needs.filter(function(x){return t.blocked_by.indexOf(x) < 0;});
+ put(c.after, landed.length ? "built on " + landed.join(", ") + ", landed" : "");
+ shown(c.after, !!landed.length);
+ put(c.from, t.from ? "carried from " + t.from : "");
+ shown(c.from, !!t.from);
+ /* Its session has gone: who had it, the branch it is sitting on and the
+    checkout it was taken in are the whole answer to "where did that get to". */
+ put(c.was, "was " + t.agent + (t.branch_note ? " on " + t.branch_note : "") +
+   (t.root ? " in " + t.root : ""));
+ shown(c.was, !t.owner_live);
+ put(c.files, many(t.wrote_n, "file") + " since");
+ shown(c.files, !!t.wrote.length);
  put(c.list, t.wrote.join("\n") +
    (t.wrote_n > t.wrote.length ? "\n+" + (t.wrote_n - t.wrote.length) + " older" : ""));
  put(c.when, t.state === "done" ? "done " + ago(t.done_at, it.now) + " ago"
    : "for " + ago(t.at, it.now));}
-/* ---- what would happen if the finished work landed together --------------- */
+
+/* ---- what this checkout would land ------------------------------------- */
+function makeGate(){
+ var n = el("div", "cand"), c = {};
+ c.g = add(n, "span", "g"); icon(c.g, "i-gate"); c.gt = add(c.g, "span");
+ c.gb = add(n, "div", "gb"); c.gw = add(n, "div", "gw");
+ n.c = c; return n;
+}
+function fillGate(n, it){var b = it.b, c = n.c;
+ put(c.gt, b.onto === "clean" ? "+" + b.ahead + " clear onto the trunk"
+   : b.onto === "conflict" ? "+" + b.ahead + " conflicts in "
+     + b.onto_conflicts.join(", ")
+   : "+" + b.ahead + " not computable");
+ mark(c.g, "bad", b.onto !== "clean");
+ put(c.gb, b.branch + " · " + many(b.files_n, "file") + " · " +
+   b.tasks.length + " finished");
+ put(c.gw, b.dirty ? b.dirty + " uncommitted in this checkout" : "");
+ shown(c.gw, !!b.dirty);}
+
+/* ---- projects, as a filter --------------------------------------------- */
+function makeProj(it){var b = el("button", "proj");
+ b.c = {nm: add(b, "span", "nm"), meta: add(b, "span", "pmeta")};
+ b.onclick = function(){repo = it.key;
+  localStorage.setItem("ab-repo", repo); if(last) render(last);};
+ return b;}
+function fillProj(b, it){put(b.c.nm, it.label); put(b.c.meta, it.meta);
+ mark(b, "on", it.key === repo);}
+
+/* ---- landing, in full -------------------------------------------------- */
+/* The strip's own gate says what this checkout would land. This says what would
+   happen if all of it landed together — which branches would fight each other,
+   what was finished but is not ready, and the command to run. Read-only, and
+   deliberately with nothing to press: a control that spends model calls when it
+   is clicked is a different kind of object from a window that only watches. */
 function makeLand(){var tr = el("tr", "land"), c = {}, td = add(tr, "td");
  c.branch = add(td, "span", "name mono");
  c.ahead = add(tr, "td", "mono");
@@ -5886,7 +6266,7 @@ function makeLand(){var tr = el("tr", "land"), c = {}, td = add(tr, "td");
  td = add(tr, "td");
  c.tasks = add(td, "div", "clash");
  c.files = add(td, "div", "files"); c.list = add(td, "div", "list");
- c.files.onclick = function(){c.list.classList.toggle("open");};
+ expander(c.files, c.list);
  tr.c = c; return tr;}
 function fillLand(tr, it){var b = it.b, c = tr.c;
  put(c.branch, b.branch);
@@ -5907,7 +6287,7 @@ function fillLand(tr, it){var b = it.b, c = tr.c;
  put(c.tasks, b.tasks.map(function(t){
    return t.id + "  " + t.what + " — " + t.agent +
      (t.note ? ", “" + t.note + "”" : "");}).join("\n"));
- put(c.files, b.files_n + (b.files_n === 1 ? " file" : " files") + " changed");
+ put(c.files, many(b.files_n, "file") + " changed");
  shown(c.files, !!b.files_n);
  put(c.list, b.files.join("\n") +
    (b.files_n > b.files.length ? "\n+" + (b.files_n - b.files.length) + " more" : ""));}
@@ -5919,7 +6299,7 @@ function makeNone(){var tr = el("tr");
  tr.c = {t: add(tr, "td", "empty")}; tr.c.t.colSpan = 5; return tr;}
 function fillSpan(tr, it){put(tr.c.t, it.label);}
 
-/* ---- services ------------------------------------------------------------ */
+/* ---- services ---------------------------------------------------------- */
 function makeServe(){var tr = el("tr"), c = {}, td = add(tr, "td");
  c.res = add(td, "span", "name mono"); c.port = add(gap(td), "span", "meta mono");
  c.desc = add(td, "div", "meta");
@@ -5948,7 +6328,7 @@ function fillServe(tr, it){var s = it.s, c = tr.c;
    s.churn_roots.join(" and ") : "");
  shown(c.churn, s.churn >= 3);}
 
-/* ---- feed ---------------------------------------------------------------- */
+/* ---- feed -------------------------------------------------------------- */
 function makeEv(it){var d = el("div", "ev k-" + it.e.kind), c = {};
  c.t = add(d, "span", "t");
  c.who = add(d, "span", "who"); c.name = add(c.who, "span");
@@ -5987,19 +6367,198 @@ window.addEventListener("blur", away);
 document.addEventListener("visibilitychange", function(){
  if(document.hidden) away(); else if(document.hasFocus()) watching = true;});
 
+/* ---- two sessions wrote one file --------------------------------------- */
+/* Drawn between the two figures, because it is the only fact here that is about
+   a pair. Keyed like everything else, so a collision that is still there on the
+   next poll is not redrawn and does not animate again. */
+var CHARS = {};
+function makeTeth(){var g = sv("g", {"class": "tether"});
+ g.__p = sv("path", {}, g); g.__t = sv("text", {"text-anchor": "middle"}, g);
+ return g;}
+function fillTeth(g, it){
+ g.__p.setAttribute("d", it.d);
+ g.__t.setAttribute("x", it.x); g.__t.setAttribute("y", it.y);
+ if(g.__t.textContent !== it.path) g.__t.textContent = it.path;}
+function tethers(host, ss){
+ var svg = host.__teth;
+ if(!svg){svg = host.__teth = sv("svg", {"class": "tethers"}); host.appendChild(svg);}
+ requestAnimationFrame(function(){
+  var box = host.getBoundingClientRect(), items = [], done = {};
+  svg.setAttribute("width", box.width); svg.setAttribute("height", box.height);
+  svg.setAttribute("viewBox", "0 0 " + Math.round(box.width) + " " +
+   Math.round(box.height));
+  function at(name){var n = CHARS[name]; if(!n) return null;
+   var r = n.getBoundingClientRect();
+   return {x: r.left - box.left + r.width / 2, y: r.top - box.top + 14};}
+  ss.forEach(function(s){s.clash.forEach(function(cl){cl.also.forEach(function(o){
+   var k = [s.agent, o].sort().join("|") + "|" + cl.path;
+   if(done[k]) return; done[k] = 1;
+   var a = at(s.agent), b = at(o);
+   if(!a || !b) return;
+   var lift = Math.min(30 + Math.abs(a.x - b.x) * .10, 44);
+   items.push({k: k, path: cl.path,
+    d: "M" + a.x + " " + a.y + " Q" + (a.x + b.x) / 2 + " " +
+       (Math.min(a.y, b.y) - lift) + " " + b.x + " " + b.y,
+    x: (a.x + b.x) / 2, y: Math.min(a.y, b.y) - lift * .62});});});});
+  sync(svg, items, makeTeth, fillTeth);
+ });
+}
+
+/* ---- one character, every field of it ---------------------------------- */
+var PANEL = null;
+function openPanel(name){
+ var s = null, i;
+ for(i = 0; i < (last ? last.sessions.length : 0); i++)
+  if(last.sessions[i].agent === name) s = last.sessions[i];
+ if(!s) return;
+ var p = document.getElementById("panel"), c = p.__c;
+ if(!c){
+  c = p.__c = {};
+  var b = add(p, "button", "close", "close");
+  b.onclick = function(){p.classList.remove("open"); PANEL = null;};
+  var top = add(p, "div", "ptop");
+  c.fig = add(top, "div");
+  var t = add(top, "div");
+  c.h = add(t, "h3"); c.sub = add(t, "div", "seen");
+  c.dl = add(p, "dl");
+ }
+ while(c.fig.firstChild) c.fig.removeChild(c.fig.firstChild);
+ var f = figure(s.agent); f.setAttribute("class", "fig pfig");
+ c.fig.appendChild(f);
+ plinth(f, s.ahead_of ? s.ahead : 0); stack(f, s.wrote_n); arms(f, !!s.owns);
+ put(c.h, s.agent);
+ put(c.sub, s.repo_label + " · " + (s.idle ? "quiet for " +
+  ago(s.beat, last.now) : "working, seen " + ago(s.beat, last.now) + " ago"));
+ var mine = (last.tasks || []).filter(function(t){return t.sid === s.sid;});
+ var rows = [
+  ["worktree", s.root, 1],
+  ["branch", (s.branch || "detached") +
+   (s.ahead_of ? "   " + s.ahead + " ahead of " + s.ahead_of : ""), 1],
+  ["session", s.sid, 1],
+  ["doing", s.doing || "—", 0],
+  ["declared", mine.map(function(t){
+    return t.id + "  " + t.what + "  (" + t.state + ")";}).join("\n") || "—", 0],
+  ["holds", s.owns || "nothing", 0],
+  ["claimed", s.guarded + " commands took a shared resource", 0],
+  ["unread", s.unread + (s.waiting ? "   waiting for you" : ""), 0],
+  ["wrote", s.wrote.length ? s.wrote.join("\n") +
+    (s.wrote_n > s.wrote.length ? "\n+" + (s.wrote_n - s.wrote.length) + " older"
+     : "") : "nothing", 1],
+  ["clashes", s.clash.map(function(x){
+    return x.path + "   also " + x.also.join(", ");}).join("\n") || "none", 1],
+  ["subagents", s.agents.map(function(a){
+    return a.name + (a.type ? "   " + a.type : "");}).join("\n") || "none", 0]];
+ sync(c.dl, rows.map(function(r){return {k: r[0], r: r};}),
+  function(){var n = el("div"); shown(n, false); return n;},
+  function(n, it){
+   if(!n.__dt){n.__dt = 1;
+    n.__k = el("dt"); n.__d = el("dd");
+    n.parentNode.insertBefore(n.__k, n); n.parentNode.insertBefore(n.__d, n);}
+   put(n.__k, it.r[0]); put(n.__d, it.r[1]);
+   mark(n.__d, "mono", !!it.r[2]);});
+ p.classList.add("open"); PANEL = s.agent;
+}
+
+/* ---- the yard ---------------------------------------------------------- */
+/* Ordered by how many agents a project has, busiest first. Five agents in one
+   project and one each in four others is the case that matters, and putting the
+   crowd at the top is the difference between reading the page and scrolling
+   for it. Within a project, the same rule for its checkouts. */
+function yard(d, ss, tk, lands, now){
+ var pr = {}, order = [], rows = [];
+ function P(key, label){
+  var p = pr[key];
+  if(!p){p = pr[key] = {key: key, label: label || key, ss: [], tk: [], cand: []};
+   order.push(key);}
+  if(label) p.label = label;
+  return p;}
+ ss.forEach(function(s){P(s.repo, s.repo_label).ss.push(s);});
+ tk.forEach(function(t){P(t.repo).tk.push(t);});
+ lands.forEach(function(L){
+  L.candidates.forEach(function(b){P(L.repo).cand.push(b);});});
+ d.repos.forEach(function(r){if(pr[r.key]) pr[r.key].label = r.label || r.key;});
+ order.sort(function(a, b){
+  return pr[b].ss.length - pr[a].ss.length ||
+   (pr[a].label < pr[b].label ? -1 : pr[a].label > pr[b].label ? 1 : 0);});
+
+ order.forEach(function(key){
+  var p = pr[key], roots = [], on = {};
+  function R(root){if(!(root in on)){on[root] = []; roots.push(root);} return on[root];}
+  p.ss.forEach(function(s){R(s.root).push(s);});
+  /* A branch that is ahead of the trunk and a piece of work whose chat has gone
+     both belong to a checkout. Give that checkout its strip even when nobody is
+     standing on it: it reads as ground with nothing on it, which is the fact. */
+  p.cand.forEach(function(b){R(b.root);});
+  p.tk.forEach(function(t){if(!t.owner_live) R(t.root);});
+  roots.sort(function(a, b){
+   return on[b].length - on[a].length ||
+    (!a ? 1 : !b ? -1 : a < b ? -1 : a > b ? 1 : 0);});
+  rows.push({k: "p:" + key, prj: 1, label: p.label,
+   meta: many(p.ss.length, "agent") + " · " +
+    many(roots.filter(Boolean).length, "checkout")});
+  roots.forEach(function(root){
+   rows.push({k: "b:" + key + ":" + root, root: root, now: now,
+    many: roots.length > 1, ss: on[root],
+    tk: p.tk.filter(function(t){return !t.owner_live && t.root === root;}),
+    mine: p.tk, cand: p.cand.filter(function(b){return b.root === root;})});});});
+ if(!rows.length) rows.push({k: "none", prj: 1, label: "nobody is live",
+  meta: "no session has joined the bus"});
+ sync(document.getElementById("agents"), rows,
+  function(it){return it.prj ? makePrj() : makeBand();},
+  function(n, it){if(it.prj){put(n.c.nm, it.label); put(n.c.m, it.meta);}
+   else fillBand(n, it);});
+ tethers(document.getElementById("agents"), ss);
+}
+function makePrj(){var n = el("div", "prj"), c = {};
+ c.nm = add(n, "span", "pn"); c.m = add(n, "span", "pm");
+ add(n, "span", "rule"); n.c = c; return n;}
+function makeBand(){
+ var n = el("div", "band"), c = {}, place = add(n, "div", "place");
+ c.path = add(place, "div", "pt"); c.pc = add(place, "div", "pc");
+ c.floor = add(n, "div", "floor");
+ c.left = add(n, "div", "left");
+ c.gate = add(n, "div", "gate");
+ n.c = c; return n;}
+function fillBand(n, it){
+ var c = n.c;
+ put(c.path, it.root || "— not checked out");
+ put(c.pc, it.many && it.ss.length ? many(it.ss.length, "agent") + " here"
+   : "");
+ shown(c.pc, !!(it.many && it.ss.length));
+ mark(c.floor, "bare", !it.ss.length);
+ sync(c.floor, it.ss.map(function(s){
+   return {k: "c:" + s.sid, s: s, now: it.now,
+     tk: it.mine.filter(function(t){
+       return t.owner_live && t.sid === s.sid;}).sort(function(a, b){
+       return (a.state === "open" ? 0 : 1) - (b.state === "open" ? 0 : 1)
+        || b.at - a.at;})};}).sort(function(a, b){
+   return (b.s.doing || b.tk.length ? 1 : 0) - (a.s.doing || a.tk.length ? 1 : 0)
+    || b.s.wrote_n - a.s.wrote_n || b.s.unread - a.s.unread
+    || (a.s.agent < b.s.agent ? -1 : a.s.agent > b.s.agent ? 1 : 0);}),
+  makeCh, fillCh);
+ sync(c.left, it.tk.map(function(t){
+   return {k: "o:" + t.id, t: t, now: it.now};}), makeTask, fillTask);
+ sync(c.gate, it.cand.map(function(b){
+   return {k: "g:" + b.branch, b: b};}), makeGate, fillGate);
+}
+
 function render(d){
  last = d;
  var now = d.now;
  var ss = d.sessions.filter(keep), lk = d.locks.filter(keep),
      sv = d.serves.filter(keep), ev = d.events.filter(keep),
-     tk = (d.tasks || []).filter(keep);
+     tk = (d.tasks || []).filter(keep),
+     lands = (d.landing || []).filter(keep);
+ var repos = {};
+ ss.forEach(function(s){repos[s.repo] = 1;});
  var open = tk.filter(function(t){return t.state !== "done";}).length;
  put(document.getElementById("count"),
-   ss.length + " session" + (ss.length==1?"":"s") + " · " +
-   ss.reduce(function(n,s){return n + s.agents.length;},0) + " subagents · " +
-   lk.length + " held · " + open + " open");
+   many(ss.length, "agent") + " in " + many(Object.keys(repos).length, "project")
+   + " · " + many(ss.reduce(function(n, s){return n + s.agents.length;}, 0),
+     "subagent") + " · " + lk.length + " held · " + open + " open");
  var w = ss.filter(function(s){return s.waiting;}).length;
- put(document.getElementById("wanting"), w ? "· " + w + " waiting for you" : "");
+ put(document.getElementById("wanting"), w ? w + " waiting for you" : "");
+ shown(document.getElementById("wanting"), !!w);
  /* The two states nobody can see from the outside and the reader has to act on:
     work that cannot go on until another agent finishes, and work whose chat has
     gone and is sitting on a branch. */
@@ -6007,66 +6566,27 @@ function render(d){
      dr = tk.filter(function(t){return t.state === "dropped";}).length, s2 = [];
  if(st) s2.push(st + " blocked");
  if(dr) s2.push(dr + " dropped");
- put(document.getElementById("stuck"), s2.length ? "· " + s2.join(" · ") : "");
+ put(document.getElementById("stuck"), s2.join(" · "));
+ shown(document.getElementById("stuck"), !!s2.length);
 
  sync(document.getElementById("filters"),
-   [{key:"", label:"all projects"}].concat(d.repos).map(function(r){
+   [{key: "", label: "all projects"}].concat(d.repos).map(function(r){
      var n = d.sessions.filter(function(s){return !r.key || s.repo === r.key;}).length;
      var h = d.locks.filter(function(l){return !r.key || l.repo === r.key;}).length;
      return {k: "p:" + r.key, key: r.key, label: r.label,
              meta: n + " live" + (h ? " · " + h + " held" : "")};}),
    makeProj, fillProj);
 
- /* Grouped by repository, because sessions in different projects cannot collide
-    with each other and the collisions are what the reader is here for. */
- var rows = [], order = [];
- ss.forEach(function(s){if(order.indexOf(s.repo) < 0) order.push(s.repo);});
- order.sort(function(a, b){
-   var la = "", lb = "";
-   ss.forEach(function(s){if(s.repo === a) la = s.repo_label || a;
-                          if(s.repo === b) lb = s.repo_label || b;});
-   return la < lb ? -1 : la > lb ? 1 : 0;});
- function task(t){return {k: "t:" + t.repo + ":" + t.id, kind: "task",
-   t: t, now: now};}
- order.forEach(function(key){
-  var group = ss.filter(function(s){return s.repo === key;});
-  rows.push({k: "g:" + key, kind: "grp", label: group[0].repo_label || key});
-  group.forEach(function(s){
-   rows.push({k: "s:" + s.sid, kind: "sess", s: s, now: now});
-   tk.forEach(function(t){if(t.owner_live && t.sid === s.sid) rows.push(task(t));});
-   s.agents.forEach(function(a, i){
-    rows.push({k: "a:" + s.sid + ":" + (a.name || i), kind: "kid", a: a});});});
-  /* Work whose session has gone has no row to sit under, and it is what somebody
-     merging most needs to see: a branch with something half-finished on it. */
-  tk.forEach(function(t){
-    if(t.repo === key && !t.owner_live) rows.push(task(t));});});
- if(!ss.length) rows.push({k: "none", kind: "empty", label: "nobody is live"});
- sync(document.getElementById("agents"), rows, function(it){
-   return it.kind === "sess" ? makeSess() : it.kind === "kid" ? makeKid()
-     : it.kind === "task" ? makeTask()
-     : it.kind === "grp" ? makeGrp() : makeNone();},
-  function(node, it, made){
-   if(it.kind === "sess") fillSess(node, it);
-   else if(it.kind === "kid") fillKid(node, it);
-   else if(it.kind === "task") fillTask(node, it);
-   else fillSpan(node, it);});
-
- sync(document.getElementById("serves"),
-   sv.length ? sv.map(function(s){
-     return {k: "v:" + s.repo + ":" + s.resource, kind: "serve", s: s, now: now};})
-   : [{k: "none", kind: "empty",
-       label: "this repository declares no shared resources (agentbus init-repo)"}],
-   function(it){return it.kind === "serve" ? makeServe() : makeNone();},
-   function(node, it){
-     if(it.kind === "serve") fillServe(node, it); else fillSpan(node, it);});
+ yard(d, ss, tk, lands, now);
 
  /* Read-only, and computed off the poll: a `merge-tree` per pair of branches for
     as long as a tab is open is not a cost a window that only watches may impose.
     An absent view means not computed yet, which the page says rather than
     implying there is nothing to land. */
- var lands = (d.landing || []).filter(keep), lr = [];
+ var lr = [];
  lands.forEach(function(L){
-  if(!L.candidates.length) return;
+  var skip = L.skipped || [];
+  if(!L.candidates.length && !skip.length) return;
   var lbl = L.repo;
   d.repos.forEach(function(r){if(r.key === L.repo) lbl = r.label || r.key;});
   lr.push({k: "lg:" + L.repo, kind: "grp", label: lbl + " → " + L.trunk});
@@ -6081,6 +6601,12 @@ function render(d){
         ? p.a + " and " + p.b + " could not be compared — " + p.why
         : p.a + " and " + p.b + " both touch " + p.both.join(", ") +
           " — and merge cleanly"});});
+  /* Finished, and still not a candidate. Without this the reader is left with
+     "I marked that done, so where is it" and no answer on the page. */
+  skip.forEach(function(s){
+    lr.push({k: "ls:" + L.repo + ":" + s.id, kind: "pair",
+      label: s.id + "  " + s.what + " — finished on " +
+        (s.branch || "no branch") + ", not ready: " + s.why});});
   if(L.more) lr.push({k: "lm:" + L.repo, kind: "pair",
     label: "+" + L.more + " more finished branches, not compared"});
   /* Printed, not wired to anything. The human runs it. */
@@ -6096,6 +6622,15 @@ function render(d){
   function(node, it){
    if(it.kind === "land") fillLand(node, it); else fillSpan(node, it);});
 
+ sync(document.getElementById("serves"),
+   sv.length ? sv.map(function(s){
+     return {k: "v:" + s.repo + ":" + s.resource, kind: "serve", s: s, now: now};})
+   : [{k: "none", kind: "empty",
+       label: "this repository declares no shared resources (agentbus init-repo)"}],
+   function(it){return it.kind === "serve" ? makeServe() : makeNone();},
+   function(node, it){
+     if(it.kind === "serve") fillServe(node, it); else fillSpan(node, it);});
+
  newest = ev.length ? ev[0].i : 0;
  /* Only when something really has arrived since the reader last looked away: a
     divider with nothing above it is a line drawn for its own sake. */
@@ -6109,6 +6644,7 @@ function render(d){
    return it.e ? makeEv(it) : it.k === "since" ? makeSince()
      : el("div", "empty", it.label);},
   function(node, it, made){if(it.e) fillEv(node, it, made);});
+ if(PANEL) openPanel(PANEL);
  first = false;
 }
 function tick(){fetch("/data").then(function(r){return r.json();}).then(function(d){
