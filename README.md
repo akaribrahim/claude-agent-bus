@@ -250,13 +250,20 @@ agentbus watch          # a live line per event, in the terminal
 agentbus board          # the same thing as a page: http://127.0.0.1:8787
 ```
 
-The page is **a strip of ground per checkout**, full width, with the worktree
-path on its left and the agents working in that tree standing on it. Whoever
-stands on one strip shares that tree, which is the fact a grid of equal cards
-cannot state. Projects are ordered by how many agents they have, busiest first,
-and so are the checkouts inside a project — five agents in one repository and one
-each in four others is the ordinary shape of a machine running several chats, and
-the crowd belongs at the top.
+The page is **a box per project** and, inside it, **a strip of ground per
+checkout**, full width, with the worktree path written above the strip as its
+heading and the agents working in that tree standing on it. Whoever stands on one
+strip shares that tree, which is the fact a grid of equal cards cannot state. The
+boxes are full width and stacked, so a project with one quiet agent in it is a
+short box rather than a card sharing a row. Projects are ordered by how many
+agents they have, busiest first, and so are the checkouts inside a project — five
+agents in one repository and one each in four others is the ordinary shape of a
+machine running several chats, and the crowd belongs at the top.
+
+A checkout's heading is one line and is cut on the **left**, because a checkout is
+told apart by its tail: `…/.claude/worktrees/fix-timeouts` identifies it where
+`~/work/demo-app/.clau…` does not. Only the drawing is cut — the whole path is
+there to select and copy, and it is on the heading's tooltip untruncated.
 
 A band is as tall as what is in it. One quiet agent is a strip; five agents wrap
 onto as many lines as they need at full size, and an agent with a sentence about
@@ -295,9 +302,10 @@ collides:
 
 A file two live sessions have both written is the one fact on the page about a
 *pair*, so it is the one thing drawn as a line: a tether between the two figures,
-labelled with the path, measured off the laid-out page in one frame. It is also
-said in words on both of them, because a line between two figures is no use to
-somebody who cannot see it.
+labelled with the path, measured off the laid-out page in one frame — and the
+strip it is drawn on keeps room above the heads for it. It is also said in words
+on both of them, because a line between two figures is no use to somebody who
+cannot see it.
 
 None of that can show *intent*. Two chats fixing review findings in one
 repository look identical from outside, and which of them is blocked on the

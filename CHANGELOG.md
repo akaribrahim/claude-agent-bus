@@ -5,9 +5,10 @@ What changed for somebody using it, rather than what changed in the source.
 ## 2.7.0 — 2026-08-06
 
 **"What is going on in this project?"** — answered by a picture of the machine
-instead of a table of it. `agentbus board` now draws a strip of ground per
-checkout, full width, with the worktree path on its left and the agents working
-in that tree standing on it.
+instead of a table of it. `agentbus board` now draws each project as a box of its
+own and, inside it, a strip of ground per checkout, full width, with the worktree
+path written above the strip as its heading and the agents working in that tree
+standing on it.
 
 Whoever stands on one strip shares that tree. That is the sentence the old page
 could not say: it listed live agents in a table, and a table can tell you who is
@@ -15,17 +16,39 @@ live but not who is in the same working copy as whom — which is the reason two
 them ever collide, and the first thing you want to know before merging their
 work.
 
-    demo-app        3 agents · 2 checkouts
-    ~/work/demo-app          [figure] pale-otter   main  7 files written  holds simulator
-                                      "porting the attribution tests"
-                                      t9  admin list: pagination + saved filters
-                                          blocked until t8 lands
-                                          holding simulator · queued for db
-                                      shared/db.py — also brisk-heron
-                             [figure] brisk-heron  main  3 files written  holds db
-                             [figure] quiet-vole   main  4 unread
-    ~/work/demo-fix          [figure] slow-marten  fix/timeouts  +2        +2 clear onto the trunk
+    +- demo-app  3 agents · 2 checkouts ---------------------------------------+
+    |  ~/work/demo-app   2 agents here
+    |   [figure] pale-otter   main  7 files written  holds simulator
+    |            "porting the attribution tests"
+    |            t9  admin list: pagination + saved filters
+    |                blocked until t8 lands
+    |                holding simulator · queued for db
+    |            shared/db.py — also brisk-heron
+    |   [figure] brisk-heron  main  3 files written  holds db
+    |  ---------------------------------------------------------------------
+    |  …/demo-app/.claude/worktrees/fix-timeouts   1 agent here
+    |   [figure] slow-marten  fix/timeouts  +2       +2 clear onto the trunk
+    +-------------------------------------------------------------------------+
+    +- demo-lib  1 agent · 1 checkout -----------------------------------------+
+    |  ~/work/demo-lib
+    |   [figure] quiet-vole   main  4 unread
+    +-------------------------------------------------------------------------+
 
+- **A project is a bounded box, full width, stacked down the page.** It was a
+  heading, some strips, a hairline, another heading — so five projects read as one
+  long labelled list rather than five places. An edge and not a shadow: on a dark
+  surface a shadow reads as depth where what is wanted is a boundary. A project
+  with one quiet agent in it is simply a short box, never a card sharing a row
+  with another project.
+- **The worktree path is the strip's own heading: one line, cut on the left.** It
+  used to stand in a narrow column down the left, where a real path —
+  `~/work/demo-app/.claude/worktrees/fix-timeouts` — broke across four lines
+  mid-word and then *set* the height of the whole band. A checkout is told apart
+  by its tail, so the cut takes the front: `…/.claude/worktrees/fix-timeouts`
+  identifies it where `~/work/demo-app/.clau…` does not. The cut is only drawing —
+  the whole path is still there to select and copy, and it is on the heading's
+  tooltip untruncated, which is what you want off this page more than anything
+  else on it.
 - **Projects are ordered by how many agents they have, busiest first**, and so are
   the checkouts inside a project. Five agents in one repository and one each in
   four others is the ordinary shape of a machine running several chats; the crowd
@@ -48,7 +71,18 @@ work.
   in its own words, and under it the work it declared: what it is blocked on, who
   is waiting for it, what it holds, what it is queued behind.
 - **A file two live sessions have both written is drawn between them** — a tether,
-  labelled with the path, and said in words on both figures as well.
+  labelled with the path, and said in words on both figures as well. The strip it
+  is drawn on makes room above the heads for it; it used to take that room from
+  whatever happened to be above, which for the first strip on the page was the
+  project's heading and then nothing at all.
+- **The chip naming an agent and its checkout hangs on the figure**, not on the
+  row around it. On a strip with one agent that row is the full width of the page,
+  so the chip appeared wherever the pointer was — a thousand pixels from the
+  figure it named, and over the header once the page had scrolled. It is also
+  rewritten on every poll rather than once, so a session that changes its name or
+  its checkout cannot leave it saying something that stopped being true; and a
+  chat that takes a new name is redrawn with the face that name hashes to, since
+  the face *is* the name.
 
 Six things the board has been computing on every poll and showing nobody are now
 on the page:
@@ -72,8 +106,15 @@ external font, no library, every shape authored inline — and watching it chang
 nothing on the bus. Rows are still updated in place rather than redrawn, so a
 selection survives a poll; nothing pulses, every animation is entered by a value
 changing, and `prefers-reduced-motion` keeps each state readable instead of
-deleting it. The whole page is shorter than the one it replaces on both of the
-payloads it was built against.
+deleting it.
+
+It is not uniformly shorter than the table it replaces, and an earlier draft of
+this entry claimed it was. Measured at 1500px against the two payloads it was
+built on: on the busy one — nine sessions, five projects, six checkouts — the
+yard is 1123px against the table's 1186px. On the quiet one it is 838px against
+715px, because a figure at full size takes more room than a table row and five
+boxes have five headings. That is the trade the shape was chosen for: the busy
+case is the one you open the page for.
 
 Under the tests: the harness that runs the page's own script against the page's
 own data could not previously execute a line of a page that draws — the first
