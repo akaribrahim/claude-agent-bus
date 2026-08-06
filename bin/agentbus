@@ -5616,28 +5616,49 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 
 /* ---- the yard: a strip of ground per checkout ---------------------------- */
 /* Whoever stands on one strip shares that tree. That is the whole spatial
-   claim, and it is why the strip is full width and the path is on the left:
+   claim, and it is why the strip is full width with its path written above it:
    a grid of equal cards can say who is live but not who is standing where. */
 .yard{padding:13px 20px 4px}
-#agents{position:relative}
-.prj{display:flex;align-items:baseline;gap:9px;margin:13px 0 1px}
-.prj:first-child{margin-top:0}
-.prj .pn{font-size:13px;font-weight:600;letter-spacing:.01em}
-.prj .pm{font-size:12px;color:var(--dim)}
-.prj .rule{flex:1;height:1px;background:var(--line)}
-/* Three columns and two rows: who is standing here, what was left here, and
-   what this checkout would land. Every one of them is `auto` or content-sized,
-   so a band with one quiet agent is a strip and a band with five is tall. The
-   mockup gave them all the same generous rhythm, and that was most of what the
-   direction cost in height against a page that packs them. */
-.band{display:grid;gap:0 14px;padding:3px 0 2px;align-items:start;
- grid-template-columns:minmax(120px,178px) minmax(0,1fr) auto;
- grid-template-areas:"place floor gate" "place left gate"}
-.place{grid-area:place;padding-top:calc(var(--fh) - 34px)}
-.place .pt{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
- color:var(--dim);overflow-wrap:anywhere;-webkit-user-select:all;user-select:all;
- line-height:1.4}
-.place .pc{font-size:11px;color:var(--dim);margin-top:2px}
+#agents{position:relative;display:grid;gap:9px}
+/* A project is a BOX. It used to be a heading, some strips, a hairline, another
+   heading — so five projects read as one long labelled list instead of five
+   places. An edge and not a shadow: on a dark surface a shadow reads as depth,
+   and what is wanted here is a boundary. The same chrome as the sections below,
+   so the page has one word for "a bounded thing"; full width and stacked, so a
+   project with one quiet agent in it is simply a SHORT box and never a card
+   sharing a row with another project. */
+.prj{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+ padding:0 12px 3px}
+.ph{display:flex;align-items:baseline;gap:9px;padding:6px 12px 5px;
+ margin:0 -12px 1px;border-bottom:1px solid var(--line)}
+.ph .pn{font-size:13px;font-weight:600;letter-spacing:.01em}
+.ph .pm{font-size:12px;color:var(--dim)}
+/* Two columns and three rows: the checkout's own heading, who is standing on
+   it, what was left here — and what this checkout would land, up beside the
+   heading and spanning down past the figures. Every one of them is `auto` or
+   content-sized, so a band with one quiet agent is a strip and a band with five
+   is tall. The mockup gave them all the same generous rhythm, and that was most
+   of what the direction cost in height against a page that packs them. */
+.band{display:grid;gap:0 14px;padding:1px 0 3px;align-items:start;
+ grid-template-columns:minmax(0,1fr) auto;
+ grid-template-areas:"wt gate" "floor gate" "left left"}
+/* The worktree path, as this strip's own heading. It used to stand in a narrow
+   column down the left, where a real path broke across four lines mid-word and
+   then SET the band's height. One line now, and cut on the LEFT, because a
+   checkout is told apart by its tail: `…/.claude/worktrees/support-tickets`
+   identifies it where `~/Projects/makinego/makine…` does not. The cut is CSS
+   and never string surgery — the whole path stays in the element, so it selects
+   and copies whole, and it is in the title as well. */
+.wt{grid-area:wt;display:flex;align-items:baseline;gap:9px;min-width:0;
+ line-height:1.35}
+.pt{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+ color:var(--dim);min-width:0;flex:0 1 auto;white-space:nowrap;overflow:hidden;
+ text-overflow:ellipsis;direction:rtl;-webkit-user-select:all;user-select:all}
+/* The path reads left to right; only the CUT comes from the right. Without this
+   the bidi algorithm hands the leading `~/` to the enclosing right-to-left run
+   and draws it at the far end, so a short path reads `Projects/Katharo~/`. */
+.pt>span{direction:ltr;unicode-bidi:embed}
+.pc{font-size:11px;color:var(--dim);white-space:nowrap;flex:none}
 /* Characters never shrink to fit: they wrap. Five agents in one checkout flow
    onto as many lines as they need at full size and the band grows to hold them.
    Width follows how much there is to say — an agent with a sentence about what
@@ -5654,6 +5675,11 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .floor>div{position:relative;padding-right:14px}
 .floor>div::before{content:"";position:absolute;left:0;right:0;top:var(--fh);
  height:2px;background:var(--ground)}
+/* Room above the heads for the arc that joins two sessions which wrote one
+   file — declared, and only on the strips that have one. It used to be taken
+   from wherever happened to be above, which since the figures sit about thirty
+   pixels from the top of their band meant the project's heading. */
+.floor.tied{padding-top:22px}
 /* A checkout with nobody in it still has ground, and something is standing to
    land off it. A bare strip says that; dropping the row would say nothing. */
 .floor.bare{min-height:calc(var(--fh) + 2px)}
@@ -5661,8 +5687,13 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
  top:var(--fh);height:2px;background:var(--ground)}
 .left{grid-area:left;display:grid;row-gap:8px;margin-top:7px;
  grid-template-columns:repeat(auto-fill,minmax(322px,1fr))}
-.gate{grid-area:gate;padding-top:calc(var(--fh) - 30px);text-align:right;
- max-width:260px;display:grid;row-gap:6px}
+/* What this checkout would land belongs to the CHECKOUT and not to any agent
+   standing on it, so it starts on the heading's line — and it spans down past
+   the figures rather than sitting inside the heading row, because it runs to
+   three lines and a heading that grew to three lines would push every strip
+   down. Spanning, it costs nothing until it is taller than the figures. */
+.gate{grid-area:gate;text-align:right;max-width:280px;display:grid;row-gap:5px;
+ align-content:start}
 .left:empty,.gate:empty{display:none}
 @media(max-width:860px){.floor>div[data-say]{grid-column:auto}}
 
@@ -6112,13 +6143,25 @@ function makeCh(){
 }
 function fillCh(plot, it){
  var s = it.s, c = plot.c, d = plot.__ch;
- if(!c.fig){
+ /* First fill — or this chat took a new name, which happens on the live bus
+    whenever somebody renames a session. The figure IS the name, so a renamed
+    agent that kept its old face would be walking around as somebody else. */
+ if(c.who !== s.agent){
+  c.who = s.agent;
+  if(c.fig) c.art.removeChild(c.fig);
   c.fig = figure(s.agent);
   c.art.insertBefore(c.fig, c.subs);
-  d.onclick = function(){openPanel(s.agent);};
-  d.title = s.agent + " — " + s.root;
+  d.onclick = function(){openPanel(c.who);};
  }
+ /* The chip that names the figure hangs on the FIGURE. It used to hang on the
+    whole row — which for a checkout with one agent in it is the full width of
+    the strip, measured at 1240×76 — so the browser popped it anywhere in that
+    band, a thousand pixels from the thing it named, and under a sticky header
+    it read as a chip stranded on the header. Rewritten every fill, never once,
+    so it cannot go on naming a checkout the session has left. */
+ c.art.title = s.agent + " — " + s.root;
  CHARS[s.agent] = c.art;
+ c.art.__floor = plot.parentNode;   /* the strip, for the arc's headroom */
  sync(c.subs, s.agents.map(function(a, i){
    return {k: "sa:" + (a.name || i), a: a};}),
   function(x){return figure(x.a.name || "sub");}, function(){});
@@ -6387,19 +6430,31 @@ function tethers(host, ss){
   svg.setAttribute("width", box.width); svg.setAttribute("height", box.height);
   svg.setAttribute("viewBox", "0 0 " + Math.round(box.width) + " " +
    Math.round(box.height));
+  /* `ceil` is the top of the strip this figure is standing on, which is what the
+     arc has to stay under. Measured off the strip and not off the yard: the yard
+     is every project, so a lift clamped against it is not clamped at all. */
   function at(name){var n = CHARS[name]; if(!n) return null;
-   var r = n.getBoundingClientRect();
-   return {x: r.left - box.left + r.width / 2, y: r.top - box.top + 14};}
+   var r = n.getBoundingClientRect(),
+       f = (n.__floor || n).getBoundingClientRect();
+   return {x: r.left - box.left + r.width / 2, y: r.top - box.top + 14,
+           ceil: f.top - box.top};}
   ss.forEach(function(s){s.clash.forEach(function(cl){cl.also.forEach(function(o){
    var k = [s.agent, o].sort().join("|") + "|" + cl.path;
    if(done[k]) return; done[k] = 1;
    var a = at(s.agent), b = at(o);
    if(!a || !b) return;
-   var lift = Math.min(30 + Math.abs(a.x - b.x) * .10, 44);
+   /* Never out of the strip. The arc and its label belong BETWEEN two figures,
+      and the figures sit about thirty pixels below the top of their strip, so an
+      unclamped lift put both above it — over the project's heading, and off the
+      top of the yard entirely for the first strip on the page: a red path
+      floating where nothing it describes is. */
+   var head = Math.min(a.y, b.y),
+       lift = Math.max(6, Math.min(30 + Math.abs(a.x - b.x) * .10, 44,
+                                   head - Math.max(a.ceil, b.ceil) - 16));
    items.push({k: k, path: cl.path,
     d: "M" + a.x + " " + a.y + " Q" + (a.x + b.x) / 2 + " " +
-       (Math.min(a.y, b.y) - lift) + " " + b.x + " " + b.y,
-    x: (a.x + b.x) / 2, y: Math.min(a.y, b.y) - lift * .62});});});});
+       (head - lift) + " " + b.x + " " + b.y,
+    x: (a.x + b.x) / 2, y: head - lift - 3});});});});
   sync(svg, items, makeTeth, fillTeth);
  });
 }
@@ -6465,7 +6520,7 @@ function openPanel(name){
    crowd at the top is the difference between reading the page and scrolling
    for it. Within a project, the same rule for its checkouts. */
 function yard(d, ss, tk, lands, now){
- var pr = {}, order = [], rows = [];
+ var pr = {}, order = [], plist = [];
  function P(key, label){
   var p = pr[key];
   if(!p){p = pr[key] = {key: key, label: label || key, ss: [], tk: [], cand: []};
@@ -6482,7 +6537,7 @@ function yard(d, ss, tk, lands, now){
    (pr[a].label < pr[b].label ? -1 : pr[a].label > pr[b].label ? 1 : 0);});
 
  order.forEach(function(key){
-  var p = pr[key], roots = [], on = {};
+  var p = pr[key], roots = [], on = {}, bands = [];
   function R(root){if(!(root in on)){on[root] = []; roots.push(root);} return on[root];}
   p.ss.forEach(function(s){R(s.root).push(s);});
   /* A branch that is ahead of the trunk and a piece of work whose chat has gone
@@ -6493,39 +6548,55 @@ function yard(d, ss, tk, lands, now){
   roots.sort(function(a, b){
    return on[b].length - on[a].length ||
     (!a ? 1 : !b ? -1 : a < b ? -1 : a > b ? 1 : 0);});
-  rows.push({k: "p:" + key, prj: 1, label: p.label,
-   meta: many(p.ss.length, "agent") + " · " +
-    many(roots.filter(Boolean).length, "checkout")});
   roots.forEach(function(root){
-   rows.push({k: "b:" + key + ":" + root, root: root, now: now,
+   bands.push({k: "b:" + root, root: root, now: now,
     many: roots.length > 1, ss: on[root],
     tk: p.tk.filter(function(t){return !t.owner_live && t.root === root;}),
-    mine: p.tk, cand: p.cand.filter(function(b){return b.root === root;})});});});
- if(!rows.length) rows.push({k: "none", prj: 1, label: "nobody is live",
+    mine: p.tk, cand: p.cand.filter(function(b){return b.root === root;})});});
+  /* The strips go INSIDE the project, not after it. Whitespace and a hairline
+     between one heading and the next made five projects read as one list; a
+     project that CONTAINS its checkouts can be drawn as the one bounded thing
+     it is. */
+  plist.push({k: "p:" + key, label: p.label, bands: bands,
+   meta: many(p.ss.length, "agent") + " · " +
+    many(roots.filter(Boolean).length, "checkout")});});
+ if(!plist.length) plist.push({k: "none", label: "nobody is live", bands: [],
   meta: "no session has joined the bus"});
- sync(document.getElementById("agents"), rows,
-  function(it){return it.prj ? makePrj() : makeBand();},
-  function(n, it){if(it.prj){put(n.c.nm, it.label); put(n.c.m, it.meta);}
-   else fillBand(n, it);});
+ sync(document.getElementById("agents"), plist, makePrj, fillPrj);
  tethers(document.getElementById("agents"), ss);
 }
-function makePrj(){var n = el("div", "prj"), c = {};
- c.nm = add(n, "span", "pn"); c.m = add(n, "span", "pm");
- add(n, "span", "rule"); n.c = c; return n;}
+function makePrj(){var n = el("div", "prj"), c = {}, h = add(n, "div", "ph");
+ c.nm = add(h, "span", "pn"); c.m = add(h, "span", "pm");
+ c.bands = add(n, "div", "pb"); n.c = c; return n;}
+function fillPrj(n, it){var c = n.c;
+ put(c.nm, it.label); put(c.m, it.meta);
+ sync(c.bands, it.bands, makeBand, fillBand);}
 function makeBand(){
- var n = el("div", "band"), c = {}, place = add(n, "div", "place");
- c.path = add(place, "div", "pt"); c.pc = add(place, "div", "pc");
+ var n = el("div", "band"), c = {}, head = add(n, "div", "wt");
+ c.path = add(head, "div", "pt");
+ /* An inner span, so the path itself is a left-to-right run inside a box that
+    overflows from the left. `put` writes text, which would drop this child. */
+ c.pn = add(c.path, "span");
+ c.pc = add(head, "div", "pc");
  c.floor = add(n, "div", "floor");
  c.left = add(n, "div", "left");
  c.gate = add(n, "div", "gate");
  n.c = c; return n;}
 function fillBand(n, it){
  var c = n.c;
- put(c.path, it.root || "— not checked out");
+ put(c.pn, it.root || "— not checked out");
+ /* Untruncated, on the element the eye is already on: a worktree path is the
+    one thing on this page most worth copying, and what is drawn may be cut. */
+ c.path.title = it.root || "";
  put(c.pc, it.many && it.ss.length ? many(it.ss.length, "agent") + " here"
    : "");
  shown(c.pc, !!(it.many && it.ss.length));
  mark(c.floor, "bare", !it.ss.length);
+ /* Headroom for an arc between two of the figures on this strip. Not `mark`:
+    this is layout, and flashing a whole strip because a collision appeared is
+    not what the highlight is for. */
+ c.floor.classList.toggle("tied", it.ss.some(function(s){
+   return !!s.clash.length;}));
  sync(c.floor, it.ss.map(function(s){
    return {k: "c:" + s.sid, s: s, now: it.now,
      tk: it.mine.filter(function(t){

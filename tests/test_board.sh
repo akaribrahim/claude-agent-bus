@@ -505,6 +505,108 @@ import json, sys
 a = json.loads(sys.argv[1])
 print('yes' if a[0] != a[2] else 'no')" "$three")" \
         "and two agents are not drawn as the same figure"
+
+      # ---- the shape of what was built, read out of the built DOM ----------
+      #
+      # Three things below are structure, not decoration, and each of them is
+      # what makes a piece of the layout possible at all:
+      #
+      #   * a project that CONTAINS its checkouts is what can be drawn as one
+      #     bounded thing. As siblings after a heading they cannot be boxed,
+      #     which is why five projects read as one long labelled list.
+      #   * the worktree path written into an inner run of its own is what lets
+      #     the CUT come from the right without the path's leading `~/` being
+      #     reordered to the far end. Write the path onto the outer element and
+      #     that run is gone — and every assertion about the text still passes
+      #     while a short path reads `Projects/Katharo~/`.
+      #   * the chip that names an agent and its checkout hanging on the FIGURE
+      #     is the whole of the third fix. It hung on the row, which for a
+      #     checkout with one agent in it is the full width of the strip, so the
+      #     browser popped it a thousand pixels from the thing it named.
+      #
+      # What is NOT here, said out loud: one line, cut on the left, and
+      # selectable are CSS, and this harness has no stylesheet and no layout. So
+      # they are checked by eye in a real browser, and what is asserted here is
+      # the DOM each of them stands on — which is what would break silently.
+      cp "$TEST_TMP/board.js" "$TEST_TMP/yardprobe.js"
+      cat >> "$TEST_TMP/yardprobe.js" <<JS
+setTimeout(function(){
+ var A = document.getElementById("agents"), out = {boxes: 0, bands: [], tips: []};
+ function isFig(n){return n.tag === "svg" && n.className.indexOf("fig") >= 0;}
+ function figs(n){var k = 0;
+  n.children.forEach(function(c){if(isFig(c)) k++;}); return k;}
+ /* Found by walking, at whatever depth they ended up: what each assertion below
+    is about has to be able to fail on its own, and a probe that reached the
+    strips only through the boxes would make every one of them fail together the
+    moment the nesting changed. */
+ function walk(n){
+  if(n.title) out.tips.push({cls: n.className, t: n.title, figs: figs(n)});
+  if(n.c && n.c.path && n.c.floor)
+   out.bands.push({path: n.c.path.shownText(), tip: n.c.path.title,
+     runs: n.c.path.children.length, floor: n.c.floor.className});
+  n.children.forEach(walk);}
+ out.boxes = Object.keys(A.__rows || {}).length;
+ walk(A);
+ console.log("YARD " + JSON.stringify(out));
+ /* And again, after a poll in which a chat took a new name — which the live bus
+    does whenever somebody renames a session. Same session id and same checkout,
+    so the reconciler hands back the SAME row, which is how anything written
+    once on the first fill goes on saying the wrong thing forever. */
+ function face(n){var a = CHARS[n], f = null, s = "";
+  if(!a) return "";
+  a.children.forEach(function(c){if(isFig(c)) f = c;});
+  if(!f) return "";
+  (function dig(x){if(x.className === "shell") s = x.getAttribute("d");
+    x.children.forEach(dig);})(f);
+  return f.style.getPropertyValue("--h") + " " + s;}
+ var was = {t: CHARS["$G"].title, f: face("$G")};
+ last.sessions.forEach(function(s){
+   if(s.agent === "$G") s.agent = "$G-renamed";});
+ render(last);
+ console.log("TIP " + JSON.stringify({before: was,
+   after: {t: CHARS["$G-renamed"].title, f: face("$G-renamed")}}));
+}, 0);
+JS
+      probed=$(node "$AB_ROOT/tests/board-render.js" "$TEST_TMP/yardprobe.js" \
+                    "$TEST_TMP/data.json" 2>&1)
+      YARD=$(printf '%s\n' "$probed" | sed -n 's/^YARD //p')
+      TIP=$(printf '%s\n' "$probed" | sed -n 's/^TIP //p')
+      look() {   # <json> <python expression over `d`>
+        python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+def band(tail):    # the one strip whose path ends this way
+    return [b for b in d['bands'] if b['path'].endswith(tail)][0]
+def tip(who):      # the chip that names this agent and its checkout
+    return [t for t in d['tips'] if t['t'].startswith(who + ' — ')][0]
+print($2)" "$1"
+      }
+
+      assert_equal 2 "$(look "$YARD" 'd["boxes"]')" \
+        "one bounded container per project at the top of the yard, and nothing else"
+      assert_contains "$(printf '%s\n' "$prjs" | head -1)" "$WT2" \
+        "with that project's own checkouts drawn inside it"
+      assert_not_contains "$(printf '%s\n' "$prjs" | tail -1)" "$WT2" \
+        "and the next project's box holding none of them, so the two are separable"
+      assert_equal "$WT2" "$(look "$YARD" 'band("boardwt2")["tip"]')" \
+        "the untruncated worktree path on the heading that draws it, cut or not"
+      assert_equal 1 "$(look "$YARD" 'band("boardwt2")["runs"]')" \
+        "written into an inner run of its own, which is what the left-hand cut needs"
+      assert_equal art "$(look "$YARD" 'tip("'"$A"'")["cls"]')" \
+        "the chip that names an agent and its checkout hangs on the figure's own box"
+      assert_equal 1 "$(look "$YARD" 'tip("'"$A"'")["figs"]')" \
+        "which is the box holding that one figure, and not the row around it"
+      assert_equal 0 "$(look "$YARD" \
+        'len([t for t in d["tips"] if t["cls"].split()[0] == "ch"])')" \
+        "nothing carries one on the row, which is as wide as the whole strip"
+      assert_equal 2 "$(look "$YARD" \
+        'len([b for b in d["bands"] if "tied" in b["floor"].split()])')" \
+        "and a strip with a collision declares the headroom its arc needs"
+      assert_equal "$G-renamed — $REPO" "$(look "$TIP" 'd["after"]["t"]')" \
+        "the chip is rewritten every poll, so a renamed session cannot strand it"
+      assert_equal no "$(look "$TIP" \
+        '"yes" if d["before"]["f"] == d["after"]["f"] else "no"')" \
+        "and the figure is redrawn from the new name, because the figure IS the name"
     else
       _bad "the page draws its bands when it is run" "$out"
     fi
