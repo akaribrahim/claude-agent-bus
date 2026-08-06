@@ -16,3 +16,19 @@ __pycache__/
 # several sessions worked one repository for a day, which is worth having and
 # is not ours to hand out. See notes/README.md.
 notes/
+
+# A third-party design skill, installed here so the dashboard can be worked on
+# with it. Deliberately not committed. The README promises "Python 3.8+ and
+# nothing else — no daemon, no service, no dependencies", and a hundred and
+# fifty vendored files that need Node, sitting in the shipped tree, contradict
+# that on sight for a tool only ever used while designing. It is somebody else's
+# code as well, and republishing it under this repository's MIT licence is not a
+# decision this file should make quietly.
+#
+# `npx impeccable install` puts it back. It lands in `.github/skills` when that
+# directory exists and Claude Code reads `.agents/skills`, so it has to be moved.
+# Anything under `.agents/context/` is OURS — written here, about this project —
+# and is not ignored.
+.agents/skills/
+.agents/agents/
+.impeccable/
