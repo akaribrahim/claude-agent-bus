@@ -5753,7 +5753,7 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
    column down the left, where a real path broke across four lines mid-word and
    then SET the band's height. One line now, and cut on the LEFT, because a
    checkout is told apart by its tail: `…/.claude/worktrees/support-tickets`
-   identifies it where `~/Projects/makinego/makine…` does not. The cut is CSS
+   identifies it where `~/work/shopfront/shopfr…` does not. The cut is CSS
    and never string surgery — the whole path stays in the element, so it selects
    and copies whole, and it is in the title as well. */
 .wt{grid-area:wt;display:flex;align-items:baseline;gap:9px;min-width:0;
@@ -5763,7 +5763,7 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
  text-overflow:ellipsis;direction:rtl;-webkit-user-select:all;user-select:all}
 /* The path reads left to right; only the CUT comes from the right. Without this
    the bidi algorithm hands the leading `~/` to the enclosing right-to-left run
-   and draws it at the far end, so a short path reads `Projects/Katharo~/`. */
+   and draws it at the far end, so a short path reads `work/shopfront~/`. */
 .pt>span{direction:ltr;unicode-bidi:embed}
 .pc{font-size:11px;color:var(--dim);white-space:nowrap;flex:none}
 /* Characters never shrink to fit: they wrap. Five agents in one checkout flow

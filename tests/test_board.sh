@@ -518,7 +518,7 @@ print('yes' if a[0] != a[2] else 'no')" "$three")" \
       #     the CUT come from the right without the path's leading `~/` being
       #     reordered to the far end. Write the path onto the outer element and
       #     that run is gone — and every assertion about the text still passes
-      #     while a short path reads `Projects/Katharo~/`.
+      #     while a short path reads `work/shopfront~/`.
       #   * the chip that names an agent and its checkout hanging on the FIGURE
       #     is the whole of the third fix. It hung on the row, which for a
       #     checkout with one agent in it is the full width of the strip, so the
