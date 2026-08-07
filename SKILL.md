@@ -76,8 +76,9 @@ else can tell:
 
     cd <your worktree> && agentbus here
 
-That sticks until you say otherwise, and without it the guards judge you in a
-tree you left and will refuse you services you started yourself.
+That sticks until you say otherwise — including across the chat going quiet for
+hours and being picked up again — and without it the guards judge you in a tree
+you left and will refuse you services you started yourself.
 
 ## Ports, when the repository gives you your own
 

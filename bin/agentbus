@@ -95,6 +95,7 @@ HINTS = os.path.join(BUS, "hints")
 SERVES = os.path.join(BUS, "serves")
 MATCHED = os.path.join(BUS, "matched")
 TASKS = os.path.join(BUS, "tasks")
+DECLARED = os.path.join(BUS, "declared")
 REPOS = os.path.join(BUS, "repos")
 EVENTS = os.path.join(BUS, "events.jsonl")
 SEQFILE = os.path.join(BUS, "events.seq")
@@ -123,6 +124,13 @@ KEY_REV = 2
 # about a resource that frees itself, a task is about work that does not.
 TASK_SHOW = 30 * 60
 TASK_TTL = 24 * 3600
+# How long what a chat SAID about itself outlives the record a reap deleted.
+# Deliberately far longer than either of those: a lock is about a resource that
+# frees itself, a task about work that lands, and this is about a chat somebody
+# may open again after the weekend. It exists only so that a machine which has
+# run a thousand chats does not keep a file for every one of them — the ordinary
+# case leaves nothing behind at all, because `register` deletes what it used.
+DECLARED_TTL = 14 * 24 * 3600
 
 # Deliberately shorter than COLLIDE_WINDOW: a collision is about two sessions
 # working the same file at all, while this is about a failure happening RIGHT
@@ -199,10 +207,10 @@ def ensure_dirs():
     become both — an existing bus already has `matched/`, so leaving the check
     where it was would mean the new directory was never created on any machine
     this plugin was already installed on."""
-    if os.path.isdir(TASKS):
+    if os.path.isdir(DECLARED):
         return            # the last one created: if it exists, they all do
     for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS, AUTOCLAIM,
-              OWNS, AGENTS, HINTS, SERVES, MATCHED, TASKS):
+              OWNS, AGENTS, HINTS, SERVES, MATCHED, TASKS, DECLARED):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -604,6 +612,18 @@ def load_sessions(reap=False):
         # an unrelated process, and then the record would never expire and would
         # hold locks and a roster line forever. Long enough silence retires a
         # session regardless — it re-registers by itself the moment it acts.
+        #
+        # So ABANDONED_BEAT retires a session whose process is still alive, and
+        # that stays. Everything it frees is genuinely free after three hours of
+        # silence: HARD_TTL is 45 minutes, so `sweep_locks` has already taken
+        # whatever this session was holding; COLLIDE_WINDOW is 15 minutes, so
+        # nothing consults its write log; and a chat that has not beaten for
+        # three hours has no subagent still running. Keeping it on the roster
+        # would only make `agentbus status` list chats nobody is sitting in.
+        #
+        # What was wrong was not this rule but what the retirement destroyed on
+        # its way past. `forget_session` keeps the chat's own statements now, so
+        # a chat left open over lunch comes back as itself: see `keep_declared`.
         if quiet > ABANDONED_BEAT or (not alive and quiet > STALE_BEAT):
             dead.append(sid)
             continue
@@ -616,7 +636,77 @@ def load_sessions(reap=False):
     return out
 
 
+# What a chat SAID about itself, as against what was measured about it. These
+# are the fields no inference produces: somebody typed them, or the bus has
+# already acted on them once and must not act again.
+DECLARED_KEYS = ("agent", "started", "title_set", "doing")
+# The location half, meaningful only together with `pinned` — which is why they
+# travel as one group. Unpinned, every one of them is re-derived by `register`
+# from the cwd the payload carries, so keeping a copy would be keeping a
+# measurement rather than a declaration.
+DECLARED_PINNED_KEYS = ("pinned", "cwd", "root", "repo_key", "repo_label",
+                        "branch", "keyrev")
+
+
+def declared_path(sid):
+    return os.path.join(DECLARED, "%s.json" % sid)
+
+
+def keep_declared(sid, rec):
+    """Put what this chat declared somewhere the reap cannot reach.
+
+    Retiring a session and forgetting the chat are two different things, and
+    until 2.8.0 they were one function. A session is retired so that it stops
+    holding locks and stops appearing live — see the reap in `load_sessions` —
+    and everything that does is correct after three hours of silence. But the
+    same call deleted the record, and the record is the only place the chat's own
+    statements lived, so a chat left open over lunch came back as a stranger:
+
+      * its `pinned` location, so `agentbus here` was forgotten and the guard
+        went back to judging it wherever the payload's cwd pointed. The
+        declaration was cosmetic again, through a different door;
+      * its `title_set`, so the chat-title rename fired again and the whole
+        repository was told about it a second and a third time. Measured on this
+        machine: one chat announced the same rename on three consecutive days,
+        and nine of them did it inside eight minutes after being idle overnight;
+      * its `agent`, which is the address other sessions hold and post to;
+      * its `started`, so "how long has this chat been going" restarted.
+
+    Not a cache and not an un-reap. Nothing here comes back that the reap was
+    right to take: the locks stay released, the subagents stay forgotten, the
+    session stays off the roster until it acts. What comes back is only what
+    nobody but the chat itself could tell us."""
+    if not sid or not rec:
+        return
+    keep = dict((k, rec[k]) for k in DECLARED_KEYS if rec.get(k))
+    if rec.get("pinned"):
+        keep.update((k, rec[k]) for k in DECLARED_PINNED_KEYS if rec.get(k))
+    if keep:
+        write_json(declared_path(sid), keep)
+
+
+def sweep_declared():
+    """Forget the chats that never came back.
+
+    `register` deletes the file it recovers from, so in the ordinary case this
+    finds nothing. It is here for the chat that was closed and never reopened,
+    whose declaration would otherwise sit on disk for the life of the machine."""
+    cutoff = now() - DECLARED_TTL
+    try:
+        names = os.listdir(DECLARED)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(DECLARED, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.unlink(path)
+        except OSError:
+            pass
+
+
 def forget_session(sid):
+    keep_declared(sid, read_json(os.path.join(SESSIONS, "%s.json" % sid)))
     release_all(sid, quiet=True)
     for a in load_agents(sid):
         forget_agent(sid, a.get("agent_id"))
@@ -645,6 +735,7 @@ def refresh_derived(sessions=None):
     sweep_autoclaims()
     sweep_hints()
     sweep_tasks(sessions)
+    sweep_declared()
     rebuild_hot(sessions)
 
 
@@ -3660,7 +3751,14 @@ def register(payload):
     """Create or refresh this session's record. Also reachable from the other
     hooks: a session that missed SessionStart — installed mid-session, hook timed
     out, wrongly reaped — would otherwise stay invisible and unguarded forever,
-    with nothing to tell anyone."""
+    with nothing to tell anyone.
+
+    An empty `existing` does not mean this chat is new. Any live session's turn
+    reaps one that has gone quiet, and a chat left idle for three hours is quiet
+    while its process is still alive — so by the time it is typed into again,
+    somebody else has usually already deleted its record. `known` is therefore
+    what this chat has ever told us, which outlives the record: see
+    `keep_declared` for which fields those are and why each one."""
     ensure_dirs()
     sid = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid:
@@ -3669,11 +3767,17 @@ def register(payload):
     root, repo_key, label, branch = git_facts(cwd)
     sessions = load_sessions(reap=True)
     existing = read_json(os.path.join(SESSIONS, "%s.json" % sid))
+    # Read only when there is no record, so the ordinary hook pays nothing for it.
+    known = existing or read_json(declared_path(sid))
     taken = {s.get("agent") for s in sessions if s["sid"] != sid}
-    rec = existing or {}
+    rec = dict(known) if known else {}
     fields = {"sid": sid, "pid": claude_pid(),
+              # The chat's age, not the process's. A resumed chat is a new `claude`
+              # process — which is why `pid` is measured again right above — and
+              # taking its `started` from that would report a chat that has been
+              # open since yesterday as a minute old.
               "started": rec.get("started") or now()}
-    if not rec.get("pinned") or existing is None:
+    if not rec.get("pinned") or not known:
         # Stamped with the derivation only where the derived fields are actually
         # written. A pinned record that keeps its own location is deliberately
         # left unstamped, so `heal_derived` re-derives its key from the directory
@@ -3682,11 +3786,24 @@ def register(payload):
                        "repo_label": label, "branch": branch,
                        "keyrev": KEY_REV})
     rec.update(fields)
-    if existing is None:
+    if not known:
         rec.pop("pinned", None)     # a fresh chat has not said where it is yet
+    # Kept rather than re-derived, because it is an address: the other sessions
+    # hold it, `agentbus post --to` resolves it, and a name that changes because
+    # nobody typed for three hours breaks every address in flight. Re-derived
+    # only when it is empty or somebody else has taken it in the meantime —
+    # which, for a chat that has been away, is the one thing that can happen.
     if not rec.get("agent") or rec.get("agent") in taken:
         rec["agent"] = agent_name_from(branch, label, taken)
     write_json(os.path.join(SESSIONS, "%s.json" % sid), rec)
+    if existing is None and known:
+        # Recovered, and the record is the live copy again. Deleted after the
+        # write and never before it: a failed write with the declaration already
+        # gone would lose it for good, and the next reap rewrites this anyway.
+        try:
+            os.unlink(declared_path(sid))
+        except OSError:
+            pass
     # Only hooks build a record, and a hook is always told who is acting. A
     # session recovered here that forgot to say so would take locks nothing
     # could attribute — and then block its own subagents, which is the one
@@ -3694,7 +3811,11 @@ def register(payload):
     rec["party_known"] = True
     touch_beat(sid)
     if existing is None:
-        # Start at the current end of the stream: nobody wants a backlog.
+        # Start at the current end of the stream: nobody wants a backlog. Keyed
+        # on the record and not on `known`, because this is about the roster and
+        # not about the chat: a session the bus cannot see has just appeared on
+        # it, whatever it remembers about itself, and the events it missed while
+        # it was away are about locks that were released hours ago.
         write_text(os.path.join(CURSORS, sid), "%d\n" % read_int(SEQFILE, 0))
     return rec, existing is None
 

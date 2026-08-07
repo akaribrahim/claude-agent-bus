@@ -40,6 +40,16 @@ with open('$TRANSCRIPT', 'a') as fh:
 }
 start()  { ab_hook session-start "$(payload session "sid=$1" "cwd=$REPO" \
              "transcript_path=$TRANSCRIPT")"; }
+# One field of what a forgotten chat declared about itself — the copy the reap
+# leaves behind. Not in lib.sh: one file needs it.
+declared_field() {   # <session id> <key>
+  python3 -c "
+import json, sys
+try:
+    print(json.load(open('$AGENTBUS_HOME/declared/$1.json')).get('$2', ''))
+except Exception:
+    pass"
+}
 prompt() { ab_hook prompt-submit "$(payload session "sid=$1" "cwd=$REPO" \
              "transcript_path=$TRANSCRIPT")" > /dev/null; }
 
@@ -125,6 +135,52 @@ out=$(start sess-a)
 assert_not_contains "$out" "sessionTitle" \
   "a chat that already has a human title is not retitled on resume"
 assert_equal "release-prep" "$(ab sess-a name)" "and keeps the name it was given"
+
+# ---- and does not tell the repository about the rename all over again -------
+#
+# Which is what it did, on this machine, for as long as `title_set` lived only
+# in a record the reap deletes. A chat idle for three hours is retired even
+# while its process is alive, so the first thing it did afterwards registered it
+# from nothing: no `title_set`, so the title looked new, so the rename fired
+# again — "took the name of its chat — was ..." — and every session in the
+# repository was told. Measured on the live bus: one chat announced the same
+# rename on 06, 07 and 08 August, another three times, and nine of them did it
+# inside eight minutes on one evening after being idle overnight.
+#
+# The reap is done by the OTHER session's turn, because that is how it happens
+# with several chats open, and because it is what makes the record unavailable
+# to the chat's own next hook.
+
+STARTED=$(session_field sess-a started)
+before=$(read_seq)
+python3 -c "
+import os, time
+beat = os.path.join('$AGENTBUS_HOME', 'sessions', 'sess-a.beat')
+old = time.time() - 4 * 3600            # > ABANDONED_BEAT (3h)
+os.utime(beat, (old, old))"
+# A real second has to pass, and it is the only sleep in this file. `started` is
+# whole seconds, so a re-derived one inside the same second is byte-identical to
+# a preserved one — the assertion below would pass on a tree with no fix at all.
+sleep 1
+ab_hook prompt-submit "$(payload session sid=sess-other "cwd=$WT2")" > /dev/null
+assert_no_file "$AGENTBUS_HOME/sessions/sess-a.json" \
+  "an idle chat is reaped by somebody else's turn, record and all"
+assert_file "$AGENTBUS_HOME/declared/sess-a.json" \
+  "and what it had told the bus about itself is kept aside"
+# On the kept copy, not on the rebuilt record: `follow_chat_title` writes
+# `title_set` back on the very turn this is about, so the record says the right
+# thing whether or not anything was preserved. Asserted here it would have
+# passed on the tree that announced the rename three days running.
+assert_equal "release prep" "$(declared_field sess-a title_set)" \
+  "including the title it has already acted on, which is what stops it acting twice"
+
+prompt sess-a
+assert_equal "$before" "$(read_seq)" \
+  "coming back after three hours idle announces nothing: the rename already happened"
+assert_equal "release-prep" "$(ab sess-a name)" \
+  "and the chat is still reachable at the address the others hold"
+assert_equal "$STARTED" "$(session_field sess-a started)" \
+  "with the age of the chat intact — a resumed chat is not a new one"
 
 # ---- two chats named the same thing -----------------------------------------
 

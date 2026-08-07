@@ -422,6 +422,13 @@ when its branch is the only thing to go on, so it starts as `feat-login` or
 `repo-main`; rename the chat and the bus follows at the next turn, subagents
 included (`agentbus/1`, `agentbus/2`). `agentbus name <x>` overrides it.
 
+A chat that has gone quiet for hours is **retired** from the roster: it stops
+holding locks and stops being listed as live, whether or not its window is still
+open. What it *told* the bus outlives that. Come back to it and it is still
+called what you called it, still as old as it is, and still working in the
+checkout it declared with `agentbus here` — and the rename is not announced to
+everybody a second time.
+
 Two things it deliberately is not. It is **loopback-only**: the bus is every
 branch name, worktree path and message on your machine, and none of that should
 be one misconfigured bind away from your network. And it is **read-only** — it

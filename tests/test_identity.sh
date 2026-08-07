@@ -482,6 +482,52 @@ assert_equal "$(wt_lock "$REPO")" "$(held_locks)" \
 
 free_all sess-pin
 
+# A pin survives the chat going quiet, which is the case that made the
+# declaration cosmetic a second time. A chat left idle for three hours is
+# reaped — ABANDONED_BEAT retires a session even while its process is alive —
+# and until 2.8.0 the reap deleted the record, so the next thing the chat did
+# re-registered it from nothing and the guard went back to judging it wherever
+# the payload's cwd pointed. Which for a chat that declared another checkout is
+# the wrong one, every time, silently.
+#
+# Reaped by ANOTHER session's turn, deliberately: that is how it happens on a
+# machine running several chats, and it is what makes reading the record inside
+# `register` no fix at all — by then it is already gone.
+
+new_session sess-idle "$REPO"
+( cd "$WT" && ab sess-idle here > /dev/null )
+out=$(pre sess-idle "$REPO" "git add -A" l-b6)
+assert_allow "$out" "pin (b) idle: the pinned session's command is allowed"
+assert_equal "$(wt_lock "$WT")" "$(held_locks)" \
+  "pin (b) idle: and locked in the declared checkout to begin with"
+free_all sess-idle
+
+# The beat is the only thing that measures idleness, and the pid stays alive:
+# this is a chat somebody left open, not one that died.
+python3 -c "
+import os, time
+beat = os.path.join('$AGENTBUS_HOME', 'sessions', 'sess-idle.beat')
+old = time.time() - 4 * 3600            # > ABANDONED_BEAT (3h)
+os.utime(beat, (old, old))"
+ab_hook prompt-submit "$(payload session sid=sess-a "cwd=$REPO")" > /dev/null
+assert_no_file "$AGENTBUS_HOME/sessions/sess-idle.json" \
+  "pin (b) idle: another session's turn reaps the quiet one, record and all"
+assert_file "$AGENTBUS_HOME/declared/sess-idle.json" \
+  "pin (b) idle: but what it declared is kept where the reap cannot reach it"
+
+# Typed into again. The payload says $REPO, as every payload has all along.
+ab_hook prompt-submit "$(payload session sid=sess-idle "cwd=$REPO")" > /dev/null
+out=$(pre sess-idle "$REPO" "git add -A" l-b7)
+assert_allow "$out" "pin (b) idle: the resumed session's command is allowed"
+assert_equal "$(wt_lock "$WT")" "$(held_locks)" \
+  "pin (b) idle: and STILL locked in the checkout it declared before it went quiet"
+assert_equal "$WT" "$(session_field sess-idle root)" \
+  "pin (b) idle: which is what the rebuilt record says too   [supporting]"
+assert_no_file "$AGENTBUS_HOME/declared/sess-idle.json" \
+  "pin (b) idle: and the copy it was rebuilt from is not left lying about"
+
+free_all sess-idle
+
 # ---- (c) the subagent's own recorded root -----------------------------------
 #
 # A subagent's record is written at SubagentStart from whatever directory it was

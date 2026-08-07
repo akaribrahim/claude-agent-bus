@@ -2,6 +2,44 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.8.0 — 2026-08-08
+
+**A chat you left open over lunch comes back as itself.** Leave a chat idle for
+three hours and the bus retires it: it stops holding locks and stops being listed
+as live, which is right — nothing is running in it. Until now the retirement also
+deleted the record, and the record was the only place the chat's own statements
+lived. So the next thing you typed re-registered it as a stranger, and it lost:
+
+- **the checkout it declared.** `agentbus here` was forgotten, and the guard went
+  back to judging the chat wherever its payload's cwd pointed — which for a chat
+  working in another worktree is the wrong one, on every command, silently. It is
+  the same defect as "the declaration was cosmetic", arriving through a different
+  door: the declaration was honoured perfectly right up until nobody typed for
+  three hours.
+- **the fact that it had already been renamed**, so the chat-title rename fired
+  again and every session in the repository was told about it a second time. On
+  the machine this was found on, one chat announced the same rename on three
+  consecutive days, another three times over, and nine chats did it inside eight
+  minutes one evening after being idle overnight.
+- **its name**, which is the address the other agents hold and post to, and
+- **its age**, so "how long has this chat been going" restarted at zero.
+
+Retiring a session and forgetting a chat are two different things now. The reap is
+unchanged and still retires a session whose process is alive — a heartbeat is
+evidence and a pid is not proof, and everything the reap frees is genuinely free
+after three hours of silence: locks expire in 45 minutes, a write log stops being
+consulted after 15, and a chat that has not beaten for three hours has no subagent
+still running. What the reap no longer takes with it is what only the chat could
+have told us: its name, its age, the title it has already acted on, what it said
+it was doing, and the checkout it declared. Nothing that was released comes back
+— the locks stay released, the subagents stay forgotten, and the chat stays off
+the roster until it acts again.
+
+It matters most where it is least visible. The reap is performed by *any* live
+session's turn, so on a machine running several chats the record is usually gone
+long before the idle chat is typed into again — which is why the fix cannot live
+in the function that re-registers.
+
 ## 2.7.0 — 2026-08-06
 
 **"What is going on in this project?"** — answered by a picture of the machine
