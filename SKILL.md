@@ -42,8 +42,15 @@ names everything it is about, so copy the line it printed rather than the first
 resource in it.
 
 If the human asks to *see* what is going on, `agentbus board` serves a live page
-on `127.0.0.1` — agents, locks, services and the message feed. It is for them to
-look at, not for you to poll; `agentbus status` is your form of the same thing.
+on `127.0.0.1` — agents and their subagents, locks, services and the message feed.
+It is for them to look at, not for you to poll; `agentbus status` is your form of
+the same thing.
+
+You are never asked to report your own progress. What each party last did is
+derived from the tool calls the hooks already see, so do not write status lines
+for the board. `agentbus doing` and `agentbus take` are for *intent* — what you
+mean to do, which no amount of watching can work out — and one line each is
+enough.
 
 Automatic claims last one command, so "held" usually means seconds.
 

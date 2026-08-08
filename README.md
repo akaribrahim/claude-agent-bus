@@ -279,6 +279,25 @@ its session has gone quiet, and gets a ring when it is quiet **and** holding
 messages it has never been shown — the one state on the page asking to be acted
 on rather than watched. Click one for every field of it, as text you can select.
 
+Under each agent, indented and on ground of its own, is **its subagents as a
+tree**. A subagent is a party in its own right here — it holds locks under its own
+id, it contends with its siblings, it can `take` work — so its row says what kind
+of agent it is, how long it has been running, what it is holding, what it
+declared, and **the checkout it is working in when that is not its parent's**,
+which is what `agentbus here --as <name>` is for. The row is shorter than a
+session's and is not padded to look equal: unread messages, commits ahead and
+files written are counted per session, so they are the parent's facts and are not
+repeated on the child as though they were its own.
+
+And under what each agent *said* it was doing is **what it last actually did** —
+`editing api/routes.py, 4s ago`, `ran alembic upgrade, 12s ago`. Nothing is asked
+of the agents for this: the hooks already see every tool call, so the shell fast
+path records the last one per party and the page draws it. It costs a `printf` on
+the path that does not wake the engine, no clock read (the file's mtime is the
+timestamp), and one line per party which is overwritten rather than appended to. A
+session that is alone on the machine records nothing, by the same gate that
+already makes a solo session free.
+
 Below the yard: what would land, every declared service — which worktree it is
 serving, who started it, and who is holding it or that it is free — and the
 message feed. It refreshes itself every couple of seconds and rows are updated in
@@ -298,7 +317,10 @@ collides:
   holding any, the figure is ringed and counted in the header. That is the window
   to go and poke, and it is the one thing on the page asking to be acted on;
 - **how many of its commands took a shared resource**, which is the only sign
-  anywhere that a session has been reaching for the machine at all.
+  anywhere that a session has been reaching for the machine at all;
+- **the tool call it last made**, per party, so a chat that has said nothing about
+  itself still shows what it is up to — and a chat that said something is checked
+  against it.
 
 A file two live sessions have both written is the one fact on the page about a
 *pair*, so it is the one thing drawn as a line: a tether between the two figures,

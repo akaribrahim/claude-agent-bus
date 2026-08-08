@@ -2,6 +2,73 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.9.0 — 2026-08-08
+
+**A subagent stands under its parent as a tree, carrying its own facts.** It used
+to be a half-size figure at its parent's feet and a chip saying `2 subagents`,
+which was wrong twice over: it looked like a crowd standing around on empty ground,
+and it carried nothing — no branch, no checkout, no work — so it read as
+decoration. A subagent is a party in its own right in this system. It holds locks
+under its own `agent_id`, it contends with its siblings, it can `take` work, and
+the whole `same_party` machinery exists for it. Its row now says so:
+
+- **what kind of agent it is, and how long it has been running.**
+- **the checkout it is working in — but only when that is not its parent's.**
+  `agentbus here --as <name>` exists precisely for a subagent working in another
+  worktree, and until now the page could not show that it was. Sharing its
+  parent's checkout means the strip above already says it, and saying it twice is
+  how a row stops being read.
+- **what it is holding.** Locks carry `agent_id`, so a lock a subagent took is
+  drawn on the subagent. A subagent holding the simulator is exactly what
+  somebody watching wants to see, and it was a dot.
+- **the work it declared**, which used to appear under its parent, because the
+  ledger recorded the session and the board had no way to tell the two apart.
+
+The row is deliberately **shorter** than a session's, and is not padded to look
+equal. Unread messages, commits past the trunk and files written are all counted
+per session — they are the parent's facts, and repeating them on the child would
+be inventing them. The figure at the parent's feet is gone: the same subagent
+drawn twice is one drawing too many.
+
+---
+
+**Every agent now says what it last actually did, and it costs the agents
+nothing.** The obvious version of this was to ask each agent to write a sentence
+about itself every minute. One `agentbus doing` call is 72 ms of engine, which is
+not the cost that matters — the cost is a tool call a minute per agent, its round
+trip, and the agent's own context filling up with status reports. It is unreliable
+as well: on the live bus, one agent in six used `take` at all.
+
+So it is derived instead. The hooks already see every tool call, so the shell fast
+path writes one line per party — the tool and the head of what it was for — and
+the board draws it: *"editing api/routes.py, 4s ago"*, *"ran alembic upgrade,
+12s ago"*. Subagents too, which is what fills the tree rows above with something
+live.
+
+What made it worth doing is where the write happens. The fast path exists so that
+most tool calls never start Python, and a live line that woke the engine on every
+tool call would not be worth having at any price. So:
+
+- **the line is a `printf` from the fast path**, on the path that does not wake
+  the engine, and it is written before the gates that decide whether the engine
+  is worth waking — the call that tells you most about what an agent is doing is
+  usually the one that needed no coordination at all. Measured at 0.25 ms per tool
+  call for an ordinary payload.
+- **no clock is read.** The file's modification time *is* the timestamp, exactly
+  as the heartbeat's is, because reading a clock in bash 3.2 means a `date`
+  subprocess.
+- **it is one line per party, overwritten**, and it goes when the party goes.
+  Nothing here becomes a log.
+- **a solo session records nothing**, which is the same rule that already governs
+  the files it writes: alone there is nobody to coordinate with, and the fast path
+  gives up before it has even read the payload. That is what keeps a single
+  session free.
+
+`agentbus doing` is exactly as it was. Derivation cannot give you intent —
+"editing api/routes.py" does not tell you the agent is halfway through moving
+authentication out of the request handler — so the two sit together on the row:
+what it said it is doing, and under it what it last actually did.
+
 ## 2.8.0 — 2026-08-08
 
 **A chat you left open over lunch comes back as itself.** Leave a chat idle for
