@@ -344,6 +344,57 @@ Q=$(ab sess-q name)
 assert_equal 1 "$(state 'who("'"$B"'")["guarded"]')" \
   "the snapshot counts the commands a session took a shared resource for"
 
+# ---- a subagent is a party, and carries what a party carries -----------------
+#
+# It holds locks under its own `agent_id`, it contends with its siblings, and it
+# can take work — the whole `same_party` machinery exists for it. On the board it
+# was a half-size figure at its parent's feet plus a chip counting them, carrying
+# no branch, no checkout and no work, so a subagent holding the simulator was a
+# dot. The fixture therefore gives one session TWO subagents with the second in
+# the OTHER worktree, because "the checkout it is in" only means anything when
+# one of them is somewhere its parent is not.
+
+# A THIRD checkout, and not the one sess-b is standing in: the strips are matched
+# by the path written on them, and a subagent whose own path is another strip's
+# would put that strip's name inside this one — which is how "they stand on
+# separate strips" passes while nobody can tell.
+WT3=$(make_worktree "$REPO" boardwt3)
+ab_hook subagent-start "$(payload subagent-start sid=sess-a "cwd=$WT3" \
+  agent_id=sub-2 agent_type=Explore)" > /dev/null
+S1=$(agent_field sess-a sub-1 name)
+S2=$(agent_field sess-a sub-2 name)
+sa() {   # <subagent name> <python expression over `a`>
+  state "(lambda a: $2)([x for x in who('$A')['agents'] if x['name'] == '$1'][0])"
+}
+
+assert_equal 2 "$(state 'len(who("'"$A"'")["agents"])')" \
+  "both subagents of one session are in the snapshot"
+assert_equal Explore "$(sa "$S2" 'a["type"]')" \
+  "each with the kind of agent it is"
+assert_equal "$WT3" "$(sa "$S2" 'a["root"]')" \
+  "and the checkout it is working in, which for this one is not its parent's"
+assert_equal "$REPO" "$(sa "$S1" 'a["root"]')" \
+  "while its sibling is standing where the session is"
+assert_equal boardwt3 "$(sa "$S2" 'a["branch"]')" \
+  "with that checkout's branch and not the session's"
+
+# What it holds, from the locks and under its own id. Taken through the guard,
+# because that is the only path that knows which party ran the command.
+ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$WT3" agent_id=sub-2 \
+  "cmd=psql -c 'select 1'" id=sub-db)" > /dev/null
+assert_equal db "$(sa "$S2" 'a["holds"]')" \
+  "a lock a subagent took is drawn on the subagent, not lumped onto the session"
+assert_equal "" "$(sa "$S1" 'a["holds"]')" \
+  "and its sibling, which took nothing, holds nothing"
+assert_equal "$S2" "$(state '[l for l in d["locks"] if l["resource"] == "db"][0]["agent"]')" \
+  "and the lock itself names the subagent, not the session it belongs to"
+
+# And the work it declared. `sid` alone cannot route this: it is the parent's sid
+# too, so the ledger has to say which party.
+ab sess-a take "migrate the ticket table" --as "$S2" > /dev/null
+assert_equal sub-2 "$(state '[t for t in d["tasks"] if "ticket table" in t["what"]][0]["agent_id"]')" \
+  "work a subagent took names the party that took it, not only its session"
+
 # ---- what it last actually did ----------------------------------------------
 #
 # Derived from the tool calls the hooks already see, rather than asked of the
@@ -390,14 +441,17 @@ state 'len(d["sessions"])' > /dev/null
 assert_equal "$was" "$(stamp)" \
   "and polling the board leaves it exactly as the fast path wrote it"
 
-# Keyed by PARTY: `agent_id` is on a subagent's payloads, so a subagent gets a
-# line of its own rather than its parent being credited with its work.
+# Subagents too, which is what fills the tree rows above with something live.
+# The parent is given a line of its own first, so that "the sibling has none"
+# means the sibling's own and not merely that nothing has been recorded anywhere.
 ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" \
   "cmd=git log --oneline -3" id=did-2a)" > /dev/null
-ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" agent_id=sub-1 \
+ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$WT3" agent_id=sub-2 \
   "cmd=alembic upgrade head" id=did-2)" > /dev/null
-assert_file "$AGENTBUS_HOME/acted/sess-a__sub-1" \
-  "a subagent's own last action is filed under the subagent"
+assert_equal "alembic upgrade head" "$(sa "$S2" 'a["did"]["what"]')" \
+  "a subagent's own last action is recorded against the subagent"
+assert_equal None "$(sa "$S1" 'a["did"]')" \
+  "and the sibling that has run nothing has no line, rather than its parent's"
 assert_equal "git log --oneline -3" "$(state 'who("'"$A"'")["did"]["what"]')" \
   "nor is the subagent's command attributed to the session it belongs to"
 
@@ -419,9 +473,9 @@ assert_file "$AGENTBUS_HOME/acted/sess-b" \
 
 # Bounded by the party going away, and swept for the party that never got to
 # say goodbye — a session killed with -9 fires no SessionEnd.
-ab_hook subagent-stop "$(payload subagent-stop sid=sess-a "cwd=$REPO" \
-  agent_id=sub-1)" > /dev/null
-assert_no_file "$AGENTBUS_HOME/acted/sess-a__sub-1" \
+ab_hook subagent-stop "$(payload subagent-stop sid=sess-a "cwd=$WT3" \
+  agent_id=sub-2)" > /dev/null
+assert_no_file "$AGENTBUS_HOME/acted/sess-a__sub-2" \
   "a subagent that stops takes its line with it"
 printf 'Bash who-is-this\n' > "$AGENTBUS_HOME/acted/sess-nobody"
 ab sess-a status > /dev/null
@@ -435,10 +489,16 @@ assert_no_file "$AGENTBUS_HOME/acted/sess-nobody" \
 # is the same file as `acted/../escape` — so here the engine's own write would
 # land on top of the fast path's and the assertion could not fail.
 
-# Put the subagent back, and give it a line: the drawing below is about a session
-# with one, and the last action is what a reader looks at first.
-ab_hook subagent-start "$(payload subagent-start sid=sess-a "cwd=$REPO" \
-  agent_id=sub-1 agent_type=general-purpose)" > /dev/null
+# Put the second subagent back: the drawing assertions below are about a session
+# with two of them, one somewhere else.
+ab_hook subagent-start "$(payload subagent-start sid=sess-a "cwd=$WT3" \
+  agent_id=sub-2 agent_type=Explore)" > /dev/null
+ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$WT3" agent_id=sub-2 \
+  "cmd=psql -c 'select 1'" id=sub-db2)" > /dev/null
+ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$WT3" agent_id=sub-2 \
+  "cmd=alembic upgrade head" id=did-5)" > /dev/null
+ab_hook pre-tool "$(payload file sid=sess-a "cwd=$REPO" agent_id=sub-1 \
+  tool=Edit "path=$REPO/api/basket.py")" > /dev/null
 ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
   "cmd=cd $WT2 && python -m pytest tests -q" id=did-6)" > /dev/null
 
@@ -706,26 +766,58 @@ print($2)" "$1"
         '"yes" if d["before"]["f"] == d["after"]["f"] else "no"')" \
         "and the figure is redrawn from the new name, because the figure IS the name"
 
-      # ---- the live line, read out of the built DOM ------------------------
+      # ---- the subagent tree, and the live line, read out of the DOM --------
       #
-      # Its clock reading changes on every poll, so it must be written WITHOUT
-      # the highlight, or a page left open for hours flashes every two seconds.
-      # No string can show that; the class on the node can, and this harness has
-      # no stylesheet but does have the class list. Polled twice: once with time
-      # moved on, once with a genuinely new action.
-      cp "$TEST_TMP/board.js" "$TEST_TMP/didprobe.js"
-      cat >> "$TEST_TMP/didprobe.js" <<JS
+      # A subagent row is INSIDE its parent's row. That containment is what makes
+      # the tree a tree, and it is the half of the drawing this harness can see:
+      # the indentation, the spine and the elbow are CSS, and there is no
+      # stylesheet and no layout here. So what is asserted is the nesting and the
+      # TEXT of each row, which is what would break silently; the drawing itself
+      # was checked in a real browser at 1500px and at 760px, in both themes.
+      #
+      # The other half is what the row must NOT have grown. Unread, commits past
+      # the trunk and files written are counted per SESSION, so a subagent row
+      # carrying any of them would be inventing a fact about the child — and
+      # every assertion about what it DOES carry would still pass.
+      cp "$TEST_TMP/board.js" "$TEST_TMP/treeprobe.js"
+      cat >> "$TEST_TMP/treeprobe.js" <<JS
 setTimeout(function(){
- var A = document.getElementById("agents"), out = {own: [], row: null};
+ var A = document.getElementById("agents"), out = {kids: [], own: [], row: null};
  function txt(n){return n.shownText().replace(/\s+/g, " ").trim();}
+ function walk(n, host){
+  /* The plot a character was drawn into holds \`__ch\`; a subagent row carries
+     the class. Walked rather than reached through a known path, so that a kid
+     that ended up somewhere else is reported as being nowhere. */
+  if(n.__ch && n.c && n.c.nm){
+   host = n.c.nm.shownText();
+   /* The session's OWN blocks. Its printed row necessarily contains everything
+      drawn under it, subagents included, so "the parent stopped claiming its
+      subagent's work" can only be asked of the parent's own task list. */
+   out.own.push({name: host, tasks: Object.keys(n.c.tasks.__rows || {}).length,
+     did: n.c.did.visible() ? txt(n.c.did) : ""});
+  }
+  if(n.className.split(" ").indexOf("kid") >= 0 && n.c)
+   out.kids.push({name: n.c.nm.shownText(), under: host, text: txt(n),
+     wt: n.c.wt.visible() ? n.c.wt.shownText() : "",
+     did: n.c.did.visible() ? txt(n.c.did) : "",
+     tasks: Object.keys(n.c.tasks.__rows || {}).length,
+     /* The FIGURES in the row, at any depth. Counting the box that holds one
+        counts the box: a row whose figure was built and never appended has the
+        box and no figure, and every assertion about the box would still pass. */
+     figs: (function(k){(function dig(x){
+       if(x.tag === "svg" && x.className.indexOf("fig") >= 0) k.n++;
+       x.children.forEach(dig);})(n); return k.n;})({n: 0})});
+  n.children.forEach(function(c){walk(c, host);});
+ }
+ walk(A, "");
+ /* And the one property the live line has that no string can show: its clock
+    reading changes on every poll, so it must be written WITHOUT the highlight,
+    or a page left open for hours flashes every two seconds. Polled twice — once
+    with time moved on, once with a genuinely new action. */
  var row = null;
- (function walk(n){
-   if(n.__ch && n.c && n.c.nm){
-    out.own.push({name: n.c.nm.shownText(),
-      did: n.c.did.visible() ? txt(n.c.did) : ""});
-    if(n.c.nm.shownText() === "$B") row = n;
-   }
-   n.children.forEach(walk);})(A);
+ (function find(n){
+   if(n.__ch && n.c && n.c.nm.shownText() === "$B") row = n;
+   n.children.forEach(find);})(A);
  if(row){
   out.row = {was: row.c.did.c.w.shownText()};
   last.now += 90;
@@ -740,35 +832,75 @@ setTimeout(function(){
   out.row.after = row.c.did.c.t.shownText();
   out.row.afterCls = row.c.did.c.t.className;
  }
- console.log("DID " + JSON.stringify(out));
+ console.log("TREE " + JSON.stringify(out));
 }, 0);
 JS
-      DID=$(node "$AB_ROOT/tests/board-render.js" "$TEST_TMP/didprobe.js" \
-                 "$TEST_TMP/data.json" 2>&1 | sed -n 's/^DID //p')
+      TREE=$(node "$AB_ROOT/tests/board-render.js" "$TEST_TMP/treeprobe.js" \
+                  "$TEST_TMP/data.json" 2>&1 | sed -n 's/^TREE //p')
+      kid() {   # <subagent name> <python expression over `k`>
+        python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+k = [x for x in d['kids'] if x['name'] == sys.argv[2]][0]
+print($2)" "$TREE" "$1"
+      }
+      assert_equal 2 "$(look "$TREE" 'len(d["kids"])')" \
+        "both subagents are drawn as rows of their own, not as dots at the feet"
+      assert_equal "$A" "$(kid "$S2" 'k["under"]')" \
+        "each one inside the row of the session that started it, which is the tree"
+      assert_equal "$A" "$(kid "$S1" 'k["under"]')" \
+        "including the sibling, so neither is drawn loose in the yard"
+      assert_equal 1 "$(kid "$S2" 'k["figs"]')" \
+        "with a figure of its own, hashed from its own name"
+      assert_contains "$(kid "$S2" 'k["text"]')" Explore \
+        "saying what kind of agent it is"
+      assert_contains "$(kid "$S2" 'k["text"]')" running \
+        "and how long it has been running"
+      assert_contains "$(kid "$S2" 'k["text"]')" "holds db" \
+        "and what it is holding under its own id, which was a dot before"
+      assert_equal "$WT3" "$(kid "$S2" 'k["wt"]')" \
+        "and the checkout it is in, because it is not the one its parent is on"
+      assert_equal "" "$(kid "$S1" 'k["wt"]')" \
+        "while the sibling sharing its parent's checkout does not repeat it"
+      assert_contains "$(kid "$S2" 'k["did"]')" "alembic upgrade head" \
+        "and what it last actually did, derived from its own tool calls"
+      assert_contains "$(kid "$S1" 'k["did"]')" "api/basket.py" \
+        "each party's own, and the sibling's is the sibling's"
+      assert_equal 1 "$(kid "$S2" 'k["tasks"]')" \
+        "and the work it declared, on its row rather than its parent's"
+      # The row is SHORT, and must not be padded to look equal.
+      for field in "files written" unread "+1"; do
+        assert_not_contains "$(kid "$S2" 'k["text"]')" "$field" \
+          "a subagent row does not carry \"$field\", which is counted per session"
+      done
       own() {   # <agent name> <python expression over `k`>
         python3 -c "
 import json, sys
 d = json.loads(sys.argv[1])
 k = [x for x in d['own'] if x['name'] == sys.argv[2]][0]
-print($2)" "$DID" "$1"
+print($2)" "$TREE" "$1"
       }
+      sess_row=$(printf '%s\n' "$out" | grep '^AGENTS \[\] ' | grep -F "$A" || true)
+      assert_contains "$sess_row" "files written" \
+        "while the session's own row keeps every field it had"
+      assert_equal 0 "$(own "$A" 'k["tasks"]')" \
+        "and stops claiming the work its subagent declared"
       assert_contains "$(own "$B" 'k["did"]')" "python -m pytest" \
         "a session's own last action is on the session's row"
-      assert_contains "$(own "$B" 'k["did"]')" ago \
-        "with how long ago it was, and not a bare timestamp"
+      # The twitch: a clock reading that moves on must not highlight anything.
       assert_equal yes "$(python3 -c "
 import json, sys
 r = json.loads(sys.argv[1])['row']
 print('yes' if r and r['when'] != r['was'] and 'ago' in r['when'] else 'no')" \
-        "$DID")" \
+        "$TREE")" \
         "the live line's clock reading follows the poll"
-      assert_equal w "$(look "$DID" 'd["row"]["whenCls"]')" \
+      assert_equal w "$(look "$TREE" 'd["row"]["whenCls"]')" \
         "and is written without the highlight, so an open tab does not twitch"
-      assert_equal tgt "$(look "$DID" 'd["row"]["whatCls"]')" \
+      assert_equal tgt "$(look "$TREE" 'd["row"]["whatCls"]')" \
         "nor is the action highlighted when only the clock moved"
-      assert_equal "make check" "$(look "$DID" 'd["row"]["after"]')" \
+      assert_equal "make check" "$(look "$TREE" 'd["row"]["after"]')" \
         "a new action replaces the old one"
-      assert_contains "$(look "$DID" 'd["row"]["afterCls"]')" hit \
+      assert_contains "$(look "$TREE" 'd["row"]["afterCls"]')" hit \
         "and that one IS highlighted, because it is the news"
     else
       _bad "the page draws its bands when it is run" "$out"

@@ -2315,7 +2315,9 @@ def ledger_view(repo_key, sessions, locks=None, writes=None, at=None):
         branch = (owner or {}).get("branch") or t.get("branch") or ""
         out.append({
             "id": t.get("id"), "what": t.get("what") or "", "repo": repo_key,
-            "sid": t.get("sid"), "agent": t.get("agent") or "?",
+            # Both, because a subagent can `take` and the board draws its work on
+            # the subagent's own row: the sid alone would put it under the parent.
+            "sid": t.get("sid"), "agent_id": aid, "agent": t.get("agent") or "?",
             "state": state, "owner_live": owner is not None,
             "at": int(t.get("at", 0) or 0),
             "done_at": int(t.get("done_at", 0) or 0),
@@ -6197,9 +6199,6 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .ch.wait .halo{display:block}
 .ch.wait .fig{opacity:1;filter:none}
 .ch.wait .nm{color:var(--amber)}
-.subs{position:absolute;left:50%;bottom:0;display:flex;align-items:flex-end;
- margin-left:calc(var(--fw)/2 - 9px)}
-.subs .fig{width:calc(var(--fw)*.5);opacity:.7;margin-left:-5px}
 .info{flex:1;min-width:0;padding-top:calc(var(--fh) - 54px)}
 .top{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
 .nm{font-size:13px;font-weight:600;line-height:1.25;overflow-wrap:anywhere}
@@ -6263,6 +6262,57 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .gb{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
  color:var(--dim);margin-top:3px;overflow-wrap:anywhere}
 .gw{font-size:11px;color:var(--amber);margin-top:2px}
+
+/* ---- a session's subagents, as a tree under it -------------------------- */
+/* A subagent is a party in its own right in this system: it holds locks under
+   its own `agent_id`, it contends with its siblings, it can take work, and the
+   whole `same_party` machinery exists for it. It used to be a half-size figure
+   at its parent's feet plus a chip counting them, carrying no branch, no
+   checkout and no work — so it read as decoration, and a subagent holding the
+   simulator was a dot. Drawn under its parent and indented, the parent-child
+   relation is the first thing read.
+   The rows are SHORT, and not padded to look equal: unread, commits past the
+   trunk and files written are all counted per session, so they belong to the
+   parent and repeating them here would be inventing facts about the child. */
+/* The spine starts at the parent's FEET, which is the one position on this row
+   that is known by construction: the ground line is `--fh` from the top of the
+   row, and everything below it depends on how much this agent had to say. It
+   runs down the empty column under the figure to the bottom of the row, where
+   the first child picks it up — and it is the ground's own colour, because that
+   is what it is carrying down. An agent with nothing to say is exactly `--fh`
+   tall, so the segment is then zero high and nothing is drawn. */
+.ch.tree::after{content:"";position:absolute;left:37px;top:var(--fh);bottom:0;
+ width:2px;background:var(--ground)}
+.kids{position:relative;margin:8px 0 2px 37px;padding-left:17px;display:grid;
+ row-gap:8px}
+.kid{position:relative;display:flex;align-items:flex-start;gap:8px;min-width:0}
+/* The spine and the elbow, drawn per row: each row carries the run of spine
+   beside it and the elbow into itself, so the line is continuous without
+   anything having to measure anything, and the last row stops its run at its
+   own elbow instead of trailing off the bottom. */
+.kid::before{content:"";position:absolute;left:-17px;top:-10px;bottom:-10px;
+ width:2px;background:var(--ground)}
+.kid:last-child::before{bottom:auto;height:56px}
+.kid::after{content:"";position:absolute;left:-17px;top:44px;width:15px;
+ height:2px;background:var(--ground)}
+.kid .art{position:relative;flex:none;width:36px;height:44px;display:flex;
+ align-items:flex-end;justify-content:center}
+.kid .fig{width:30px}
+/* Its own ground, joined to the spine at the same height. A party stands on
+   something; a party drawn floating is the thing this replaces. */
+.kid .art::after{content:"";position:absolute;left:-4px;right:-4px;top:44px;
+ height:2px;background:var(--ground)}
+.kid .info{padding-top:0}
+.kid .nm{font-size:12px}
+.kid .did,.kid .task{max-width:560px}
+/* The checkout a subagent is in, and only when it is NOT its parent's — which
+   is the most valuable thing on this row and the one the page could not show at
+   all. `agentbus here --as <name>` exists precisely for a subagent working in
+   another worktree. Written in the same grammar the strip above uses: a piece
+   of ground is told apart by the path written on it. */
+.kwt{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+ color:var(--dim);margin-top:3px;overflow-wrap:anywhere;
+ -webkit-user-select:all;user-select:all}
 
 /* ---- two sessions wrote one file, drawn between the two of them --------- */
 /* The only fact on this page that is about a PAIR, so it is the only one drawn
@@ -6636,7 +6686,6 @@ function makeCh(){
  c.art = add(d, "div", "art");
  c.halo = add(c.art, "span", "halo");
  c.fig = null;                   /* built on the first fill: needs the name */
- c.subs = add(c.art, "div", "subs");
  c.info = add(d, "div", "info");
  var top = add(c.info, "div", "top");
  c.nm = add(top, "div", "nm");
@@ -6647,7 +6696,6 @@ function makeCh(){
  c.mail = chip(c.tags, "mail", "i-mail");
  c.own = chip(c.tags, "own", "i-key");
  c.claim = chip(c.tags, "claim", "i-claim");
- c.sub = chip(c.tags, "sub", "i-sub");
  c.doing = add(c.info, "div", "doing");
  c.did = makeDid(c.info);
  c.tasks = add(c.info, "div", "tk");
@@ -6655,9 +6703,69 @@ function makeCh(){
  c.list = add(c.info, "div", "list");
  expander(c.files, c.list);
  c.seen = add(c.info, "div", "seen");
+ /* Outside the row and not inside it: the row opens the panel when it is
+    clicked, and a subagent's own row must not open its parent's. */
+ c.kids = add(plot, "div", "kids");
  plot.__ch = d; plot.c = c;
  if(!first) d.classList.add("arrive");
  return plot;
+}
+
+/* ---- one subagent, under the session that started it -------------------- */
+/* Short on purpose. What can honestly be said about a subagent is its type, how
+   long it has been running, the checkout it is in when that is not its
+   parent's, what it holds under its own id, what it declared, and what it last
+   did. Unread, commits past the trunk and files written are counted per
+   SESSION — they are the parent's facts, and repeating them here to make the
+   row look as substantial as the one above it would be inventing them. */
+function makeKid(){
+ var n = el("div", "kid"), c = {};
+ c.art = add(n, "div", "art");
+ c.fig = null;
+ c.info = add(n, "div", "info");
+ var top = add(c.info, "div", "top");
+ c.nm = add(top, "div", "nm");
+ c.tags = add(top, "div", "tags");
+ c.kind = chip(c.tags, "kind", "i-sub");
+ c.age = chip(c.tags, "age");
+ c.br = chip(c.tags, "br");
+ c.own = chip(c.tags, "own", "i-key");
+ c.wt = add(c.info, "div", "kwt");
+ c.did = makeDid(c.info);
+ c.tasks = add(c.info, "div", "tk");
+ n.c = c;
+ if(!first) n.classList.add("arrive");
+ return n;
+}
+function fillKid(n, it){
+ var a = it.a, c = n.c;
+ if(c.who !== a.name){
+  c.who = a.name;
+  if(c.fig) c.art.removeChild(c.fig);
+  c.fig = figure(a.name);       /* its own face, from its own name */
+  c.art.appendChild(c.fig);
+ }
+ c.art.title = a.name + (a.type ? " — " + a.type : "") + " — " + a.root;
+ put(c.nm, a.name);
+ put(c.kind.__t, a.type || "agent");
+ /* Quietly, like every other clock reading on this page. */
+ putq(c.age.__t, "running " + ago(a.started, it.now));
+ /* Its own checkout, and only when it is not the one its parent is standing on.
+    Sharing the parent's means the strip above already says it, and saying it
+    twice is how a row stops being read at all. */
+ var away = !!a.root && a.root !== it.root;
+ put(c.wt, away ? a.root : ""); shown(c.wt, away);
+ c.wt.title = away ? a.root : "";
+ put(c.br.__t, a.branch || "no branch");
+ shown(c.br, away);
+ /* Locks carry `agent_id`, so this is the subagent's own and not its session's.
+    A subagent holding the simulator is exactly what somebody watching wants to
+    see, and until now it was a dot. */
+ put(c.own.__t, "holds " + a.holds); shown(c.own, !!a.holds);
+ arms(c.fig, !!a.holds);
+ fillDid(c.did, a.did, it.now);
+ sync(c.tasks, it.tk.map(function(t){
+   return {k: "t:" + t.id, t: t, now: it.now};}), makeTask, fillTask);
 }
 function fillCh(plot, it){
  var s = it.s, c = plot.c, d = plot.__ch;
@@ -6668,7 +6776,7 @@ function fillCh(plot, it){
   c.who = s.agent;
   if(c.fig) c.art.removeChild(c.fig);
   c.fig = figure(s.agent);
-  c.art.insertBefore(c.fig, c.subs);
+  c.art.appendChild(c.fig);
   d.onclick = function(){openPanel(c.who);};
  }
  /* The chip that names the figure hangs on the FIGURE. It used to hang on the
@@ -6680,15 +6788,24 @@ function fillCh(plot, it){
  c.art.title = s.agent + " — " + s.root;
  CHARS[s.agent] = c.art;
  c.art.__floor = plot.parentNode;   /* the strip, for the arc's headroom */
- sync(c.subs, s.agents.map(function(a, i){
-   return {k: "sa:" + (a.name || i), a: a};}),
-  function(x){return figure(x.a.name || "sub");}, function(){});
+ /* Its subagents, indented under it, each carrying its own fields. Keyed by
+    `aid` and not by name, because a name is reused: the second subagent of a
+    session that has already retired one is `agentbus/2` again. */
+ sync(c.kids, s.agents.map(function(a, i){
+   return {k: "sa:" + (a.aid || a.name || i), a: a, root: s.root, now: it.now,
+     tk: it.all.filter(function(t){return t.agent_id === a.aid;})};}),
+  makeKid, fillKid);
  mark(d, "idle", !!s.idle);
  mark(d, "wait", !!s.waiting);
+ /* Not `mark`: this is the tree's spine, and flashing a whole row because a
+    subagent started is not what the highlight is for. */
+ d.classList.toggle("tree", !!s.agents.length);
  put(c.nm, s.agent);
- /* Two of the floor's columns for a row with something to say — a sentence, work
-    it declared, or a line about what it last did. */
- if(s.doing || it.tk.length || s.did) plot.setAttribute("data-say", "1");
+ /* Two of the floor's columns, so a row with a tree under it or a sentence on
+    it has the width to be read; one column for a quiet agent, which is still a
+    whole character standing on its own ground. */
+ if(s.doing || it.all.length || s.agents.length || s.did)
+  plot.setAttribute("data-say", "1");
  else plot.removeAttribute("data-say");
  put(c.br.__t, s.branch || "no branch");
  /* null: not counted yet — the poll runs no git and waits for nothing. "": this
@@ -6711,11 +6828,6 @@ function fillCh(plot, it){
  put(c.claim.__t, many(s.guarded, "claim"));
  c.claim.title = s.guarded + " commands took a shared resource";
  shown(c.claim, !!s.guarded);
- put(c.sub.__t, s.agents.length === 1 ? s.agents[0].name
-   : many(s.agents.length, "subagent"));
- c.sub.title = s.agents.map(function(a){
-   return a.name + (a.type ? " — " + a.type : "");}).join("\n");
- shown(c.sub, !!s.agents.length);
  /* What it SAID it was doing, and under it what the bus watched it do. Both, and
     in that order: `doing` is intent, which no amount of watching derives, and
     the line under it is the check on whether the intent is still what is
@@ -7014,8 +7126,12 @@ function openPanel(name){
    (s.ahead_of ? "   " + s.ahead + " ahead of " + s.ahead_of : ""), 1],
   ["session", s.sid, 1],
   ["doing", s.doing || "—", 0],
+  /* Every party's, because the ledger is the session's — with the subagent named
+     when it was a subagent that took it, or the panel would contradict the row
+     it was opened from. */
   ["declared", mine.map(function(t){
-    return t.id + "  " + t.what + "  (" + t.state + ")";}).join("\n") || "—", 0],
+    return t.id + "  " + t.what + "  (" + t.state + ")" +
+      (t.agent_id ? "  — " + t.agent : "");}).join("\n") || "—", 0],
   ["holds", s.owns || "nothing", 0],
   ["claimed", s.guarded + " commands took a shared resource", 0],
   ["unread", s.unread + (s.waiting ? "   waiting for you" : ""), 0],
@@ -7027,7 +7143,11 @@ function openPanel(name){
   ["last did", s.did && s.did.what ? (VERB[s.did.tool] || s.did.tool) + " " +
     s.did.what + "   " + ago(s.did.at, last.now) + " ago" : "—", 0],
   ["subagents", s.agents.map(function(a){
-    return a.name + (a.type ? "   " + a.type : "");}).join("\n") || "none", 0]];
+    return a.name + (a.type ? "   " + a.type : "") +
+      (a.root && a.root !== s.root ? "   in " + a.root : "") +
+      (a.holds ? "   holds " + a.holds : "") +
+      (a.did && a.did.what ? "   " + (VERB[a.did.tool] || a.did.tool) + " " +
+        a.did.what : "");}).join("\n") || "none", 0]];
  sync(c.dl, rows.map(function(r){return {k: r[0], r: r};}),
   function(){var n = el("div"); shown(n, false); return n;},
   function(n, it){
@@ -7123,12 +7243,16 @@ function fillBand(n, it){
  c.floor.classList.toggle("tied", it.ss.some(function(s){
    return !!s.clash.length;}));
  sync(c.floor, it.ss.map(function(s){
-   return {k: "c:" + s.sid, s: s, now: it.now,
-     tk: it.mine.filter(function(t){
-       return t.owner_live && t.sid === s.sid;}).sort(function(a, b){
-       return (a.state === "open" ? 0 : 1) - (b.state === "open" ? 0 : 1)
-        || b.at - a.at;})};}).sort(function(a, b){
-   return (b.s.doing || b.tk.length ? 1 : 0) - (a.s.doing || a.tk.length ? 1 : 0)
+   /* Everything this session's parties declared, and then the session's own.
+      A subagent can `take`, and its work belongs on the subagent's row: the sid
+      alone cannot tell the two apart, because it is the parent's sid too. */
+   var all = it.mine.filter(function(t){
+     return t.owner_live && t.sid === s.sid;}).sort(function(a, b){
+     return (a.state === "open" ? 0 : 1) - (b.state === "open" ? 0 : 1)
+      || b.at - a.at;});
+   return {k: "c:" + s.sid, s: s, now: it.now, all: all,
+     tk: all.filter(function(t){return !t.agent_id;})};}).sort(function(a, b){
+   return (b.s.doing || b.all.length ? 1 : 0) - (a.s.doing || a.all.length ? 1 : 0)
     || b.s.wrote_n - a.s.wrote_n || b.s.unread - a.s.unread
     || (a.s.agent < b.s.agent ? -1 : a.s.agent > b.s.agent ? 1 : 0);}),
   makeCh, fillCh);
@@ -8130,13 +8254,37 @@ def board_state(limit=60):
     cursors = {s["sid"]: cursor_of(s, seq) for s in sessions}
     log = read_events(after=min([max(0, seq - limit)] + list(cursors.values())))
 
+    # Read once for every party on the page. A subagent is a party in its own
+    # right — it holds under its own `agent_id`, it contends with its siblings —
+    # so what it holds is asked of the locks the same way its parent's is, and
+    # never lumped onto the session.
+    raw_locks = all_locks()
+
+    def holding(sid, aid):
+        return sorted({plain_name(l.get("resource")) for l in raw_locks
+                       if l.get("sid") == sid
+                       and (l.get("agent_id") or "") == aid})
+
     seen_repos = {}
     for s in sessions:
-        subs = [{"name": a.get("name"), "type": a.get("agent_type"),
-                 "root": short_path(a.get("root", "")),
-                 "branch": a.get("branch") or "",
-                 "started": a.get("started", 0)}
-                for a in load_agents(s["sid"])]
+        subs = []
+        for a in load_agents(s["sid"]):
+            aid = a.get("agent_id") or ""
+            subs.append({
+                "name": a.get("name"), "type": a.get("agent_type"),
+                # Sent so the page can put a subagent's declared work on the
+                # subagent's row. `sid` alone cannot: it is the parent's too.
+                "aid": aid,
+                "root": short_path(a.get("root", "")),
+                "branch": a.get("branch") or "",
+                "started": a.get("started", 0),
+                "holds": ", ".join(holding(s["sid"], aid)[:3]),
+                # Against its OWN root: a subagent working in another worktree is
+                # the case this row exists for, and relative to its parent's the
+                # path would come out as a string of `..`.
+                "did": action_view(
+                    last_action(party_key({"sid": s["sid"], "agent_id": aid})),
+                    a.get("root"))})
         ahead, base = git_ahead(s.get("root", ""))
         idle = now() - s.get("beat", 0) > IDLE_SECS
         # Not `deliver`: that formats the same events into a sentence for the
@@ -8170,7 +8318,6 @@ def board_state(limit=60):
             "waiting": bool(idle and unread)})
         seen_repos[s.get("repo_key", "")] = s.get("repo_label", "")
 
-    raw_locks = all_locks()
     for lock in raw_locks:
         _, stealable, why = lock_state(lock, sessions)
         out["locks"].append({
