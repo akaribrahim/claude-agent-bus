@@ -1364,7 +1364,10 @@ def last_action(key):
             "what": (parts[1] if len(parts) > 1 else "")[:200]}
 
 
-ACTION_SHOWN = 96         # characters of the last action the board draws
+# Claude Code's own directory. A file in here is a different KIND of fact from a
+# file in the repository — it is the harness's storage, not the work — and the
+# board says which rather than drawing the two the same way.
+HARNESS = os.path.join(HOME, ".claude")
 
 
 def action_view(did, root):
@@ -1372,31 +1375,66 @@ def action_view(did, root):
 
     The fast path writes what the payload carried and cannot do better: it has no
     idea which checkout the party is in, and it must not spend a subprocess
-    finding out. So the reader's side does the two things that need to know.
+    finding out. So the reader's side does the three things that need to know.
 
-    An absolute path becomes the repository-relative one — the same form the
-    files-written list uses, and the row is already standing on a strip that says
-    where the checkout is. A prefix test rather than `realpath`, because this
-    runs per party per poll and a window that only watches does not get to spend
-    syscalls on presentation.
+    An absolute path inside the checkout becomes the repository-relative one —
+    the same form the files-written list uses, and the row is already standing on
+    a strip that says where the checkout is. A prefix test rather than `realpath`,
+    because this runs per party per poll and a window that only watches does not
+    get to spend syscalls on presentation.
+
+    A path that is NOT in the checkout gets `where`, a phrase from a vocabulary
+    of two that the board draws beside the path and never cuts. Without it a
+    left-cut path reads as though the repository contained it. The one worth
+    telling apart is Claude Code's own directory: an agent editing its own
+    memory file under `~/.claude/projects/<flattened-path>/memory/` is doing
+    something real, and drawing it as a headline the way a source file is drawn
+    put sixty characters of machine-flattened path where the filename should be.
+    That segment is dropped — it is the project's own path with the separators
+    swapped, which is the fact the strip's heading already carries, so this is
+    the same elision the checkout root already gets. Everything else about the
+    path stays, and the title carries the whole of it either way.
 
     And `cd <somewhere> && …` loses the `cd`. Half the commands on a machine with
     several worktrees start that way, and a board whose every line began "ran cd
-    /Users/…" would be saying the one thing the strip above it already said."""
+    /Users/…" would be saying the one thing the strip above it already said.
+
+    Nothing is cut to a character count here. The board cuts this line to the
+    width of the cell it is drawn in, which is a length this function cannot
+    know, and a second cut upstream would only take the end the board is keeping
+    — which is what happened to a path under `~/.claude`: cut at 96 characters
+    from the right, the filename was the part that went."""
     if not did:
         return did
     what = did.get("what") or ""
+    did["where"] = ""
     if did.get("tool") == "Bash":
         what = re.sub(r"^cd\s+(?:'[^']*'|\"[^\"]*\"|\S+)\s*&&\s*", "", what)
     elif what:
         base = (root or "").rstrip(os.sep)
-        what = (what[len(base) + 1:] if base and what.startswith(base + os.sep)
-                else short_path(what))
-    # Cut here and not in the fast path: the interesting end of a worktree path
-    # is its tail, and cutting before the root came off threw the filename away.
-    did["what"] = (what[:ACTION_SHOWN] + "…"
-                   if len(what) > ACTION_SHOWN else what)
+        if base and what.startswith(base + os.sep):
+            what = what[len(base) + 1:]
+        elif what.startswith(HARNESS + os.sep):
+            what = flat_free(what[len(HARNESS) + 1:])
+            did["where"] = "in ~/.claude"
+        else:
+            what = short_path(what)
+            did["where"] = "outside this checkout"
+    did["what"] = what
     return did
+
+
+def flat_free(rest):
+    """`projects/<flattened absolute path>/…` with that one segment elided.
+
+    Only a segment that really is a flattened path — Claude Code builds it by
+    replacing every separator in the project's own root with `-`, so it begins
+    with one — and only directly under `projects/`, so a directory somebody named
+    themselves is left exactly as it is."""
+    parts = rest.split("/")
+    if len(parts) > 2 and parts[0] == "projects" and parts[1].startswith("-"):
+        parts[1] = "…"
+    return "/".join(parts)
 
 
 def forget_action(key):
@@ -6154,25 +6192,43 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .pc{font-size:11px;color:var(--dim);white-space:nowrap;flex:none}
 /* Characters never shrink to fit: they wrap. Five agents in one checkout flow
    onto as many lines as they need at full size and the band grows to hold them.
-   Width follows how much there is to say — an agent with a sentence about what
-   it is doing, or work it has declared, takes two of the floor's columns and a
-   quiet one takes a single column, which is still a whole character. That is
-   what stops a row from being as tall as its busiest member and as empty as its
-   quietest. auto-fit, not auto-fill: a checkout with one agent in it collapses
-   the columns nobody is standing in and gives that agent the whole strip. */
-.floor{grid-area:floor;position:relative;display:grid;align-items:start;
- row-gap:10px;grid-template-columns:repeat(auto-fit,minmax(196px,1fr))}
-.floor>div[data-say]{grid-column:span 2}
+   Width follows how much there is to say, and 2.7.0 said that as "a sentence
+   gets two of the floor's columns, a quiet agent one". Two columns was enough
+   while a cell was a branch, some chips and at most one sentence. It stopped
+   being enough in 2.9.0, which gave a cell a subagent TREE and a derived line
+   of its own: an agent with a tree came out twice as tall as the four beside
+   it, the space next to the tree was empty, and a sentence squeezed into two
+   narrow columns ran to six lines while its neighbour's ran to one. Five
+   figures on one strip read as a ragged wall rather than a row.
+   So the rule is the same rule, taken to its end: an agent carrying a BLOCK —
+   a sentence it said, work it declared, or subagents standing under it — takes
+   the WHOLE strip, and everything short wraps side by side. Full width is what
+   makes a block short: the same sentence is one line across the strip and six
+   in a 232px column, so this packs the page rather than stretching it.
+   Flex and not a column template, because a wrapped flex line divides the width
+   between the cells that are actually on it: four short figures get a quarter of
+   the strip each, and one gets all of it, without a track count fixed for the
+   whole floor by the widest row in it. */
+.floor{grid-area:floor;position:relative;display:flex;flex-wrap:wrap;
+ align-items:flex-start;row-gap:10px}
 /* The ground. Drawn per plot with no column gap between plots, so the segments
    join into one strip, and set exactly at the height of the figures' feet. */
-.floor>div{position:relative;padding-right:14px}
-.floor>div::before{content:"";position:absolute;left:0;right:0;top:var(--fh);
- height:2px;background:var(--ground)}
+.floor>div{--head:0px;position:relative;flex:1 1 232px;min-width:0;
+ padding-right:14px;padding-top:var(--head)}
+.floor>div[data-block]{flex-basis:100%}
+.floor>div::before{content:"";position:absolute;left:0;right:0;
+ top:calc(var(--head) + var(--fh));height:2px;background:var(--ground)}
 /* Room above the heads for the arc that joins two sessions which wrote one
    file — declared, and only on the strips that have one. It used to be taken
    from wherever happened to be above, which since the figures sit about thirty
-   pixels from the top of their band meant the project's heading. */
-.floor.tied{padding-top:22px}
+   pixels from the top of their band meant the project's heading.
+   Per PLOT and not once for the whole strip: a strip whose figures wrap onto a
+   second line has a second row of heads, and headroom taken at the top of the
+   floor is no headroom at all for those — the arc was clamped against the top of
+   the floor, so between two figures on the second line it lifted up over the
+   content of the first and drew its label across it. The ground line moves down
+   with the headroom, or the figures would stand above their own ground. */
+.floor.tied>div{--head:22px}
 /* A checkout with nobody in it still has ground, and something is standing to
    land off it. A bare strip says that; dropping the row would say nothing. */
 .floor.bare{min-height:calc(var(--fh) + 2px)}
@@ -6188,7 +6244,6 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .gate{grid-area:gate;text-align:right;max-width:280px;display:grid;row-gap:5px;
  align-content:start}
 .left:empty,.gate:empty{display:none}
-@media(max-width:860px){.floor>div[data-say]{grid-column:auto}}
 
 /* ---- one agent ---------------------------------------------------------- */
 /* Every part of it is a field. The shell, the eyes, the crest, the lean and the
@@ -6226,7 +6281,16 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .ch.wait .nm{color:var(--amber)}
 .info{flex:1;min-width:0;padding-top:calc(var(--fh) - 54px)}
 .top{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
-.nm{font-size:13px;font-weight:600;line-height:1.25;overflow-wrap:anywhere}
+/* One line. `overflow-wrap:anywhere` here made the name's minimum width one
+   CHARACTER, so flex squeezed it to make room for the chips beside it and broke
+   it mid-word: `windlass-topsail` came out as two lines while a longer name in
+   a wider cell came out as one, which is the kind of inconsistency that makes a
+   row of figures read as disorderly. Now the chips wrap to their own line first
+   — that is what `.top` wrapping is for — and the name is cut only when the name
+   alone will not fit the cell. Cut and not shrunk: the figure standing next to
+   it carries the whole name in its title, and so does the panel. */
+.nm{font-size:13px;font-weight:600;line-height:1.25;min-width:0;
+ white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tags{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
 .tag{display:inline-flex;align-items:center;gap:3px;font-size:11px;
  line-height:1.55;padding:0 6px;border-radius:99px;border:1px solid var(--line);
@@ -6253,12 +6317,43 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
    bubble above it, because that one is the agent talking and this one is the
    bus watching. Ten pixels in, so its first character sits under the bubble's
    rather than ten to the left of it: what was said and what was done are a pair
-   and have to read as one. */
+   and have to read as one.
+   ONE LINE, and cut — the same treatment the worktree path above it gets, and
+   for the same reason. Wrapped, this line was three lines for one agent and one
+   for its neighbour, and since it is the LAST thing in a cell that variance went
+   straight into how far each figure's content hung below the strip they are all
+   standing on. Four parts, and only one of them can be cut: the verb, the tool's
+   target, where that target is when it is not in this checkout, and how long
+   ago. The clock reading is why the line must never be cut from the right —
+   "editing basket.ts, 40m ago" and "editing basket.ts, 2s ago" are different
+   facts and the cut may not be allowed to eat the difference.
+   Which END of the target goes is a property of what the target IS. A command is
+   identified by its head — `pnpm --filter …` says what it is and the flags after
+   it do not — so it keeps its head. A path is identified by its tail, exactly as
+   a worktree path is, so it keeps its filename and loses its directories. The
+   cut is CSS and never string surgery: the whole thing stays in the element, so
+   it selects and copies whole, and it is in the title as well. */
 .did{font-size:12px;line-height:1.38;margin-top:5px;padding-left:10px;
- color:var(--dim);overflow-wrap:anywhere;max-width:640px}
-.did .v{color:var(--ink)}
+ color:var(--dim);max-width:640px;display:flex;align-items:baseline;
+ white-space:nowrap}
+.did .v{color:var(--ink);flex:none}
+/* The one part that gives way. `min-width:0` is what lets it: without it a flex
+   item's floor is its own minimum content width and nothing is ever cut. */
+.did .cut{flex:0 1 auto;min-width:0;margin-left:.36em;overflow:hidden;
+ text-overflow:ellipsis}
 .did .tgt{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;
- color:var(--ink)}
+ color:var(--ink);-webkit-user-select:all;user-select:all}
+/* A path, cut on the LEFT. The box overflows from its start; the path itself is
+   still a left-to-right run inside it, or the bidi algorithm hands the leading
+   `~/` to the enclosing right-to-left run and draws it at the far end. */
+.did.path .cut{direction:rtl}
+.did.path .tgt{direction:ltr;unicode-bidi:embed}
+/* Where the target is, when it is not in the checkout this figure stands on. A
+   fixed phrase from a vocabulary of two, so it costs a known width and can be
+   the one thing the cut is never allowed to reach: a left-cut path keeps its
+   filename, and this keeps what kind of place the file is in. */
+.did .wh{flex:none;margin-left:.36em}
+.did .w{flex:none}
 .task{margin-top:5px;font-size:12px;line-height:1.38;padding-left:9px;
  border-left:2px solid var(--line);max-width:640px}
 .task .hd{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
@@ -6681,14 +6776,19 @@ function expander(files, list){
    and is unreliable besides: on the live bus one agent in six used `take` at
    all. The hooks already see every tool call, so the fast path writes one line
    per party and this reads it.
-   Three nodes and not one string, because the TIME changes on every poll and
-   the action does not. */
+   Separate nodes and not one string, because the TIME changes on every poll and
+   the action does not — and because only ONE of these parts may be cut when the
+   line will not fit. The target sits inside a box of its own that does the
+   cutting, so the text still arrives on the node an assertion can name and the
+   highlight still plays on the part that changed. */
 var VERB = {Bash: "ran", Edit: "editing", Write: "writing",
             NotebookEdit: "editing"};
 function makeDid(parent){
  var n = add(parent, "div", "did"), c = {};
- c.v = add(n, "span", "v"); gap(n);
- c.t = add(n, "span", "tgt");
+ c.v = add(n, "span", "v");
+ c.cut = add(n, "span", "cut");
+ c.t = add(c.cut, "span", "tgt");
+ c.wh = add(n, "span", "wh");
  c.w = add(n, "span", "w");
  n.c = c; return n;
 }
@@ -6697,14 +6797,42 @@ function fillDid(n, did, now){
  if(!did || !did.what) return;
  put(n.c.v, VERB[did.tool] || did.tool);
  put(n.c.t, did.what);
+ /* A path keeps its tail and a command keeps its head, so which end the cut
+    comes off is decided by the tool. Not `mark`: this is which way a box
+    overflows, and flashing a row because the cut turned round is not what the
+    highlight is for. */
+ n.classList.toggle("path", did.tool !== "Bash");
+ /* Where the file is, when it is not in the checkout this figure is standing on.
+    The strip's own heading says where the checkout is, so a path inside it needs
+    no qualifier at all — and a path outside it needs one, or the line reads as
+    though the repository had a `~/.claude` in it.
+    The space before it is the stylesheet's, like every other gap on this line:
+    a value written with a space in front of it is a value that reads wrong
+    everywhere it is not drawn beside something. */
+ put(n.c.wh, did.where || ""); shown(n.c.wh, !!did.where);
  /* The timestamp is when the hook SAW the call, which for a command is when it
     started. Two seconds later, on the poll that draws this, almost all of them
     have finished — and the one that has not says so by how old it is. */
  putq(n.c.w, ", " + ago(did.at, now) + " ago");
- n.title = did.tool + " — " + did.what;
+ /* Untruncated, on the element the eye is already on: what is drawn is cut to
+    the width of the cell, and this is the whole of it. */
+ n.title = did.tool + " — " + did.what + (did.where ? " " + did.where : "");
 }
 
 /* ---- one agent, standing on its checkout -------------------------------- */
+/* Does this figure carry a BLOCK — a sentence it said, work it declared, or
+   subagents standing under it? Each of those is genuinely block-shaped and
+   cannot share a line with three short cells without either stretching them to
+   its own height or hanging past them; and each of them is SHORTER given the
+   whole strip than squeezed into a column, so this packs the page rather than
+   stretching it. What the agent last DID is not on the list: that line is one
+   line now, cut rather than wrapped, so it no longer needs a second column to
+   stay one line. Asked in one place, because the packing and the order the
+   figures are drawn in have to agree or a block splits a wrapped line of short
+   figures in half. */
+function block(s, all){
+ return s.doing || all.length || s.agents.length ? 1 : 0;
+}
 function makeCh(){
  var plot = el("div");           /* the plot of ground it is standing on */
  var d = add(plot, "div", "ch"), c = {};
@@ -6812,7 +6940,7 @@ function fillCh(plot, it){
     so it cannot go on naming a checkout the session has left. */
  c.art.title = s.agent + " — " + s.root;
  CHARS[s.agent] = c.art;
- c.art.__floor = plot.parentNode;   /* the strip, for the arc's headroom */
+ c.art.__plot = plot;   /* the plot it stands on, for the arc's headroom */
  /* Its subagents, indented under it, each carrying its own fields. Keyed by
     `aid` and not by name, because a name is reused: the second subagent of a
     session that has already retired one is `agentbus/2` again. */
@@ -6826,12 +6954,9 @@ function fillCh(plot, it){
     subagent started is not what the highlight is for. */
  d.classList.toggle("tree", !!s.agents.length);
  put(c.nm, s.agent);
- /* Two of the floor's columns, so a row with a tree under it or a sentence on
-    it has the width to be read; one column for a quiet agent, which is still a
-    whole character standing on its own ground. */
- if(s.doing || it.all.length || s.agents.length || s.did)
-  plot.setAttribute("data-say", "1");
- else plot.removeAttribute("data-say");
+ /* Carrying a block, so this figure takes the whole strip. */
+ if(block(s, it.all)) plot.setAttribute("data-block", "1");
+ else plot.removeAttribute("data-block");
  put(c.br.__t, s.branch || "no branch");
  /* null: not counted yet — the poll runs no git and waits for nothing. "": this
     tree has no default branch to be ahead of. 0: it is on the trunk. The last
@@ -7090,12 +7215,16 @@ function tethers(host, ss){
   svg.setAttribute("width", box.width); svg.setAttribute("height", box.height);
   svg.setAttribute("viewBox", "0 0 " + Math.round(box.width) + " " +
    Math.round(box.height));
-  /* `ceil` is the top of the strip this figure is standing on, which is what the
-     arc has to stay under. Measured off the strip and not off the yard: the yard
-     is every project, so a lift clamped against it is not clamped at all. */
+  /* `ceil` is the top of the PLOT this figure is standing on, which is what the
+     arc has to stay under. Not the yard, which is every project, so a lift
+     clamped against it is not clamped at all — and no longer the whole strip
+     either: a strip whose figures wrap onto a second line has a second row of
+     heads, and the top of the strip is a ceiling somewhere above the row before
+     it. The headroom a tied strip declares is the plot's own padding, so the
+     plot's top edge is exactly the height the arc may reach. */
   function at(name){var n = CHARS[name]; if(!n) return null;
    var r = n.getBoundingClientRect(),
-       f = (n.__floor || n).getBoundingClientRect();
+       f = (n.__plot || n).getBoundingClientRect();
    return {x: r.left - box.left + r.width / 2, y: r.top - box.top + 14,
            ceil: f.top - box.top};}
   ss.forEach(function(s){s.clash.forEach(function(cl){cl.also.forEach(function(o){
@@ -7277,7 +7406,12 @@ function fillBand(n, it){
       || b.at - a.at;});
    return {k: "c:" + s.sid, s: s, now: it.now, all: all,
      tk: all.filter(function(t){return !t.agent_id;})};}).sort(function(a, b){
-   return (b.s.doing || b.all.length ? 1 : 0) - (a.s.doing || a.all.length ? 1 : 0)
+   /* Every figure carrying a block first, then every short one — the SAME test
+      the packing uses, so the full-width rows come out stacked and the short
+      cells pack together onto lines of their own. Interleaved, one block cut a
+      wrapped line of short figures in half and left each half standing on its
+      own stub of ground. */
+   return block(b.s, b.all) - block(a.s, a.all)
     || b.s.wrote_n - a.s.wrote_n || b.s.unread - a.s.unread
     || (a.s.agent < b.s.agent ? -1 : a.s.agent > b.s.agent ? 1 : 0);}),
   makeCh, fillCh);

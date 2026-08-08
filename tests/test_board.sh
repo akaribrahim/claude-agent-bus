@@ -308,6 +308,49 @@ assert_not_contains "$html" "innerHTML" \
 assert_contains "$html" 'join("\n")' \
   "and its newline escapes survive Python's own parsing of the source"
 
+# The stylesheet's comments have to be balanced, and this is not pedantry: this
+# file is two thirds prose about why each rule is the way it is, so an edit that
+# leaves a stray `*/` in it is likely rather than exotic — and it happened while
+# the packing below was being written. CSS recovers from one by treating
+# everything up to the next `{` as a selector, which swallows the rule that
+# follows and applies it to nothing. The page still serves 200, the script still
+# parses, every assertion in this file still passes, and one whole rule block is
+# gone. Nothing else here can see that, because nothing else here reads CSS.
+assert_equal "balanced" "$(python3 -c "
+import re, sys
+css = re.search(r'<style>(.*?)</style>', sys.argv[1], re.S)
+if not css:
+    print('no stylesheet'); sys.exit()
+s, i, depth = css.group(1), 0, 0
+while i < len(s):
+    if s.startswith('/*', i):
+        depth += 1; i += 2
+    elif s.startswith('*/', i):
+        depth -= 1
+        if depth < 0:
+            print('stray */ after: ' + s[max(0, i - 50):i].strip()); sys.exit()
+        i += 2
+    else:
+        i += 1
+print('balanced' if depth == 0 else 'a comment is never closed')" "$html")" \
+  "every comment in the stylesheet opens and closes, so no rule is swallowed"
+
+# The other half of the packing, and the only half a stylesheet-blind harness can
+# reach: the attribute the fill writes onto a plot and the attribute the floor
+# packs on have to be the same string. Rename one and every assertion about the
+# mark still passes while nothing is ever full width again. Both names are read
+# out of the page and compared, so this cannot be satisfied by naming either of
+# them in a test.
+assert_equal same "$(python3 -c "
+import re, sys
+h = sys.argv[1]
+css = set(re.findall(r'\.floor>div\[([a-z][a-z-]*)\]', h))
+js = set(re.findall(r'setAttribute\(\"([a-z][a-z-]*)\", \"1\"\)', h))
+print('same' if css and js and css == js
+      else 'stylesheet packs on %s, the fill writes %s' % (sorted(css), sorted(js)))" \
+  "$html")" \
+  "the floor packs on the very attribute the fill writes onto a plot"
+
 # Whether a value is drawn WELL needs a browser, and this file has none — these
 # only catch the regression that does not need one: a fact added to the snapshot
 # and wired to nothing, which is a cost paid on every poll for a number no reader
@@ -423,6 +466,59 @@ assert_equal api/routes.py "$(state 'who("'"$B"'")["did"]["what"]')" \
   "an edited path is drawn relative to the checkout, not absolutely"
 assert_equal Edit "$(state 'who("'"$B"'")["did"]["tool"]')" \
   "and the tool that did it is the tool the board says"
+assert_equal "" "$(state 'who("'"$B"'")["did"]["where"]')" \
+  "and nothing says where it is, because the strip it is drawn on says that"
+
+# ---- and where the file is, when it is NOT in the checkout -------------------
+#
+# `~/.claude` is Claude Code's own storage and not the work. An agent editing its
+# own memory file under `~/.claude/projects/<flattened-path>/memory/` is doing
+# something real, and it was drawn exactly the way a source file is: the headline
+# was sixty characters of machine-flattened project path with the filename cut
+# off the end of it. That segment is the project's own root with the separators
+# swapped — the fact the strip's heading already carries — so it goes, and what
+# KIND of place the file is in is said in words instead. The whole path is still
+# in the title, so nothing is lost, only moved.
+ab_hook pre-tool "$(payload file sid=sess-b "cwd=$WT2" tool=Edit \
+  "path=$HOME/.claude/projects/-Users-someone-shopfront/memory/basket-plan.md")" \
+  > /dev/null
+assert_equal "projects/…/memory/basket-plan.md" \
+  "$(state 'who("'"$B"'")["did"]["what"]')" \
+  "a file in Claude Code's own storage loses the flattened project path"
+assert_equal "in ~/.claude" "$(state 'who("'"$B"'")["did"]["where"]')" \
+  "and says which kind of place it is in, so a cut path is not read as the repo's"
+# Only a segment that really is a flattened path, and only directly under
+# `projects/`. A directory somebody named themselves is not noise.
+ab_hook pre-tool "$(payload file sid=sess-b "cwd=$WT2" tool=Edit \
+  "path=$HOME/.claude/projects/named-by-hand/notes.md")" > /dev/null
+assert_equal "projects/named-by-hand/notes.md" \
+  "$(state 'who("'"$B"'")["did"]["what"]')" \
+  "while a directory that is not a flattened path is left exactly as it is"
+# Somewhere else entirely: still a fact, still said, and still marked as being
+# outside the tree this figure is standing on.
+ab_hook pre-tool "$(payload file sid=sess-b "cwd=$WT2" tool=Edit \
+  "path=$HOME/notaproject/lib.py")" > /dev/null
+assert_equal "~/notaproject/lib.py" "$(state 'who("'"$B"'")["did"]["what"]')" \
+  "a path in neither the checkout nor the harness keeps its own shape"
+assert_equal "outside this checkout" \
+  "$(state 'who("'"$B"'")["did"]["where"]')" \
+  "and is marked as being outside the checkout rather than passed off as in it"
+# A command has no `where` at all: it ran in the checkout by construction.
+ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=make check" id=did-w)" > /dev/null
+assert_equal "" "$(state 'who("'"$B"'")["did"]["where"]')" \
+  "a command is never marked, because a command ran where the session is"
+
+# Nothing is cut to a character count here any more. The board cuts this line to
+# the width of the cell it is drawn in, which is a length this side cannot know,
+# and a second cut upstream only took the end the board was keeping: at 96
+# characters from the right, a path lost its filename. So the whole line arrives,
+# and the title on the page is the whole line.
+LONGCMD="npm run build --workspace @shop/checkout -- --minify --sourcemap --target es2019 --outdir dist/checkout"
+ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" "cmd=$LONGCMD" id=did-l)" \
+  > /dev/null
+assert_equal "$LONGCMD" "$(state 'who("'"$B"'")["did"]["what"]')" \
+  "a long command reaches the page whole, to be cut where its width is known"
 
 # One line per party, overwritten. Not a log: nothing on the bus may grow with
 # how long the machine has been up.
@@ -902,6 +998,118 @@ print('yes' if r and r['when'] != r['was'] and 'ago' in r['when'] else 'no')" \
         "a new action replaces the old one"
       assert_contains "$(look "$TREE" 'd["row"]["afterCls"]')" hit \
         "and that one IS highlighted, because it is the news"
+
+      # ---- how the figures are PACKED onto a strip --------------------------
+      #
+      # 2.9.0 gave a cell a subagent tree and a derived line of its own, and the
+      # rule that a cell with anything to say takes two of the floor's columns
+      # stopped holding: an agent with a tree came out twice as tall as the four
+      # beside it, and five figures on one strip read as a ragged wall. The rule
+      # now is that an agent carrying a BLOCK — a sentence, declared work, or
+      # subagents — takes the whole strip and everything short wraps beside it.
+      #
+      # What this harness can see of that, and what it cannot, said plainly:
+      #
+      #   * it CAN see which plots are marked as carrying a block, and in which
+      #     ORDER they were drawn. Both are DOM, and both are the rule itself.
+      #   * it CANNOT see that a marked plot is full width or that an unmarked
+      #     one shares a line. There is no stylesheet and no layout here, so a
+      #     width has no shadow to assert against. Those were checked in a real
+      #     browser at 1500px and at 760px, in both themes, against a payload
+      #     with five figures on one strip and one of them carrying a tree.
+      #
+      # The one that matters most is negative: what an agent last DID is no
+      # longer a reason to widen its cell, because that line is one line now. Put
+      # it back and every cell on the board becomes a block again, and every
+      # positive assertion here would still pass.
+      cp "$TEST_TMP/board.js" "$TEST_TMP/packprobe.js"
+      cat >> "$TEST_TMP/packprobe.js" <<JS
+setTimeout(function(){
+ var A = document.getElementById("agents");
+ /* Every strip, and the plots standing on it in the order they were drawn. */
+ function strips(){
+  var fs = [], res = [];
+  (function dig(n){
+    if(n.c && n.c.path && n.c.floor)
+     fs.push({path: n.c.path.shownText(), floor: n.c.floor});
+    n.children.forEach(dig);})(A);
+  fs.forEach(function(f){
+    res.push({path: f.path, cells: f.floor.children.map(function(p){
+      return {name: p.c && p.c.nm ? p.c.nm.shownText() : "?",
+              block: p.getAttribute("data-block") || ""};})});});
+  return res;
+ }
+ /* Every last-action line, and the box the CUT stands on. The target has to sit
+    inside that box: flatten the two and the line can no longer be cut at all,
+    and nothing else on the page would notice. */
+ var dids = [];
+ (function dig(n, host){
+   if(n.__ch && n.c && n.c.nm) host = n.c.nm.shownText();
+   if(n.className.split(" ").indexOf("kid") >= 0 && n.c)
+    host = n.c.nm.shownText();
+   if(n.className.split(" ").indexOf("did") >= 0 && n.c)
+    dids.push({who: host, cls: n.className, held: n.c.t.parentNode.className,
+      tgt: n.c.t.shownText(), title: n.title,
+      wh: n.c.wh.visible() ? n.c.wh.shownText() : ""});
+   n.children.forEach(function(c){dig(c, host);});})(A, "");
+ var out = {before: strips(), dids: dids};
+ /* And again, with the agent that said something saying nothing — while writing
+    more files than the one beside it, which is the next key the figures are
+    sorted by. If the block test is not the FIRST key, this one comes first. */
+ last.sessions.forEach(function(s){
+   if(s.agent === "$G"){s.doing = ""; s.agents = []; s.wrote_n = 99;}});
+ /* A long action, to see what the element keeps as against what is drawn. */
+ last.sessions.forEach(function(s){
+   if(s.agent === "$B") s.did = {tool: "Bash", what: "$LONGCMD",
+     where: "outside this checkout", at: last.now - 2};});
+ render(last);
+ out.after = strips();
+ (function dig(n, host){
+   if(n.__ch && n.c && n.c.nm) host = n.c.nm.shownText();
+   if(host === "$B" && n.className.split(" ").indexOf("did") >= 0 && n.c)
+    out.long = {tgt: n.c.t.shownText(), title: n.title,
+      wh: n.c.wh.visible() ? n.c.wh.shownText() : "", cls: n.className};
+   n.children.forEach(function(c){dig(c, host);});})(A, "");
+ console.log("PACK " + JSON.stringify(out));
+}, 0);
+JS
+      PACK=$(node "$AB_ROOT/tests/board-render.js" "$TEST_TMP/packprobe.js" \
+                  "$TEST_TMP/data.json" 2>&1 | sed -n 's/^PACK //p')
+      pack() {   # <python expression over `d`, with `cell` and `did` helpers>
+        python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+def cells(where, tail):     # the plots on the strip whose path ends this way
+    return [b for b in d[where] if b['path'].endswith(tail)][0]['cells']
+def cell(where, tail, who):
+    return [c for c in cells(where, tail) if c['name'] == who][0]
+def did(who):
+    return [x for x in d['dids'] if x['who'] == who][0]
+print($1)" "$PACK"
+      }
+      assert_equal 1 "$(pack 'cell("before", "'"$(basename "$REPO")"'", "'"$A"'")["block"]')" \
+        "an agent with subagents under it and a sentence on it is marked as a block"
+      assert_equal "" "$(pack 'cell("before", "boardwt2", "'"$B"'")["block"]')" \
+        "while an agent whose only line is what it last did is not, which is what the one-line cut buys back"
+      assert_equal "$A $G" "$(pack '" ".join(c["name"] for c in cells("after", "'"$(basename "$REPO")"'"))')" \
+        "the figures carrying a block are drawn before the short ones"
+      assert_equal "1 " "$(pack '" ".join(c["block"] for c in cells("after", "'"$(basename "$REPO")"'"))')" \
+        "which is the same test the packing uses, and not the files-written count"
+      assert_equal cut "$(pack 'did("'"$B"'")["held"]')" \
+        "the last action's target sits inside the one box that may be cut"
+      assert_not_contains "$(pack 'did("'"$B"'")["cls"]')" path \
+        "a command is not marked as a path, so its cut comes off the flags at the end"
+      assert_contains "$(pack 'did("'"$S1"'")["cls"]')" path \
+        "and an edited file is, so its cut comes off the directories and keeps the name"
+      assert_equal "" "$(pack 'did("'"$B"'")["wh"]')" \
+        "nothing says where a file in this checkout is; the strip above says it"
+      assert_equal "$LONGCMD" "$(pack 'd["long"]["tgt"]')" \
+        "the element keeps the whole action however narrow the cell, so it copies whole"
+      assert_equal "Bash — $LONGCMD outside this checkout" \
+        "$(pack 'd["long"]["title"]')" \
+        "and the title is the whole of it, cut or not"
+      assert_equal "outside this checkout" "$(pack 'd["long"]["wh"]')" \
+        "with where the file is in a node of its own, which the cut can never reach"
     else
       _bad "the page draws its bands when it is run" "$out"
     fi
