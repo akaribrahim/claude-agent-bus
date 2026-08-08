@@ -6117,7 +6117,8 @@ BOARD_HTML = r"""<!doctype html>
 :root{--bg:#fbfbfa;--panel:#fff;--ink:#1a1a19;--dim:#6b6b68;--line:#e6e5e1;
  --accent:#3b6ea5;--red:#b4453a;--amber:#a8712a;--green:#3f7a4d;--violet:#6b4f9e;
  --mark:#fbf0c4;--wait:#fdf7ea;--ground:#d8d4c8;--plinth:#cfcbbf;
- --id-s:40%;--id-l:40%;--halo:rgba(168,113,42,.13);--fw:52px;--fh:76px}
+ --id-s:40%;--id-l:40%;--halo:rgba(168,113,42,.13);--fw:52px;--fh:76px;
+ --say:54px}
 @media(prefers-color-scheme:dark){:root{--bg:#161614;--panel:#1e1e1c;--ink:#eceae5;
  --dim:#98958d;--line:#302f2b;--accent:#7aa8d8;--red:#e0796c;--amber:#d9a05b;
  --green:#7fb98c;--violet:#a98fd6;--mark:#413c26;--wait:#26231a;--ground:#3a3833;
@@ -6212,7 +6213,11 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .floor{grid-area:floor;position:relative;display:flex;flex-wrap:wrap;
  align-items:flex-start;row-gap:10px}
 /* The ground. Drawn per plot with no column gap between plots, so the segments
-   join into one strip, and set exactly at the height of the figures' feet. */
+   join into one strip, and set exactly at the height of the figures' feet. Full
+   width and at the feet are both load-bearing: the strip is what says these
+   figures are in one checkout, and the feet are where the contact shadow already
+   says the figure is standing. Neither of them may give way to make room for a
+   cell's writing — `--say` is what keeps the writing off this line. */
 .floor>div{--head:0px;position:relative;flex:1 1 232px;min-width:0;
  padding-right:14px;padding-top:var(--head)}
 .floor>div[data-block]{flex-basis:100%}
@@ -6279,7 +6284,29 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .ch.wait .halo{display:block}
 .ch.wait .fig{opacity:1;filter:none}
 .ch.wait .nm{color:var(--amber)}
-.info{flex:1;min-width:0;padding-top:calc(var(--fh) - 54px)}
+/* Beside the figure there is exactly as much room as the figure is TALL, and the
+   ground line is drawn across the bottom of it. So that room is a band with a
+   floor and not the top of a column that runs on: anything laid out in it past
+   the figure's legs is laid out ON the line, and comes out struck through — which
+   is what a declared task did, out to the right edge of the strip.
+   The band carries who this agent is and what it SAID: its name, its chips, and
+   its speech bubble, which belongs up here anyway because its tail points at the
+   figure. What the bus DERIVED begins below the line, in the figure's own column
+   — what it last did, the work it declared, the subagents standing under it, how
+   long it has been quiet. That is not a new shape. It is the shape an agent with
+   a bubble already had, because a name and a one-line bubble fill the band almost
+   exactly; and below the ground in the figure's column is where the subagent tree
+   already hangs, on a spine that starts at the parent's feet and carries the
+   ground's own colour down. What was wrong is that the band was only ever filled
+   by a bubble, so an agent that had said nothing let its next line slide up into
+   the ground line's own row, and which line landed there was luck.
+   `--say` is the band's height and `.info`'s offset is the rest of the figure, so
+   the two cannot drift apart: the band's floor IS the figure's feet. A bubble with
+   more in it than the band holds still crosses the line — but a bubble is opaque
+   and stands in front of it, which reads as an object on the ground rather than as
+   a struck-out sentence. */
+.info{flex:1;min-width:0;padding-top:calc(var(--fh) - var(--say))}
+.say{min-height:var(--say)}
 .top{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
 /* One line. `overflow-wrap:anywhere` here made the name's minimum width one
    CHARACTER, so flex squeezed it to make room for the chips beside it and broke
@@ -6840,7 +6867,10 @@ function makeCh(){
  c.halo = add(c.art, "span", "halo");
  c.fig = null;                   /* built on the first fill: needs the name */
  c.info = add(d, "div", "info");
- var top = add(c.info, "div", "top");
+ /* The band beside the figure, above the ground line: who this agent is and what
+    it said. It is a node of its own so the band has a floor — see `--say`. */
+ var say = add(c.info, "div", "say");
+ var top = add(say, "div", "top");
  c.nm = add(top, "div", "nm");
  c.tags = add(top, "div", "tags");
  c.br = chip(c.tags, "br");
@@ -6849,7 +6879,7 @@ function makeCh(){
  c.mail = chip(c.tags, "mail", "i-mail");
  c.own = chip(c.tags, "own", "i-key");
  c.claim = chip(c.tags, "claim", "i-claim");
- c.doing = add(c.info, "div", "doing");
+ c.doing = add(say, "div", "doing");
  c.did = makeDid(c.info);
  c.tasks = add(c.info, "div", "tk");
  c.clash = add(c.info, "div", "clash bad");

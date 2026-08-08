@@ -1110,6 +1110,87 @@ print($1)" "$PACK"
         "and the title is the whole of it, cut or not"
       assert_equal "outside this checkout" "$(pack 'd["long"]["wh"]')" \
         "with where the file is in a node of its own, which the cut can never reach"
+
+      # ---- the band above the ground line -----------------------------------
+      #
+      # The strip's ground line is drawn full width at the figures' feet, so the
+      # room beside a figure is a band with a FLOOR. 2.9.1 laid a cell's whole
+      # column down that room, and whichever line happened to land on the ground
+      # came out struck through — a declared task, out to the right edge of the
+      # strip. The band now carries who the agent is and what it SAID; everything
+      # the bus DERIVED begins under the line, in the figure's own column.
+      #
+      # What this harness can see of that, and what it cannot, said plainly:
+      #
+      #   * it CAN see the SPLIT — which nodes are inside the band and which are
+      #     its siblings after it. That is the fix itself, and it is DOM. Move the
+      #     bubble out of the band or the last action into it and the page reads
+      #     wrongly while every other assertion in this file still passes.
+      #   * it CANNOT see that the band is as tall as the figure, that the ground
+      #     line is at the figure's feet, or that no glyph touches it. There is no
+      #     stylesheet and no layout here, so none of those has a shadow to assert
+      #     against. They were measured in a real browser instead, with a range
+      #     over every text run on the page against the rule's own box, at 1500px
+      #     and 760px in both themes on both payloads.
+      #   * a SUBAGENT row must NOT have a band: its ground is drawn under its own
+      #     feet, its rows are short on purpose, and 54px of reserved air under
+      #     each child's name would be the crowd of empty ground 2.9.0 removed.
+      cp "$TEST_TMP/board.js" "$TEST_TMP/bandprobe.js"
+      cat >> "$TEST_TMP/bandprobe.js" <<JS
+setTimeout(function(){
+ var A = document.getElementById("agents"), out = [];
+ function has(n, c){return n.className.split(" ").indexOf(c) >= 0;}
+ /* The first class only: a node's later classes are its STATE — a last action
+    marked as a path, a task marked as blocked — and this is about the run. */
+ function kids(n){return n.children.map(function(x){
+   return x.className.split(" ")[0];});}
+ (function dig(n, host, kid){
+   if(n.__ch && n.c && n.c.nm){host = n.c.nm.shownText(); kid = 0;}
+   if(has(n, "kid") && n.c){host = n.c.nm.shownText(); kid = 1;}
+   if(has(n, "info")){
+    var band = n.children.filter(function(x){return has(x, "say");})[0];
+    out.push({who: host, kid: kid, info: kids(n),
+      say: band ? kids(band) : null,
+      said: !!(band && band.children.filter(function(x){
+        return has(x, "doing") && x.visible();}).length)});}
+   n.children.forEach(function(c){dig(c, host, kid);});})(A, "", 0);
+ console.log("BAND " + JSON.stringify(out));
+}, 0);
+JS
+      BAND=$(node "$AB_ROOT/tests/board-render.js" "$TEST_TMP/bandprobe.js" \
+                  "$TEST_TMP/data.json" 2>&1 | sed -n 's/^BAND //p')
+      band() {   # <python expression over `d`, with `who()` for one cell>
+        python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+def who(n, kid=0):
+    return [x for x in d if x['who'] == n and x['kid'] == kid][0]
+print($1)" "$BAND"
+      }
+      assert_equal "top doing" "$(band '" ".join(who("'"$A"'")["say"])')" \
+        "the band above the ground holds the agent's name and what it said, and stops there"
+      assert_equal "True" "$(band 'who("'"$A"'")["said"]')" \
+        "with the bubble in it when there is one, which is what fills the band"
+      assert_equal "top doing" "$(band '" ".join(who("'"$B"'")["say"])')" \
+        "and the same band when the agent has said nothing, so the room is still reserved"
+      assert_equal "False" "$(band 'who("'"$B"'")["said"]')" \
+        "even though that agent's bubble is not drawn"
+      assert_equal "say did tk clash list seen" \
+        "$(band '" ".join(who("'"$B"'")["info"])')" \
+        "everything the bus derived comes AFTER the band, so it starts below the line"
+      assert_equal "None" "$(band 'str(who("'"$S1"'", 1)["say"])')" \
+        "a subagent has no band: it stands on its own ground, and its row is short on purpose"
+      assert_equal "top kwt did tk" "$(band '" ".join(who("'"$S1"'", 1)["info"])')" \
+        "so its name and its lines are one run, with nothing reserved between them"
+      # The two declarations that have to agree about ONE number: the band's own
+      # height, and the offset above it that makes the band's floor the figure's
+      # feet. This is a search of the stylesheet TEXT and nothing more — it cannot
+      # tell that the sum lands on the feet, only that both sides name the same
+      # property instead of two copies of 54 that can drift apart.
+      assert_contains "$html" '.say{min-height:var(--say)}' \
+        "the band has a floor of its own, named once"
+      assert_contains "$html" 'padding-top:calc(var(--fh) - var(--say))' \
+        "and the room above it is the rest of the figure, off the same number"
     else
       _bad "the page draws its bands when it is run" "$out"
     fi

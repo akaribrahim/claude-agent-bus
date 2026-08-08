@@ -2,6 +2,42 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.9.2 — 2026-08-08
+
+**Nothing on a strip is drawn with a line through it any more.** A checkout's
+ground line runs the full width of its strip at the figures' feet, and a cell's
+own writing was laid straight down the column beside the figure — so whichever
+line happened to land at the figures' feet came out struck through. On a strip
+with one agent carrying a declared task, that was the task itself, ruled out to
+the right edge; on a strip of four short cells it was one agent's last action, a
+second agent's `quiet 11m`, and a third's warning that it had written a file
+somebody else had written too.
+
+The room beside a figure is as tall as the figure, and the ground line is drawn
+across the bottom of it — so it is a band with a floor rather than the top of a
+column that runs on. The band now carries **who the agent is and what it said**:
+its name, its chips, and the bubble, which belongs up beside the figure anyway
+because its tail points at it. Everything the bus **derived** begins below the
+line, in the figure's own column: what it last did, the work it declared, the
+subagents standing under it, how long it has been quiet.
+
+That is not a new shape — it is the shape an agent with a bubble already had,
+since a name and a one-line bubble fill the band almost exactly, and it is where
+a subagent tree already hangs from. What was wrong is that the band was only ever
+filled by a bubble, so an agent that had said nothing let its next line slide up
+into the ground line's own row, and which line landed there was luck. The ground
+line itself has not moved: it is still full width, still at the feet, still under
+the contact shadow that says the figure is standing there rather than above it.
+
+Measured at 1500px against the two payloads it was built on, with a range over
+every text run on the page against the rule's own box: five crossings on one and
+seven on the other, none on either now. It costs height — the yard is 1189px
+against 1007px on the busier of the two, and 883px against 824px on the other —
+because a 16px name in a band as tall as a 76px figure leaves air, and that air
+used to be where a derived line sat. A sentence longer than the band still crosses
+the line at a narrow window, but a bubble is opaque and stands in front of it,
+which reads as an object on the ground and not as a struck-out sentence.
+
 ## 2.9.1 — 2026-08-08
 
 **Five agents on one checkout read as a row again, not as a ragged wall.** The
