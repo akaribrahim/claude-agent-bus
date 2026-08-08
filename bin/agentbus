@@ -96,6 +96,10 @@ SERVES = os.path.join(BUS, "serves")
 MATCHED = os.path.join(BUS, "matched")
 TASKS = os.path.join(BUS, "tasks")
 DECLARED = os.path.join(BUS, "declared")
+# What each party last actually did, one line per party and overwritten. Written
+# by the shell fast path, never by the engine, and never appended to: see
+# `last_action`.
+ACTED = os.path.join(BUS, "acted")
 REPOS = os.path.join(BUS, "repos")
 EVENTS = os.path.join(BUS, "events.jsonl")
 SEQFILE = os.path.join(BUS, "events.seq")
@@ -207,10 +211,10 @@ def ensure_dirs():
     become both — an existing bus already has `matched/`, so leaving the check
     where it was would mean the new directory was never created on any machine
     this plugin was already installed on."""
-    if os.path.isdir(DECLARED):
+    if os.path.isdir(ACTED):
         return            # the last one created: if it exists, they all do
     for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS, AUTOCLAIM,
-              OWNS, AGENTS, HINTS, SERVES, MATCHED, TASKS, DECLARED):
+              OWNS, AGENTS, HINTS, SERVES, MATCHED, TASKS, DECLARED, ACTED):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -710,6 +714,7 @@ def forget_session(sid):
     release_all(sid, quiet=True)
     for a in load_agents(sid):
         forget_agent(sid, a.get("agent_id"))
+    forget_action(sid)
     for p in (os.path.join(SESSIONS, "%s.json" % sid), beat_path(sid),
               os.path.join(CURSORS, sid), os.path.join(HOTFOR, sid),
               os.path.join(OWNS, "%s.json" % sid),
@@ -736,6 +741,7 @@ def refresh_derived(sessions=None):
     sweep_hints()
     sweep_tasks(sessions)
     sweep_declared()
+    sweep_acted(sessions)
     rebuild_hot(sessions)
 
 
@@ -1258,6 +1264,7 @@ def load_agents(sid=None):
 
 def forget_agent(sid, aid):
     release_all_for(sid, aid, quiet=True)
+    forget_action(party_key({"sid": sid, "agent_id": aid}))
     for path in (agent_path(sid, aid),
                  os.path.join(CURSORS, party_key({"sid": sid, "agent_id": aid}))):
         try:
@@ -1270,6 +1277,138 @@ def party_key(me):
     """One string naming the party that acts: a session, or a subagent in it."""
     aid = me.get("agent_id") or ""
     return "%s__%s" % (me.get("sid") or "", aid) if aid else (me.get("sid") or "")
+
+
+# ------------------------------------------------------- what it last did ----
+#
+# The board's live line: "editing api/routes.py, 4s ago". Derived, not reported.
+#
+# The alternative was asking every agent to write a sentence about itself every
+# minute. One `agentbus doing` call is 72 ms of engine, which is not the cost
+# that matters — the cost is a tool call per minute, its round trip, and the
+# agent's own context filling up with status reports. It is unreliable as well:
+# on the live bus one agent in six used `take` at all. The hooks already see
+# every tool call, so the board can watch instead of asking.
+#
+# Three rules make it affordable, and all three are about the WRITE:
+#
+#   * it never wakes the engine. The line is written from `bin/ab-hook`, which
+#     for most tool calls is the only thing that runs — a `printf` into a file
+#     the fast path has already got the payload for.
+#   * it is one line per party, overwritten. Not a log: nothing here may grow
+#     with how long the machine has been up.
+#   * the file's mtime IS the timestamp, exactly as the heartbeat's is. Reading a
+#     clock in bash 3.2 means a `date` subprocess, and this runs on every tool
+#     call of every session on the machine.
+#
+# It sits beside `doing` rather than replacing it. `doing` is *intent*, which no
+# amount of watching can derive: "editing api/routes.py" does not tell you the
+# agent is halfway through moving authentication out of the request handler.
+
+def acted_path(key):
+    """Where one party's last action is written, or None for a key that may not
+    become a filename.
+
+    Both fast paths apply exactly this rule and skip the write when it fails, so
+    a party whose id carries anything else simply has no line — rather than the
+    two entry points disagreeing about where to put it, or either of them being
+    talked into writing outside the bus by a `/` in an id."""
+    if not key or re.search(r"[^A-Za-z0-9_.-]", key):
+        return None
+    return os.path.join(ACTED, key)
+
+
+def last_action(key):
+    """What this party last did, as `{tool, what, at}` — or None.
+
+    `at` is the file's modification time, which is what the fast path wrote it
+    with. Only the first line is read and only the first two fields are parsed,
+    so a file that somehow grew cannot cost more than one line to read."""
+    path = acted_path(key)
+    if not path:
+        return None
+    try:
+        with open(path) as fh:
+            line = fh.readline(512).strip()
+        at = int(os.path.getmtime(path))
+    except (OSError, IOError, ValueError):
+        return None
+    if not line:
+        return None
+    parts = line.split(" ", 1)
+    return {"tool": parts[0][:24], "at": at,
+            "what": (parts[1] if len(parts) > 1 else "")[:200]}
+
+
+ACTION_SHOWN = 96         # characters of the last action the board draws
+
+
+def action_view(did, root):
+    """One party's last action as the board says it.
+
+    The fast path writes what the payload carried and cannot do better: it has no
+    idea which checkout the party is in, and it must not spend a subprocess
+    finding out. So the reader's side does the two things that need to know.
+
+    An absolute path becomes the repository-relative one — the same form the
+    files-written list uses, and the row is already standing on a strip that says
+    where the checkout is. A prefix test rather than `realpath`, because this
+    runs per party per poll and a window that only watches does not get to spend
+    syscalls on presentation.
+
+    And `cd <somewhere> && …` loses the `cd`. Half the commands on a machine with
+    several worktrees start that way, and a board whose every line began "ran cd
+    /Users/…" would be saying the one thing the strip above it already said."""
+    if not did:
+        return did
+    what = did.get("what") or ""
+    if did.get("tool") == "Bash":
+        what = re.sub(r"^cd\s+(?:'[^']*'|\"[^\"]*\"|\S+)\s*&&\s*", "", what)
+    elif what:
+        base = (root or "").rstrip(os.sep)
+        what = (what[len(base) + 1:] if base and what.startswith(base + os.sep)
+                else short_path(what))
+    # Cut here and not in the fast path: the interesting end of a worktree path
+    # is its tail, and cutting before the root came off threw the filename away.
+    did["what"] = (what[:ACTION_SHOWN] + "…"
+                   if len(what) > ACTION_SHOWN else what)
+    return did
+
+
+def forget_action(key):
+    path = acted_path(key)
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def sweep_acted(sessions):
+    """Lines belonging to parties that have gone.
+
+    `forget_session` and `forget_agent` delete their own on the way out, so this
+    is only for the party that never got to: a session killed with -9 leaves no
+    SessionEnd. Without it the directory would be the one piece of unbounded
+    state on the bus — one file per chat this machine has ever run."""
+    # One listdir of `agents/` for the whole sweep. `load_agents(sid)` reads the
+    # directory once per session it is asked about, which on a machine running
+    # nine chats is nine passes over the same files to answer one question.
+    live = {s["sid"] for s in sessions}
+    for a in load_agents():
+        live.add(party_key({"sid": a.get("sid"), "agent_id": a.get("agent_id")}))
+    try:
+        names = os.listdir(ACTED)
+    except OSError:
+        return
+    for name in names:
+        if name in live:
+            continue
+        try:
+            os.unlink(os.path.join(ACTED, name))
+        except OSError:
+            pass
 
 
 _SIBLINGS = {}
@@ -6084,6 +6223,18 @@ h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
 .doing::after{content:"";position:absolute;left:-4.5px;top:9px;width:7px;height:7px;
  background:var(--panel);border-left:1px solid var(--line);
  border-bottom:1px solid var(--line);transform:rotate(45deg)}
+/* What it last ACTUALLY did, under what it said it was doing. Derived from the
+   tool calls the hooks already see, so it costs the agents nothing to say and
+   cannot be got wrong on purpose — and it is deliberately not in the speech
+   bubble above it, because that one is the agent talking and this one is the
+   bus watching. Ten pixels in, so its first character sits under the bubble's
+   rather than ten to the left of it: what was said and what was done are a pair
+   and have to read as one. */
+.did{font-size:12px;line-height:1.38;margin-top:5px;padding-left:10px;
+ color:var(--dim);overflow-wrap:anywhere;max-width:640px}
+.did .v{color:var(--ink)}
+.did .tgt{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;
+ color:var(--ink)}
 .task{margin-top:5px;font-size:12px;line-height:1.38;padding-left:9px;
  border-left:2px solid var(--line);max-width:640px}
 .task .hd{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
@@ -6283,6 +6434,15 @@ function put(node, text){
  node.__v = text; node.textContent = text;
  if(moved) flash(node);
 }
+/* The same write without the highlight, for a value that changes on every poll
+   because it is a clock reading rather than news. "4s ago" becoming "6s ago" is
+   not a change anybody wants their eye pulled to, and a page that is open for
+   hours must not twitch every two seconds. Only the action itself flashes. */
+function putq(node, text){
+ text = text == null ? "" : String(text);
+ if(node.__v === text) return;
+ node.__v = text; node.textContent = text;
+}
 function flash(node){
  if(first) return;            /* the first paint is not a change */
  node.classList.remove("hit");
@@ -6439,6 +6599,36 @@ function expander(files, list){
   shown(list, hidden(list));};
 }
 
+/* ---- what a party last actually did ------------------------------------- */
+/* Derived, not reported. The alternative was asking every agent to write a
+   sentence about itself every minute, which costs a tool call and a round trip
+   per agent per minute and fills the agent's own context with status reports —
+   and is unreliable besides: on the live bus one agent in six used `take` at
+   all. The hooks already see every tool call, so the fast path writes one line
+   per party and this reads it.
+   Three nodes and not one string, because the TIME changes on every poll and
+   the action does not. */
+var VERB = {Bash: "ran", Edit: "editing", Write: "writing",
+            NotebookEdit: "editing"};
+function makeDid(parent){
+ var n = add(parent, "div", "did"), c = {};
+ c.v = add(n, "span", "v"); gap(n);
+ c.t = add(n, "span", "tgt");
+ c.w = add(n, "span", "w");
+ n.c = c; return n;
+}
+function fillDid(n, did, now){
+ shown(n, !!(did && did.what));
+ if(!did || !did.what) return;
+ put(n.c.v, VERB[did.tool] || did.tool);
+ put(n.c.t, did.what);
+ /* The timestamp is when the hook SAW the call, which for a command is when it
+    started. Two seconds later, on the poll that draws this, almost all of them
+    have finished — and the one that has not says so by how old it is. */
+ putq(n.c.w, ", " + ago(did.at, now) + " ago");
+ n.title = did.tool + " — " + did.what;
+}
+
 /* ---- one agent, standing on its checkout -------------------------------- */
 function makeCh(){
  var plot = el("div");           /* the plot of ground it is standing on */
@@ -6459,6 +6649,7 @@ function makeCh(){
  c.claim = chip(c.tags, "claim", "i-claim");
  c.sub = chip(c.tags, "sub", "i-sub");
  c.doing = add(c.info, "div", "doing");
+ c.did = makeDid(c.info);
  c.tasks = add(c.info, "div", "tk");
  c.clash = add(c.info, "div", "clash bad");
  c.list = add(c.info, "div", "list");
@@ -6495,7 +6686,9 @@ function fillCh(plot, it){
  mark(d, "idle", !!s.idle);
  mark(d, "wait", !!s.waiting);
  put(c.nm, s.agent);
- if(s.doing || it.tk.length) plot.setAttribute("data-say", "1");
+ /* Two of the floor's columns for a row with something to say — a sentence, work
+    it declared, or a line about what it last did. */
+ if(s.doing || it.tk.length || s.did) plot.setAttribute("data-say", "1");
  else plot.removeAttribute("data-say");
  put(c.br.__t, s.branch || "no branch");
  /* null: not counted yet — the poll runs no git and waits for nothing. "": this
@@ -6523,9 +6716,12 @@ function fillCh(plot, it){
  c.sub.title = s.agents.map(function(a){
    return a.name + (a.type ? " — " + a.type : "");}).join("\n");
  shown(c.sub, !!s.agents.length);
- /* Observed, in the session's own words, and given the room: what this
-    project's agents are doing is why the page is this shape. */
+ /* What it SAID it was doing, and under it what the bus watched it do. Both, and
+    in that order: `doing` is intent, which no amount of watching derives, and
+    the line under it is the check on whether the intent is still what is
+    happening. */
  put(c.doing, s.doing); shown(c.doing, !!s.doing);
+ fillDid(c.did, s.did, it.now);
  sync(c.tasks, it.tk.map(function(t){
    return {k: "t:" + t.id, t: t, now: it.now};}), makeTask, fillTask);
  put(c.clash, s.clash.map(function(x){
@@ -6828,6 +7024,8 @@ function openPanel(name){
      : "") : "nothing", 1],
   ["clashes", s.clash.map(function(x){
     return x.path + "   also " + x.also.join(", ");}).join("\n") || "none", 1],
+  ["last did", s.did && s.did.what ? (VERB[s.did.tool] || s.did.tool) + " " +
+    s.did.what + "   " + ago(s.did.at, last.now) + " ago" : "—", 0],
   ["subagents", s.agents.map(function(a){
     return a.name + (a.type ? "   " + a.type : "");}).join("\n") || "none", 0]];
  sync(c.dl, rows.map(function(r){return {k: r[0], r: r};}),
@@ -7961,6 +8159,10 @@ def board_state(limit=60):
             "clash": [{"path": p, "also": sorted(set(who))}
                       for p, who in sorted(clash.get(s["sid"], {}).items())],
             "unread": unread,
+            # What the hooks watched it do, beside what it said it was doing.
+            # Free: the fast path has already written the line, and this is one
+            # small read per party.
+            "did": action_view(last_action(s["sid"]), s.get("root")),
             # The one thing on the page that asks to be acted on. A session that
             # is working will read the bus itself at its next turn; a session
             # that has stopped with messages it has never been shown is a window

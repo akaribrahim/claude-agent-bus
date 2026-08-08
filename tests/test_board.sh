@@ -344,6 +344,104 @@ Q=$(ab sess-q name)
 assert_equal 1 "$(state 'who("'"$B"'")["guarded"]')" \
   "the snapshot counts the commands a session took a shared resource for"
 
+# ---- what it last actually did ----------------------------------------------
+#
+# Derived from the tool calls the hooks already see, rather than asked of the
+# agents. One `agentbus doing` call is 72 ms of engine, but the cost that matters
+# is a tool call a minute per agent, its round trip, and the agent's own context
+# filling with status reports — and on the live bus one agent in six used `take`
+# at all. So the fast path writes one line per party and the board reads it.
+
+ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=cd $WT2 && python -m pytest tests -q" id=did-1)" > /dev/null
+assert_file "$AGENTBUS_HOME/acted/sess-b" \
+  "the fast path records what a session last did"
+assert_equal Bash "$(state 'who("'"$B"'")["did"]["tool"]')" \
+  "which the board reads back as the tool that was called"
+assert_equal "python -m pytest tests -q" "$(state 'who("'"$B"'")["did"]["what"]')" \
+  "and the command, with the cd into the checkout the strip above already names"
+assert_equal True "$(state 'd["now"] - who("'"$B"'")["did"]["at"] < 30')" \
+  "timed by the file's own mtime, so the fast path spends no date subprocess"
+
+# An edit, said the way the repository says it: the row is standing on a strip
+# that already gives the checkout, and the absolute path was 100 characters of
+# worktree before the filename.
+ab_hook pre-tool "$(payload file sid=sess-b "cwd=$WT2" tool=Edit \
+  "path=$WT2/api/routes.py")" > /dev/null
+assert_equal api/routes.py "$(state 'who("'"$B"'")["did"]["what"]')" \
+  "an edited path is drawn relative to the checkout, not absolutely"
+assert_equal Edit "$(state 'who("'"$B"'")["did"]["tool"]')" \
+  "and the tool that did it is the tool the board says"
+
+# One line per party, overwritten. Not a log: nothing on the bus may grow with
+# how long the machine has been up.
+assert_equal 1 "$(wc -l < "$AGENTBUS_HOME/acted/sess-b" | tr -d ' ')" \
+  "the line is overwritten and never appended to"
+
+# And read-only extends to it. The line is the fast path's; a window that
+# refreshes by itself must not so much as touch its mtime, which IS its
+# timestamp — a poll that did would keep resetting every agent's "4s ago" to now.
+stamp() { python3 -c "
+import os
+print(os.path.getmtime('$AGENTBUS_HOME/acted/sess-b'))"; }
+was=$(stamp)
+state 'len(d["sessions"])' > /dev/null
+state 'len(d["sessions"])' > /dev/null
+assert_equal "$was" "$(stamp)" \
+  "and polling the board leaves it exactly as the fast path wrote it"
+
+# Keyed by PARTY: `agent_id` is on a subagent's payloads, so a subagent gets a
+# line of its own rather than its parent being credited with its work.
+ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" \
+  "cmd=git log --oneline -3" id=did-2a)" > /dev/null
+ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" agent_id=sub-1 \
+  "cmd=alembic upgrade head" id=did-2)" > /dev/null
+assert_file "$AGENTBUS_HOME/acted/sess-a__sub-1" \
+  "a subagent's own last action is filed under the subagent"
+assert_equal "git log --oneline -3" "$(state 'who("'"$A"'")["did"]["what"]')" \
+  "nor is the subagent's command attributed to the session it belongs to"
+
+# A command the guard has no interest in still gets a line: the tool call that
+# matters most to somebody watching the board is usually the one that needed no
+# coordination at all, so the write happens BEFORE the gates that decide whether
+# the engine is worth waking.
+#
+# That it does not wake the engine is asserted in tests/test_pyhook.sh, against a
+# stub engine that records being run — and of both entry points. Asserting it
+# here off the event sequence would measure nothing: a non-guarded command emits
+# no event whether the engine ran or not.
+rm -f "$AGENTBUS_HOME/acted/sess-b"
+out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=echo nothing here matches a guard" id=did-3)")
+assert_empty "$out" "recording it says nothing to the session"
+assert_file "$AGENTBUS_HOME/acted/sess-b" \
+  "and a command no guard cares about still gets its line"
+
+# Bounded by the party going away, and swept for the party that never got to
+# say goodbye — a session killed with -9 fires no SessionEnd.
+ab_hook subagent-stop "$(payload subagent-stop sid=sess-a "cwd=$REPO" \
+  agent_id=sub-1)" > /dev/null
+assert_no_file "$AGENTBUS_HOME/acted/sess-a__sub-1" \
+  "a subagent that stops takes its line with it"
+printf 'Bash who-is-this\n' > "$AGENTBUS_HOME/acted/sess-nobody"
+ab sess-a status > /dev/null
+assert_no_file "$AGENTBUS_HOME/acted/sess-nobody" \
+  "and a line left by a party nobody knows is swept, so the directory is bounded"
+
+# An id that may not become a filename gets no line at all, and neither entry
+# point may be talked into following one out of the directory. Asserted in
+# tests/test_pyhook.sh, where the engine is a stub that writes nothing: an
+# unsanitised session id is ALSO a filename to the engine — `cursors/../escape`
+# is the same file as `acted/../escape` — so here the engine's own write would
+# land on top of the fast path's and the assertion could not fail.
+
+# Put the subagent back, and give it a line: the drawing below is about a session
+# with one, and the last action is what a reader looks at first.
+ab_hook subagent-start "$(payload subagent-start sid=sess-a "cwd=$REPO" \
+  agent_id=sub-1 agent_type=general-purpose)" > /dev/null
+ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=cd $WT2 && python -m pytest tests -q" id=did-6)" > /dev/null
+
 # ---- it serves, and only to this machine ------------------------------------
 
 if ! command -v python3 > /dev/null; then
@@ -607,6 +705,71 @@ print($2)" "$1"
       assert_equal no "$(look "$TIP" \
         '"yes" if d["before"]["f"] == d["after"]["f"] else "no"')" \
         "and the figure is redrawn from the new name, because the figure IS the name"
+
+      # ---- the live line, read out of the built DOM ------------------------
+      #
+      # Its clock reading changes on every poll, so it must be written WITHOUT
+      # the highlight, or a page left open for hours flashes every two seconds.
+      # No string can show that; the class on the node can, and this harness has
+      # no stylesheet but does have the class list. Polled twice: once with time
+      # moved on, once with a genuinely new action.
+      cp "$TEST_TMP/board.js" "$TEST_TMP/didprobe.js"
+      cat >> "$TEST_TMP/didprobe.js" <<JS
+setTimeout(function(){
+ var A = document.getElementById("agents"), out = {own: [], row: null};
+ function txt(n){return n.shownText().replace(/\s+/g, " ").trim();}
+ var row = null;
+ (function walk(n){
+   if(n.__ch && n.c && n.c.nm){
+    out.own.push({name: n.c.nm.shownText(),
+      did: n.c.did.visible() ? txt(n.c.did) : ""});
+    if(n.c.nm.shownText() === "$B") row = n;
+   }
+   n.children.forEach(walk);})(A);
+ if(row){
+  out.row = {was: row.c.did.c.w.shownText()};
+  last.now += 90;
+  render(last);
+  out.row.when = row.c.did.c.w.shownText();
+  out.row.whenCls = row.c.did.c.w.className;
+  out.row.whatCls = row.c.did.c.t.className;
+  last.sessions.forEach(function(s){
+    if(s.agent === "$B") s.did = {tool: "Bash", what: "make check",
+                                  at: last.now - 1};});
+  render(last);
+  out.row.after = row.c.did.c.t.shownText();
+  out.row.afterCls = row.c.did.c.t.className;
+ }
+ console.log("DID " + JSON.stringify(out));
+}, 0);
+JS
+      DID=$(node "$AB_ROOT/tests/board-render.js" "$TEST_TMP/didprobe.js" \
+                 "$TEST_TMP/data.json" 2>&1 | sed -n 's/^DID //p')
+      own() {   # <agent name> <python expression over `k`>
+        python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+k = [x for x in d['own'] if x['name'] == sys.argv[2]][0]
+print($2)" "$DID" "$1"
+      }
+      assert_contains "$(own "$B" 'k["did"]')" "python -m pytest" \
+        "a session's own last action is on the session's row"
+      assert_contains "$(own "$B" 'k["did"]')" ago \
+        "with how long ago it was, and not a bare timestamp"
+      assert_equal yes "$(python3 -c "
+import json, sys
+r = json.loads(sys.argv[1])['row']
+print('yes' if r and r['when'] != r['was'] and 'ago' in r['when'] else 'no')" \
+        "$DID")" \
+        "the live line's clock reading follows the poll"
+      assert_equal w "$(look "$DID" 'd["row"]["whenCls"]')" \
+        "and is written without the highlight, so an open tab does not twitch"
+      assert_equal tgt "$(look "$DID" 'd["row"]["whatCls"]')" \
+        "nor is the action highlighted when only the clock moved"
+      assert_equal "make check" "$(look "$DID" 'd["row"]["after"]')" \
+        "a new action replaces the old one"
+      assert_contains "$(look "$DID" 'd["row"]["afterCls"]')" hit \
+        "and that one IS highlighted, because it is the news"
     else
       _bad "the page draws its bands when it is run" "$out"
     fi

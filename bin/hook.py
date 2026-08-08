@@ -83,6 +83,46 @@ def field(text, key):
     return ""
 
 
+# Everything a party key may contain. The bash entry point refuses the same set
+# with `*[!A-Za-z0-9_.-]*` and the engine with a regular expression, so all three
+# agree about which ids get a line — and none of them can be talked into writing
+# outside the bus by a `/` in an id.
+KEYSAFE = set("abcdefghijklmnopqrstuvwxyz"
+              "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+
+
+def acted(text, sid, tool):
+    """What this party last did, for the board's live line: one line, overwritten.
+
+    The same write `bin/ab-hook` performs, in the same place and with the same
+    content. No timestamp: the file's mtime is the time, exactly as the
+    heartbeat's is. Keyed by party, because `agent_id` is on a subagent's
+    payloads and its parent must not be credited with work it did not do."""
+    if not sid:
+        return
+    aid = field(text, "agent_id")
+    key = "%s__%s" % (sid, aid) if aid else sid
+    if set(key) - KEYSAFE:
+        return
+    if tool == "Bash":
+        what = field(text, "command")
+    elif tool in ("Edit", "Write", "NotebookEdit"):
+        what = field(text, "file_path") or field(text, "notebook_path")
+    else:
+        return
+    # The payload is JSON, so a newline inside a command arrives as the two
+    # characters `\` and `n` and never as a real one. Cut there, and drop a
+    # backslash the cut left dangling.
+    what = what.split("\\n")[0]
+    if what.endswith("\\"):
+        what = what[:-1]
+    try:
+        with open(os.path.join(BUS, "acted", key), "w") as fh:
+            fh.write("%s %s\n" % (tool, what[:200]))
+    except OSError:
+        pass
+
+
 def anybody_behind():
     """Is any live session behind the end of the event stream?
 
@@ -219,6 +259,11 @@ def main():
 
     if event == "pre-tool":
         tool = field(text, "tool_name")
+        # Before the gates below, which decide whether the ENGINE is worth
+        # waking: this is worth writing either way, since the tool call that
+        # matters most to somebody watching the board is usually the one that
+        # needed no coordination at all.
+        acted(text, sid, tool)
         if tool == "Bash":
             # One line of literal substrings derived from the configured
             # patterns. No match anywhere means no guarded resource can be

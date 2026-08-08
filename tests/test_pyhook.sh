@@ -456,4 +456,91 @@ gate "an edit with no session on it: both agree" pre-tool \
 slept "and neither has a filter to read"
 printf '%s' "$HOT_WAS" > "$HOTFILE"
 
+# ---- the board's live line, written by the fast path and by nothing else -----
+#
+# The one thing either file writes for itself rather than deciding whether to
+# wake the engine, so `gate` cannot see it: it compares exit codes, output and
+# which event woke the engine. What has to agree is the LINE, byte for byte, and
+# it has to be written on the path that does NOT wake the engine — a live line
+# that cost a Python start per tool call would not be worth having at any price.
+#
+# The stub engine here writes nothing at all, which is what makes the last
+# assertion possible: an unsanitised session id is a filename to the real engine
+# too — `cursors/../escape` is the same file as `acted/../escape` — so on a real
+# bus the engine's own write would land on top of the fast path's.
+
+# `one_gate` reports which event woke the engine as its middle field, so read it
+# rather than leaning on `$GATE_WOKE`: that is set by `gate` and not by
+# `one_gate`, so an assertion on it would be reporting the previous comparison's
+# answer and would pass however loudly this write woke the engine. Set into
+# variables rather than returned, because a command substitution would run the
+# whole thing in a subshell and lose the second answer.
+ACTED_LINE=""; ACTED_WOKE=""
+acted_line() {   # <sh|py> <payload> — sets $ACTED_LINE and $ACTED_WOKE
+  local r
+  rm -f "$AGENTBUS_HOME"/acted/*
+  r=$(one_gate "$1" pre-tool "$2")
+  r=${r#*|}; ACTED_WOKE=${r%%|*}
+  ACTED_LINE=$(cat "$AGENTBUS_HOME/acted/sess-a" 2>/dev/null)
+}
+acted_line sh "$PLAIN_P"; SH_LINE=$ACTED_LINE; SH_WOKE=$ACTED_WOKE
+acted_line py "$PLAIN_P"
+assert_equal "$SH_LINE" "$ACTED_LINE" \
+  "both entry points write the same last-action line, byte for byte"
+assert_equal "Bash echo nothing" "$SH_LINE" \
+  "which is the tool and the head of what it ran"
+assert_equal "" "$SH_WOKE$ACTED_WOKE" \
+  "written on the path that does not wake the engine, which is the whole point"
+
+EDIT_P=$(payload file sid=sess-a "cwd=$REPO" "path=$REPO/elsewhere.py")
+acted_line sh "$EDIT_P"; SH_LINE=$ACTED_LINE
+assert_equal "Edit $REPO/elsewhere.py" "$SH_LINE" \
+  "an edit records the path it was about to write"
+acted_line py "$EDIT_P"
+assert_equal "$SH_LINE" "$ACTED_LINE" "and the two agree about that too"
+
+# A command whose first line is one of several. The payload is JSON, so the
+# newline arrives as the two characters `\` and `n`; both files cut there, or a
+# one-line-per-party file stops being one line per party.
+MULTI_P=$(payload bash sid=sess-a "cwd=$REPO" "cmd=echo first
+echo second" id=ml-1)
+acted_line sh "$MULTI_P"; SH_LINE=$ACTED_LINE
+assert_equal "Bash echo first" "$SH_LINE" \
+  "a command of several lines is recorded as its first line"
+acted_line py "$MULTI_P"
+assert_equal "$SH_LINE" "$ACTED_LINE" \
+  "and neither file lets the rest of it into the file"
+
+# A subagent's own line, under its own key, because `agent_id` is on its payloads.
+SUB_P=$(payload bash sid=sess-a "cwd=$REPO" agent_id=sub-9 \
+  "cmd=echo from a subagent" id=sb-1)
+rm -f "$AGENTBUS_HOME"/acted/*
+one_gate sh pre-tool "$SUB_P" > /dev/null
+assert_file "$AGENTBUS_HOME/acted/sess-a__sub-9" \
+  "a subagent's action is filed under the party, not under its session"
+assert_no_file "$AGENTBUS_HOME/acted/sess-a" \
+  "and its parent is not credited with it"
+SUB_SH=$(cat "$AGENTBUS_HOME/acted/sess-a__sub-9" 2>/dev/null)
+rm -f "$AGENTBUS_HOME"/acted/*
+one_gate py pre-tool "$SUB_P" > /dev/null
+assert_equal "$SUB_SH" "$(cat "$AGENTBUS_HOME/acted/sess-a__sub-9" 2>/dev/null)" \
+  "and the Python entry point files it in the same place with the same line"
+
+rm -f "$AGENTBUS_HOME"/acted/*
+ESC_P=$(payload bash sid=../escape "cwd=$REPO" "cmd=echo hello" id=esc-1)
+one_gate sh pre-tool "$ESC_P" > /dev/null
+assert_no_file "$AGENTBUS_HOME/escape" \
+  "a session id that is not a filename is refused, not followed out of the bus"
+one_gate py pre-tool "$ESC_P" > /dev/null
+assert_no_file "$AGENTBUS_HOME/escape" "by both entry points alike"
+# And an id that is merely odd rather than a traversal: `acted/an odd one` is
+# perfectly writable, so this is the case where the refusal has to be the reason
+# nothing is there. Asserted on the directory being empty, because a check for
+# one expected name would pass against a write under any other.
+ODD_P=$(payload bash sid="an odd one" "cwd=$REPO" "cmd=echo hello" id=esc-2)
+one_gate sh pre-tool "$ODD_P" > /dev/null
+one_gate py pre-tool "$ODD_P" > /dev/null
+assert_equal 0 "$(ls -1 "$AGENTBUS_HOME/acted" | wc -l | tr -d ' ')" \
+  "and neither writes a line under any name at all"
+
 finish

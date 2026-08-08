@@ -72,6 +72,17 @@ assert_empty "$out" "alone, an edit is not guarded"
 
 assert_equal 0 "$(locks_held)" "alone, nothing is ever claimed"
 
+# The board's live line is not recorded either, and that is the design rather
+# than an omission: the fast path exits at the `live-count` gate before it has
+# read the payload at all, which is the whole reason a solo session is free. The
+# bus already records nothing about a solo session's tool calls — not the files
+# it writes, not the resources it reaches for — because there is nobody to
+# coordinate with. The line starts the moment there is.
+ab_hook pre-tool "$(payload file sid=sess-solo "cwd=$REPO" tool=Edit \
+  "path=$REPO/README")" > /dev/null
+assert_no_file "$AGENTBUS_HOME/acted/sess-solo" \
+  "alone, what it last did is not recorded, so the gate really is before the read"
+
 # ---- cost ------------------------------------------------------------------
 #
 # Measured on the fast path only, and with the payload built beforehand: what
