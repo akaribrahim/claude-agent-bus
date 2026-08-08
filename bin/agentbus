@@ -1052,9 +1052,9 @@ def resolve_party(payload=None, cmd=""):
     # invented here. The two hooks that may not take no for an answer call
     # `register` and ask again; nothing else creates one, because a
     # PostToolBatch that registered would resurrect a session just reaped.
-    sid = (payload.get("session_id") if payload else None) \
-        or os.environ.get("AGENTBUS_SESSION") \
-        or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    sid = safe_id((payload.get("session_id") if payload else None)
+                  or os.environ.get("AGENTBUS_SESSION")
+                  or os.environ.get("CLAUDE_CODE_SESSION_ID"))
     if not sid:
         return None, None
     record = read_json(os.path.join(SESSIONS, "%s.json" % sid))
@@ -1239,9 +1239,28 @@ def require_record(rec, who):
 # subagent is calling it; every decision that needs to know is therefore made in
 # the hook, where it is known.
 
+def safe_id(s):
+    """An id as a filename component, and nothing else.
+
+    Claude Code's session and agent ids are uuids, so for every real one this
+    returns the id unchanged. But the id arrives on a hook payload and is
+    interpolated straight into `sessions/<sid>.json`, `<sid>.beat`,
+    `cursors/<party>`, `hot-for/<sid>`, `writes/<sid>.log` and
+    `owns/<sid>.json` — a dozen paths built from a value nothing checked. One
+    that is not a uuid therefore writes wherever it says: measured, an id of
+    `../../escaped` put `escaped.json`, `escaped.beat` and `escaped` in the
+    parent directory of AGENTBUS_HOME, outside the state directory entirely.
+
+    Sanitised where an id ENTERS rather than at each path built from it, so the
+    value used for identity and the value used for a filename cannot drift
+    apart — two records that disagree about which is which would be a worse
+    defect than the one being fixed. `agent_path` has always sanitised this way
+    and is the reason only the session side was exposed."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", s or "")
+
+
 def agent_path(sid, aid):
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", "%s__%s" % (sid, aid))
-    return os.path.join(AGENTS, "%s.json" % safe)
+    return os.path.join(AGENTS, "%s.json" % safe_id("%s__%s" % (sid, aid)))
 
 
 def load_agents(sid=None):
@@ -1274,9 +1293,14 @@ def forget_agent(sid, aid):
 
 
 def party_key(me):
-    """One string naming the party that acts: a session, or a subagent in it."""
-    aid = me.get("agent_id") or ""
-    return "%s__%s" % (me.get("sid") or "", aid) if aid else (me.get("sid") or "")
+    """One string naming the party that acts: a session, or a subagent in it.
+
+    Sanitised because this is a filename as well as a name: cursors, hints and
+    the live line are all filed under it, and an `agent_id` reaches here from a
+    payload without passing through `resolve_party`'s own check. See `safe_id`."""
+    aid = safe_id(me.get("agent_id") or "")
+    sid = safe_id(me.get("sid") or "")
+    return "%s__%s" % (sid, aid) if aid else sid
 
 
 # ------------------------------------------------------- what it last did ----
@@ -3911,7 +3935,8 @@ def register(payload):
     what this chat has ever told us, which outlives the record: see
     `keep_declared` for which fields those are and why each one."""
     ensure_dirs()
-    sid = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    sid = safe_id(payload.get("session_id")
+                  or os.environ.get("CLAUDE_CODE_SESSION_ID"))
     if not sid:
         return None, False
     cwd = payload.get("cwd") or os.getcwd()

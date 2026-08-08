@@ -233,4 +233,43 @@ assert_equal "bigchat" "$got" "the title is found in a multi-megabyte transcript
 under=$(python3 -c "print('yes' if float('$ms') < 5 else 'no ($ms ms)')")
 assert_equal yes "$under" "and reading it costs under 5ms, because only the tail is read"
 
+# ---- an id is a name to us and a filename to the filesystem -----------------
+#
+# The session id arrives on a hook payload and was interpolated straight into
+# `sessions/<sid>.json`, `<sid>.beat`, `cursors/<party>`, `hot-for/<sid>`,
+# `writes/<sid>.log` and `owns/<sid>.json` — a dozen paths built from a value
+# nothing checked. Measured on the engine before this was closed: an id of
+# `../../escaped` wrote `escaped.json`, `escaped.beat` and `escaped` into the
+# PARENT of AGENTBUS_HOME, outside the state directory altogether. Claude Code's
+# ids are uuids, so this is robustness rather than anybody's attack surface —
+# but a plugin that writes outside the directory it was given has no business
+# telling other sessions where they may write.
+#
+# Asserted at two depths deliberately: one `..` lands in the bus root and looks
+# harmless, and it was the two-deep case that left the directory.
+
+esc_probe() {   # <session id> → the bus it was pointed at
+  local sid="$1" home
+  home="$(mktemp -d)/bus"
+  mkdir -p "$home"
+  python3 -c "
+import json, sys
+print(json.dumps({'session_id': sys.argv[1], 'cwd': sys.argv[2],
+                  'hook_event_name': 'SessionStart'}))" "$sid" "$REPO" \
+    | AGENTBUS_HOME="$home" bash -c 'exec "$0" hook session-start' \
+        "$AB_ROOT/bin/agentbus" > /dev/null 2>&1
+  printf '%s' "$home"
+}
+
+for depth in ".." "../.."; do
+  bus=$(esc_probe "$depth/escaped")
+  outside=$(ls -A "$(dirname "$bus")" 2>/dev/null | grep -v '^bus$' | tr '\n' ' ')
+  assert_equal "" "$outside" \
+    "an id of '$depth/escaped' writes nothing outside the bus directory"
+  assert_empty "$(ls -A "$bus" 2>/dev/null | grep -i escaped)" \
+    "nor loose in its root, where the sessions directory is not"
+  assert_contains "$(ls -A "$bus/sessions" 2>/dev/null)" "escaped" \
+    "and the record it does write is inside sessions, under a flattened name"
+done
+
 finish

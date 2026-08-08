@@ -69,6 +69,26 @@ tool call would not be worth having at any price. So:
 authentication out of the request handler — so the two sit together on the row:
 what it said it is doing, and under it what it last actually did.
 
+### And the plugin no longer writes outside the directory it was given
+
+A session id arrives on a hook payload and was interpolated straight into a
+dozen paths — `sessions/<id>.json`, `<id>.beat`, `cursors/<party>`,
+`hot-for/<id>`, `writes/<id>.log`, `owns/<id>.json` — with nothing checking it
+first. Measured before this was closed: an id of `../../escaped` wrote
+`escaped.json`, `escaped.beat` and `escaped` into the **parent** of
+`AGENTBUS_HOME`, outside the state directory altogether. One `..` was quieter
+and landed loose in the bus root, next to the directories rather than inside
+them.
+
+Claude Code's ids are uuids, so nothing here was ever an attack: it is
+robustness, and it is the sort a tool that tells other sessions where they may
+write has no business getting wrong. Ids are now flattened where they *enter*
+rather than at each path built from them, so the value used for identity and the
+value used as a filename cannot drift apart — `agent_path` had always done this,
+which is why only the session side was exposed. Asserted at both depths, because
+the one-deep case looks harmless and it was the two-deep case that left the
+directory.
+
 ## 2.8.0 — 2026-08-08
 
 **A chat you left open over lunch comes back as itself.** Leave a chat idle for
