@@ -2,6 +2,54 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.9.1 — 2026-08-08
+
+**Five agents on one checkout read as a row again, not as a ragged wall.** The
+side-by-side packing was designed when a cell was a branch, a few chips and at
+most one sentence — short and roughly uniform, so five of them wrapping across a
+strip read as five figures standing on ground. 2.9.0 put a long, variable-length
+line in every cell and a subagent tree in some of them, and the packing stopped
+holding: one agent's last action wrapped to three lines while its neighbour's was
+one, the agent with a tree came out twice as tall as the four beside it with the
+space next to the tree empty, and a hyphenated name broke in half under itself.
+Three things changed, and no fact was dropped to get there:
+
+- **What an agent last did is one line, cut to the width of the cell.** The cut
+  comes off whichever end is not the identifying one: a command keeps its head,
+  because `pnpm --filter …` says what it is and the flags after it do not, and a
+  path keeps its filename and gives up its directories — the same treatment the
+  worktree path above it already gets. The whole line stays in the element, so it
+  still selects and copies whole, and it is on the tooltip. Nothing is cut to a
+  character count on the server any more: at 96 characters from the right, a path
+  lost the very part worth reading.
+- **An agent carrying a block takes the whole strip.** A sentence it said, work it
+  declared, or subagents standing under it — each of those is block-shaped and
+  cannot share a line with three short cells without either stretching them or
+  hanging past them. Full width is also what makes a block *short*: the same
+  sentence is one line across a strip and six lines in a narrow column, so the
+  page comes out shorter than before rather than taller. Everything short wraps
+  side by side as it always did, and a wrapped line now divides the strip between
+  the figures actually standing on it.
+- **A name is one line.** It used to be allowed to break anywhere, which made its
+  minimum width one character, so the chips beside it squeezed it and it broke
+  mid-word. The chips move to their own line first, and a name is shortened only
+  when the name alone will not fit — the figure next to it has the whole of it.
+
+**And `~/.claude` is no longer drawn as though it were the repository.** An agent
+editing its own memory file under `~/.claude/projects/<flattened-path>/memory/`
+was drawn exactly the way a source file is, so the headline was sixty characters
+of machine-flattened project path with the filename cut off the end. It is a real
+thing to be doing and it is still said — but the flattened segment goes, because
+it is the project's own root with the separators swapped, which is the fact the
+strip's heading already carries, and the line now says which *kind* of place the
+file is in: `in ~/.claude` for Claude Code's own storage, `outside this checkout`
+for anywhere else, nothing at all for a file in the checkout the figure is
+standing on. That phrase is the one part of the line the cut can never reach, so
+a shortened path can never be mistaken for one of the repository's.
+
+Also: the arc between two sessions that wrote one file no longer draws itself
+across the row above when the figures it joins have wrapped onto a second line.
+
 ## 2.9.0 — 2026-08-08
 
 **A subagent stands under its parent as a tree, carrying its own facts.** It used
