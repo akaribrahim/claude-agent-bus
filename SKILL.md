@@ -33,9 +33,13 @@ than one you remember, and use `agentbus whois` if you are unsure.
 
 **1. Someone else is using it right now.** Wait for them, or ask:
 
+    agentbus wait <res>[,<res>] --why "..."  queue for every one in the way
     agentbus status                          who is live, what is held
     agentbus post --to <agent> "..."         ask them
-    agentbus wait <res> --why "..."          queue; takes it the moment it frees
+
+One `wait` for the whole list, with one deadline — not one command each. A block
+names everything it is about, so copy the line it printed rather than the first
+resource in it.
 
 If the human asks to *see* what is going on, `agentbus board` serves a live page
 on `127.0.0.1` — agents, locks, services and the message feed. It is for them to
@@ -47,9 +51,15 @@ Automatic claims last one command, so "held" usually means seconds.
 one and it is blocked even when nobody holds the lock — a session can end while
 its detached dev server keeps serving its tree. Point it at yours:
 
-    agentbus serve <res>                     stop it, start it from your worktree
-    agentbus run <res> -- <cmd>              do that and run one command
+    agentbus run <res> -- <cmd>              all of them at your tree, then run
+    agentbus serve <res>[,<res>]             move them for good
     agentbus serves                          which checkout each service serves
+
+`run` first, and with the resource your command is *about* rather than the one
+the block happened to name: it takes the locks, points every service that
+resource implies at your worktree, runs your command and hands it all back. One
+command wanting a device and the three services it is only meaningful against is
+one `agentbus run`, not four steps.
 
 **Never work around a block by editing the command.** A different port, a direct
 binary path, or a subshell all reach the same service and produce the same

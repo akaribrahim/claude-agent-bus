@@ -208,7 +208,7 @@ agentbus post --to <agent> "..."      ...for one agent, wherever they are workin
 agentbus post --all "..."             ...for every session on the machine
 agentbus inbox                        everything addressed to this repo / to you
 agentbus run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
-agentbus serve <res>                  restart a service so it serves YOUR worktree
+agentbus serve <res>[,<res>]          restart services so they serve YOUR worktree
 agentbus serves                       which checkout each service is answering for
 agentbus own "<glob>" [--why ".."] [--strict]   declare part of the tree yours
 agentbus own --list | disown "<glob>" | disown --all

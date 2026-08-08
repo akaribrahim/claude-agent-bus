@@ -40,6 +40,49 @@ session's turn, so on a machine running several chats the record is usually gone
 long before the idle chat is typed into again — which is why the fix cannot live
 in the function that re-registers.
 
+---
+
+**A block whose way out was four commands is now one, and it is the first line.**
+Measured on the live bus over 48 hours: 85 guard overrides from a single session
+against 6 real blocks. Not the habitual `AGENTBUS_OFF` prefix 2.3.0 removed —
+every one of these named the resources it stepped over, so every one was a real
+block a reader chose to walk past. 41 were the same command, wanting a device and
+the three services that device is only meaningful against.
+
+The reason was arithmetic. Every block this plugin can emit named *one* resource,
+because every block was written against a command that wanted one. A command
+wanting four was told to wait for the first, and the other three arrived as a
+line of prose — "Also in use: …" — with nothing runnable beside them. Answering
+it produced the next block, about a resource the reader had not been told
+existed. So the honest way out was four commands and four discoveries, and
+`AGENTBUS_OFF=1` in front of the command was one. It won 41 times.
+
+- **A block about several held resources advertises one `agentbus wait` for all
+  of them.** `wait` has always taken a comma list on one deadline; the block that
+  most needed it was the one that did not print it.
+- **A block about a mis-served service leads with `agentbus run <what your
+  command is about> -- <your command>`**, which takes the locks, points every
+  service that resource implies at your worktree, runs your command against your
+  own tree and hands it all back. That is the whole block in one step, and it was
+  previously the *last* line, named after the one service the probe happened to
+  notice first — which would have moved one of three and left the run answering
+  from two checkouts at once.
+- **That block now names every service in the way**, not the first one it found,
+  and `agentbus serve` takes a comma list so that moving them all for good is
+  also one command.
+- **The way through comes before the ways of reading about it.** `agentbus
+  status` and `agentbus post --to` change nothing and were printed above the line
+  that lifts the block.
+- **And the guard no longer refuses the line the block leads with.** An implied
+  resource of an `agentbus run` was not treated as named outright, so the service
+  probe blocked the very handover that `run` performs — the plugin printing
+  advice it would not let the reader follow, which is a defect class this
+  repository has now shipped three times and tests for by walking every exit of
+  every block.
+
+`AGENTBUS_OFF` is exactly where it was. The point was never to take the bypass
+away; it was that the honest exit should cost less than it does.
+
 ## 2.7.0 — 2026-08-06
 
 **"What is going on in this project?"** — answered by a picture of the machine

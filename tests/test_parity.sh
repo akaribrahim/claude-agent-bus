@@ -206,6 +206,19 @@ json.dump({"resources": [
      "why": "It serves the tree it was started in.",
      "start": "sleep 300",
      "patterns": [r"\bwebcurl\b"]},
+    # One command wanting SEVERAL services, which is the shape check B could not
+    # reach with anything above: `web` implies nothing, so every block about it
+    # names exactly one thing and its advice is right by accident. Additive on
+    # purpose — no existing resource and no existing command line changes — and
+    # named for what it is rather than after any real project.
+    {"name": "tour", "desc": "the whole tour",
+     "why": "The tour is only meaningful against the services serving YOUR tree.",
+     "implies": ["renderer", "wares"],
+     "patterns": [r"\btourrun\b"]},
+    {"name": "renderer", "desc": "the renderer", "start": "sleep 300",
+     "patterns": [r"\brendercurl\b"]},
+    {"name": "wares", "desc": "the asset service", "start": "sleep 300",
+     "patterns": [r"\bwarescurl\b"]},
     {"name": "api", "desc": "the dev API", "port": port, "ports": "per-worktree",
      "env": "API_PORT",
      "patterns": [r"\buvicorn\b", r":%d\b" % port]},
@@ -1046,6 +1059,113 @@ assert_equal "$before" "$(lock_lines | wc -l | tr -d ' ')" \
   "and nothing about it reaches the stream"
 ab sess-a release bundler > /dev/null
 assert_equal "" "$(lock_keys)" "the bus is clear again"
+
+# ---- 10. several things in the way of one command ---------------------------
+#
+# Every block above has exactly one resource in the way, and that is why their
+# advice looked correct for as long as it did. A command that wants four things
+# is the ordinary case for anything driving a device against its own services,
+# and it is where the property check B asserts stops being enough on its own:
+# each advertised line ran, and lifted the block it was printed under, and the
+# reader still needed four of them.
+#
+# Measured on the live bus over 48 hours: 85 guard overrides from one session
+# against 6 real blocks, 41 of them one repeated command wanting a device and
+# the three services it implies. The way out was four commands and the bypass
+# was one, so the bypass won 41 times. What is asserted here is therefore not
+# only that the lines work — that is check B — but that ONE of them is enough,
+# and that it is the one printed first.
+
+HOLDER="$A"
+ab sess-a claim stack,bundler,probe --why "the whole stack" > /dev/null
+assert_equal "bundler probe stack" "$(lock_keys)" "one session holds all three"
+guard b10-1 sess-b "$WT" "stackrun --all"
+assert_equal deny "$VERDICT" "a command wanting three of them is blocked"
+assert_contains "$REASON" "Also in use: bundler, probe" \
+  "and told, in prose, that it is not one thing but three"
+advertised several-locks
+
+# The line that has to exist, and did not: one command for everything in the
+# way. Asserted on the Plan's own exit rather than on a string typed here, so it
+# cannot pass by agreeing with a line this file made up.
+assert_equal 'agentbus wait stack,bundler,probe --why "..."' "$(plan_exit wait)" \
+  "the advertised wait names every resource in the way, not just the first"
+
+# And it is the first runnable line in the message. Not a nicety: the bypass is
+# one command, so an exit the reader finds after two lines that change nothing is
+# an exit competing on length and losing.
+# Matched on the indent, not on the word: every path in the message carries the
+# test's own temporary directory, which has "agentbus" in it.
+FIRST=$(printf '%s\n' "$REASON" | grep '^  agentbus' | head -1)
+assert_contains "$FIRST" "agentbus wait stack,bundler,probe" \
+  "and it is the first runnable line the block prints"
+
+# Run it verbatim, and let the holder release while it is queueing — the only
+# exit whose whole point is that somebody else lets go while it runs.
+WAITLINE=$(plan_exit wait)
+exit_seen_by_guard b10-2 sess-b "$WT" "$WAITLINE"
+start_exit sess-b "$WAITLINE" "$TEST_TMP/wait-several.out"
+sleep 1
+ab sess-a release stack,bundler,probe > /dev/null
+finish_exit 20
+out=$(cat "$TEST_TMP/wait-several.out")
+assert_contains "$out" "claimed 'stack'" "the one wait takes the first of them"
+assert_contains "$out" "claimed 'bundler'" "and the second"
+assert_contains "$out" "claimed 'probe'" "and the third, on one deadline"
+guard b10-3 sess-b "$WT" "stackrun --all"
+assert_equal allow "$VERDICT" "so one command lifted a block about three resources"
+ab sess-b release --all > /dev/null
+
+# ---- and the same thing for services, which is the shape that was measured --
+#
+# `tour` implies two services. Point both at one checkout and the other checkout
+# is refused — and until 2.8.0 the refusal named ONE of them, advised
+# `agentbus serve` for that one, and said nothing about the second. Answering it
+# left the command still refused, about a service the reader had not been told
+# existed. Three of those in a row is what 41 of those overrides look like.
+
+out=$(ab sess-a serve renderer,wares 2>&1)
+assert_contains "$out" "'renderer' restarted" "one command points the first at a tree"
+assert_contains "$out" "'wares' restarted" "and the second, which \`serve\` could not do before"
+
+guard b10-4 sess-b "$WT" "tourrun --smoke"
+assert_equal deny "$VERDICT" "the other checkout is refused"
+assert_contains "$REASON" "also theirs: wares" \
+  "and told that the service it was not asked about is theirs as well"
+advertised several-services
+assert_no_bypass several-services
+
+# The two exits, both of which must lift a block about TWO services. The `run`
+# one is named after what the command is about — `tour` — because that is what
+# expands to both services; naming the one service in the way would move one and
+# leave the run answering from two checkouts at once.
+assert_equal "agentbus run tour -- <your command>" "$(plan_exit run)" \
+  "the run exit names what the command is about, which is what expands to both"
+assert_equal "agentbus serve renderer,wares" "$(plan_exit serve)" \
+  "and the serve exit names both services, so running it lifts the block"
+
+FIRST=$(printf '%s\n' "$REASON" | grep '^  agentbus' | head -1)
+assert_contains "$FIRST" "agentbus run tour" \
+  "the one-step route is the first runnable line the block prints"
+
+out=$(take_exit b10-5 sess-b "$WT" "$(plan_exit serve)")
+assert_contains "$out" "'renderer' restarted" "the advertised serve moves the first"
+assert_contains "$out" "'wares' restarted" "and the second"
+guard b10-6 sess-b "$WT" "tourrun --smoke"
+assert_equal allow "$VERDICT" "and one command lifted a block about two services"
+
+# Back to the other checkout, for the exit the block now leads with.
+ab sess-a serve renderer,wares > /dev/null 2>&1
+guard b10-7 sess-b "$WT" "tourrun --smoke"
+assert_equal deny "$VERDICT" "the other checkout has both of them again"
+out=$(take_exit b10-8 sess-b "$WT" 'agentbus run tour -- true')
+assert_contains "$out" "also taking renderer, wares" \
+  "\`agentbus run\` takes what the command is about and what it implies"
+assert_contains "$out" "'renderer' restarted" "moving the first service"
+assert_contains "$out" "'wares' restarted" "and the second, in the same step"
+guard b10-9 sess-b "$WT" "tourrun --smoke"
+assert_equal allow "$VERDICT" "so the leading exit lifts it in one command too"
+assert_equal "" "$(lock_keys)" "and gives back what it took on the way out"
 
 
 # =============================================================================

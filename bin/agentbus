@@ -3591,6 +3591,16 @@ def resources_for(cmd, cfg):
             if dep and dep["name"] not in seen:
                 dep = dict(dep)
                 dep["_implied_by"] = res["name"]
+                if res.get("_explicit"):
+                    # `agentbus run tour` is a statement about the tour AND about
+                    # everything the tour is only meaningful against, because
+                    # that is exactly what `run` takes and moves. Without this
+                    # the guard refused the one line the serving block leads
+                    # with: the named resource was exempt from the service probe
+                    # and the two it implies were not, so `agentbus run tour --
+                    # …`, printed by the block, was denied by the block.
+                    dep["_explicit"] = True
+                    dep["_verb"] = res.get("_verb", "")
                 seen[dep["name"]] = dep
                 hits.append(dep)
     return hits
@@ -4462,19 +4472,13 @@ def serving_check(plan, me):
     thing anybody means: a green result belonging to another worktree is the
     founding failure this plugin exists for, not a preference."""
     mine = os.path.realpath(me.get("root") or "")
-    for res in plan["resources"]:
-        if res.get("_explicit"):
-            continue   # `agentbus serve`/`run` are how a service gets moved
-        if not res.get("start") and not res.get("port"):
-            continue
-        root, how = serving(me.get("repo_key"), res)
-        if how == "down":
-            continue
-        if root and os.path.realpath(root) == mine:
+    for i, res in enumerate(plan["resources"]):
+        root, how = _service_blocker(me, res, mine)
+        if not how:
             continue
         out = dict(plan)
         out["blocker"] = {"resource": res, "serving": root,
-                          "mine": me.get("root", "")}
+                          "mine": me.get("root", ""), "also": []}
         if how == "unknown":
             out["verdict"] = "warn"
             out["reason"] = "service-unknown"
@@ -4486,15 +4490,60 @@ def serving_check(plan, me):
             serve_path(me.get("repo_key"), res["name"])) or {}
         out["verdict"] = "deny"
         out["reason"] = "service-elsewhere"
+        # Every other service this same command needs and this same checkout does
+        # not have. Worked out only now that the answer is a refusal, so the
+        # common path still pays one probe and stops: the extra `serving` calls
+        # happen on a command that is already being denied.
+        #
+        # It is what turns a block into a way out. One run wanting a device and
+        # the three services it implies produced three blocks in a row, each
+        # naming one service, each answered with one `agentbus serve` — and the
+        # reader had no way to know there were two more coming. Measured on the
+        # live bus over 48 hours: 41 of the 85 guard overrides were one repeated
+        # command against exactly that shape.
+        also = [r for r in plan["resources"][i + 1:]
+                if _service_blocker(me, r, mine)[1] not in ("", "unknown")]
+        out["blocker"]["also"] = [r["name"] for r in also]
+        moving = [res] + also
+        what = "it" if len(moving) == 1 else "all %d" % len(moving)
+        # What the command is ABOUT, which is what `agentbus run` has to be
+        # given: the resources its patterns matched, not the implied ones it
+        # tripped over. `run` expands `implies` itself, one level, exactly as
+        # `resources_for` does — so naming the matched ones covers every service
+        # in this Plan in a single command, and `expand_implied` is the one
+        # function that answers it for both of them.
+        about = [_named(r) for r in plan["resources"]
+                 if not r.get("_implied_by")] or [_named(res)]
         out["exits"] = [
-            _exit("serve", "through", "agentbus serve %s" % res["name"],
-                  "stops the current one, starts yours, tells the others"),
             _exit("run", "through",
-                  "agentbus run %s -- <your command>" % res["name"],
-                  "one command against your own tree, left there"),
+                  "agentbus run %s -- <your command>" % ",".join(about),
+                  "one step: moves %s to your tree, then runs it" % what),
+            _exit("serve", "through",
+                  "agentbus serve %s" % ",".join(_named(r) for r in moving),
+                  "moves %s for good, and tells the others" % what),
         ]
         return out
     return plan
+
+
+def _service_blocker(me, res, mine):
+    """`(root, how)` for a declared service that is not answering for `mine`, or
+    `(None, "")` when it is nothing to worry about.
+
+    One function rather than a condition written twice: `serving_check` asks this
+    question once to decide the verdict and again for every other service the
+    same command would have to move, and two copies of it drifting apart is how
+    a block came to name one service while three were in the way."""
+    if res.get("_explicit"):
+        return None, ""    # `agentbus serve`/`run` are how a service gets moved
+    if not res.get("start") and not res.get("port"):
+        return None, ""
+    root, how = serving(me.get("repo_key"), res)
+    if how == "down":
+        return None, ""
+    if root and os.path.realpath(root) == mine:
+        return None, ""
+    return root, how
 
 
 def wrong_port_check(me, cfg, cmd, sessions=None):
@@ -4679,6 +4728,26 @@ def _exit_line(plan, eid, indent="  ", width=36, mark=""):
     return "%s%-*s  %s%s" % (indent, width, e["cmd"], mark, e["when"])
 
 
+def _exit_name(res, lock):
+    """The name of one resource, as it has to appear in a line the reader runs.
+
+    For a `key`-bearing resource that is the instance in the way, not the
+    resource: `agentbus wait simulator` resolves to a bare `simulator` lock
+    nothing was contending for, takes it, prints "claimed" and leaves the device
+    exactly where it was. Only the runnable lines use this — the prose keeps the
+    plain name, which is what a person calls the thing and, for a
+    worktree-scoped resource, the only half of the key anyone typed.
+
+    Its own function because the block has to say it for every resource in the
+    way and not only for the first, and the lock is the evidence: `res["lock"]`
+    is what THIS caller would file it under, which for an unqualified command
+    against a bench of devices is the bare name rather than the device somebody
+    is holding."""
+    held = lock.get("resource") or res["name"]
+    return held if (res.get("key")
+                    and held.startswith(res["name"] + "@")) else res["name"]
+
+
 def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
     """The Plan for a command refused because another party holds what it needs.
 
@@ -4686,17 +4755,14 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
     reached twice, once from the optimistic check `plan_for` makes outside the
     mutex and once from `commit_plan` when `do_claim` re-tests inside the mutex
     and loses that race. Two constructors one function apart is exactly the
-    defect this refactor exists to remove."""
+    defect this refactor exists to remove.
+
+    `also` is every OTHER resource in the way, as `(resource, lock)` pairs. The
+    pairs and not the resources, because the runnable advice has to name each of
+    them the way `_exit_name` names the first — and until 2.8.0 they were carried
+    as names, appeared in one line of prose, and had no runnable line at all."""
     held = lock.get("resource") or res["name"]
-    # The name to put in a line the reader is meant to run. For a `key`-bearing
-    # resource that is the instance in the way, not the resource: `agentbus wait
-    # simulator` resolves to a bare `simulator` lock nothing was contending for,
-    # takes it, prints "claimed" and leaves the device exactly where it was.
-    # Only the runnable lines use it — the prose keeps the plain name, which is
-    # what a person calls the thing and, for a worktree-scoped resource, the
-    # only half of the key anyone typed.
-    exit_name = held if (res.get("key")
-                         and held.startswith(res["name"] + "@")) else res["name"]
+    exit_name = _exit_name(res, lock)
     # The lock's own name, not the session's: a lock taken by a subagent is held
     # by that subagent, and telling the reader to go and talk to the session
     # would point them at the wrong agent.
@@ -4704,7 +4770,7 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
     blocker = {
         "resource": res, "lock": lock, "holder": holder,
         "held": held, "exit_name": exit_name, "who": who,
-        "also": [r["name"] for r in also],
+        "also": [r["name"] for r, _ in also],
         "same_tree": (os.path.realpath(holder.get("root") or "")
                       == os.path.realpath(me.get("root") or "")),
         # Two subagents of one session. A parent and its own subagent never
@@ -4721,8 +4787,19 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
                              and not lock.get("party_known", True)
                              and (me.get("agent_id") or "")),
     }
-    wait = _exit("wait", "through", 'agentbus wait %s --why "..."' % exit_name,
-                 "queue; takes it the moment it frees")
+    # Every resource in the way, in one command. `agentbus wait` splits a comma
+    # list and keeps ONE deadline for the whole of it, which is the difference
+    # between an exit and a chore: a run wanting a device and the three services
+    # it implies was told to wait for the device, and the other three arrived as a
+    # line of prose — "Also in use: …" — with nothing to run against them. So the
+    # honest way out was four commands, four blocks and four discoveries, while
+    # `AGENTBUS_OFF=1` in front of the command was one. Over 48 hours on the live
+    # bus the guard was overridden 85 times against 6 real blocks, and every one
+    # of those overrides was a reader choosing the shorter of those two.
+    queue_for = ",".join([exit_name] + [_exit_name(r, l) for r, l in also])
+    wait = _exit("wait", "through", 'agentbus wait %s --why "..."' % queue_for,
+                 "queue; takes it the moment it frees" if not also
+                 else "queue for all %d; takes each as it frees" % (1 + len(also)))
     exits = []
     if blocker["unidentified"]:
         # `--steal` is part of this advice rather than an afterthought. Naming
@@ -4747,11 +4824,16 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
         exits.append(wait)
         exits.append(_exit("release", "through", "agentbus release --all",
                            "from whichever agent took it"))
+    if not blocker["unidentified"]:
+        # Before the two that only tell you things. Both orders in this function
+        # now put the way THROUGH the block above the ways of reading about it:
+        # `render_refusal` prints these in list order, and an agent that is
+        # already deciding between four commands and one `AGENTBUS_OFF` should
+        # not have to read past `agentbus status` to find the one that works.
+        exits.append(wait)
     exits.append(_exit("status", "ask", "agentbus status", "what is going on"))
     exits.append(_exit("ask", "ask", 'agentbus post --to %s "..."' % who,
                        "ask them"))
-    if not blocker["unidentified"]:
-        exits.append(wait)
     if cmd:
         # Only when there is a command to put it in front of. A Plan built from
         # a name rather than a command — which is what the five command-line
@@ -4936,8 +5018,10 @@ def plan_for(me, cmd=None, names=None, sessions=None, probe_services=False):
                 break
     if blocked:
         res, lock, holder = blocked[0]
+        # The resource AND the lock for each of the others: the advice has to name
+        # the instance actually in the way, and only the lock knows which it is.
         return _lock_block(me, cmd, res, lock, holder, resources,
-                           [b[0] for b in blocked[1:]])
+                           [(b[0], b[1]) for b in blocked[1:]])
     plan = _plan(cmd, resources=resources)
     if probe_services:
         plan = serving_check(plan, me)
@@ -5077,16 +5161,22 @@ def render_block(plan):
         if started.get("by"):
             lines.append("  started by: %s, %s"
                          % (started["by"], ago(started.get("started"))))
+        if b.get("also"):
+            # Said before the advice, because it is what makes the advice make
+            # sense. Without it the reader answers this block with one
+            # `agentbus serve`, runs the command again, and gets the next one.
+            lines.append("  also theirs: %s" % ", ".join(b["also"]))
         if res.get("why"):
             lines += ["", "  " + res["why"]]
         lines += [
             "",
-            "Point it at your worktree — this stops the current one and starts",
-            "yours, and tells the other sessions it moved:",
-            "  %s" % _exit_cmd(plan, "serve"),
-            "",
-            "Or run one command against your own tree and leave it there:",
+            "One step, and the shortest one: this points every service your",
+            "command needs at your worktree, takes their locks, runs your",
+            "command against your own tree and tells the other sessions:",
             "  %s" % _exit_cmd(plan, "run"),
+            "",
+            "Or move them for good, and run your command yourself afterwards:",
+            "  %s" % _exit_cmd(plan, "serve"),
         ]
         return "\n".join(lines)
 
@@ -5158,9 +5248,18 @@ def render_block(plan):
         "Do not work around this by editing the command: a different port, a",
         "direct binary path or a subshell all reach the same service.",
         "",
+        # The way through first, and on its own. It used to be the third line of
+        # a list of three, under two that change nothing — so the shortest
+        # correct route was the one a reader found last, while the bypass was in
+        # a paragraph of its own further down. That is the whole of why the guard
+        # was overridden 85 times against 6 real blocks in 48 hours.
+        "Queue for it. One command, however many of them are in the way — it",
+        "takes each as it frees, and then your own command runs:",
+        "  %s" % _exit_cmd(plan, "wait"),
+        "",
+        "Or find out more first, neither of which changes anything:",
         _exit_line(plan, "status"),
         _exit_line(plan, "ask"),
-        _exit_line(plan, "wait"),
     ]
     if res.get("hint"):
         lines += ["", "  " + res["hint"]]
@@ -8219,46 +8318,70 @@ def find_resource(me, name):
 
 
 def cli_serve(args):
-    """Point a declared service at this worktree, restarting it if it is serving
-    another one. This is the half `sim-lock.sh` had and a lock alone cannot do."""
+    """Point declared services at this worktree, restarting any that are serving
+    another one. This is the half `sim-lock.sh` had and a lock alone cannot do.
+
+    A comma list, like `claim`, `release`, `wait` and `run` — and for the reason
+    those take one: one command wanting a device and the three services it
+    implies is answered by moving three services, and being handed three separate
+    lines to run is the whole reason an agent reaches for `AGENTBUS_OFF` instead.
+    The block that advertises this line is the one that knows how many there are.
+
+    Each service is taken, moved and handed back in turn rather than all held at
+    once. A handover is not a claim: the lock is here to stop two sessions
+    restarting one service in the same second, and holding the first while the
+    third is starting would make this verb the thing other sessions queue behind."""
     me = acting(need_me(), args)
     pos = positional(args)
     if not pos:
-        print("usage: agentbus serve <resource> [--as <you>]", file=sys.stderr)
+        print("usage: agentbus serve <resource>[,<resource>] [--as <you>]",
+              file=sys.stderr)
         sys.exit(1)
-    res = find_resource(me, pos[0])
-    if not res:
-        print("no resource named '%s' in this repo's config" % pos[0], file=sys.stderr)
-        sys.exit(1)
-    if not res.get("start"):
-        print("'%s' declares no `start` command, so agent-bus cannot move it. "
-              "Add one to .claude/agent-bus.json." % pos[0], file=sys.stderr)
-        sys.exit(1)
-    # From the Plan, like every other verb: this is a service and services are
-    # not usually instance-keyed, but a `scope: "worktree"` one would have been
+    # From the Plan, like every other verb: this splits the list, and a service
+    # is not usually instance-keyed but a `scope: "worktree"` one would have been
     # claimed here under a name the guard never writes.
-    plan = plan_for(me, names=res["name"])
-    planned = plan["resources"][0]
-    ok, lock, holder, reason = do_claim(me, planned["lock"], why="handover",
-                                        mode="hard")
-    if not ok:
-        if not holder:
-            print("agent-bus: could not take '%s': %s" % (res["name"], reason),
+    plan = plan_for(me, names=pos[0])
+    if plan["reason"] == "no-such-resource":
+        print(render_block(plan), file=sys.stderr)
+        sys.exit(1)
+    # Every name resolved and checked before anything moves, for the reason
+    # `agentbus claim` refuses a list before taking any of it: half a handover
+    # leaves the reader's command answering from two checkouts at once, which is
+    # worse than not starting.
+    declared = []
+    for planned in plan["resources"]:
+        res = find_resource(me, planned["name"])
+        if not res:
+            print("no resource named '%s' in this repo's config" % planned["name"],
                   file=sys.stderr)
             sys.exit(1)
-        # The line under this used to be an `agentbus post --to <holder>` this
-        # function wrote out for itself — the only advice on the command surface
-        # that was still composed by hand rather than taken from the Plan.
-        print(render_refusal(
-            _lock_block(me, "", planned, lock, holder, plan["resources"]),
-            " — ask before moving it out from under them."), file=sys.stderr)
-        sys.exit(1)
-    good, detail = ensure_serving(me, res)
-    do_release(me, planned["lock"], quiet=True)
-    if not good:
-        print("agent-bus: %s" % detail, file=sys.stderr)
-        sys.exit(1)
-    print("'%s' %s" % (res["name"], detail))
+        if not res.get("start"):
+            print("'%s' declares no `start` command, so agent-bus cannot move it. "
+                  "Add one to .claude/agent-bus.json." % planned["name"],
+                  file=sys.stderr)
+            sys.exit(1)
+        declared.append((planned, res))
+    for planned, res in declared:
+        ok, lock, holder, reason = do_claim(me, planned["lock"], why="handover",
+                                            mode="hard")
+        if not ok:
+            if not holder:
+                print("agent-bus: could not take '%s': %s"
+                      % (planned["name"], reason), file=sys.stderr)
+                sys.exit(1)
+            # The line under this used to be an `agentbus post --to <holder>` this
+            # function wrote out for itself — the only advice on the command surface
+            # that was still composed by hand rather than taken from the Plan.
+            print(render_refusal(
+                _lock_block(me, "", planned, lock, holder, plan["resources"]),
+                " — ask before moving it out from under them."), file=sys.stderr)
+            sys.exit(1)
+        good, detail = ensure_serving(me, res)
+        do_release(me, planned["lock"], quiet=True)
+        if not good:
+            print("agent-bus: %s" % detail, file=sys.stderr)
+            sys.exit(1)
+        print("'%s' %s" % (planned["name"], detail))
 
 
 def cli_serves(_args):
