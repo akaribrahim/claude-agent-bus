@@ -560,6 +560,15 @@ what it is about to spend and stops unless you add `--yes`.
   resource nobody guards, and a pattern that stops matching fails silently.
   `agentbus doctor` reports resources that have never matched, which is the only
   way to notice.
+- **`AGENTBUS_OFF=1` really does switch everything off, and one of them answers
+  back.** Any command can step over any guard with it, and that stays — for a
+  lock it is sometimes exactly right, because a `psql` aimed at a staging box in
+  another country only looks like the one this machine shares. For the wrong-port
+  check it never is: your own port exists. So that one bypass goes into the other
+  sessions' context rather than only into the log, naming the port, whose checkout
+  it serves and the command that was skipped — once per party and port, counted
+  after that, so a run of one mistake costs its readers one message. What that
+  buys is that nobody finds out afterwards. It does not stop anybody.
 - **The task ledger is only as good as the habit.** Everything derivable is
   derived precisely because agents forget, but the two lines that are typed can
   still go untyped — and then the board says nothing was taken. What it will not

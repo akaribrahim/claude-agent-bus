@@ -2,6 +2,57 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.10.0 — 2026-08-09
+
+**Switching off the wrong-port guard now tells the other sessions.** It was the
+one refusal in here whose cost lands on somebody else, and the only one nobody
+else could see being stepped over.
+
+What happened. A subagent working in a linked worktree ran `curl
+http://localhost:<the original checkout's port>/…` 28 times in 24 hours — 25
+requests and 6 readiness loops — each with `AGENTBUS_OFF=1` in front of it. That
+repository has `"ports": "per-worktree"`, so the worktree had a port of its own
+the whole time; the number had been copied from somewhere and the guard was
+switched off rather than asked. Every one of those 28 answers came from another
+checkout's code and was reported as its own, which is the exact silently-wrong
+result per-worktree ports exist to remove. The guard caught it 28 times. Four
+ordinary blocks about the same port went past in the same window, so the
+correction was being printed and not read.
+
+`AGENTBUS_OFF` in front of a **lock** stays exactly as it was, wording and volume
+both: there is a real case for it — you accept the contention risk, or the `psql`
+the pattern matched is aimed at a staging box in another country. In front of the
+**wrong-port** check there is no such case. Your own port exists, and the answer
+you get from another checkout's is not about your tree however the config is
+written. So that one bypass is now announced instead of only logged: it reaches
+every session in the repository, in their own context, saying which port was
+taken, whose checkout that port serves, which checkout the command ran in, which
+port that checkout has of its own, that whatever answered is being reported as
+the bypasser's own — and the one command that was skipped. Every word of it is
+the block's own text read out in the third person, so the two cannot come to
+disagree about the same command.
+
+**Bounded, because loud and repeated is how the last one got lost.** 2.3.0 removed
+a wall of bypass announcements after measuring that 76 of 88 were about nothing
+and were hiding the twelve that were not; 28 identical sentences would put it
+straight back. The first bypass of a port by a party is delivered in full; the
+ones behind it are counted, stay out of everybody's context, and the next one
+after six hours says how many it is standing for. Measured on the run that
+prompted this: 28 bypasses used to produce **28 lines in the log and nothing in
+anybody's context**, and now produce **one message and 28 lines**. A different
+port, or a different agent, is loud again immediately.
+
+Also fixed by the same change: a bypass aimed at **another worktree's allocated**
+port used to leave nothing behind at all. That number is in no pattern of the
+checkout the command ran in, so the opted-out path matched no resource and did not
+even write a line — the one case of this that was completely invisible is now the
+same announcement as the rest.
+
+On the board a wrong-port bypass is its own kind of row: a red rule down its
+inside edge, and `wrong-port ×7` where a run has been folded into a count, so
+twenty-seven repeats read as one shape instead of twenty-seven fresh refusals.
+The layout is unchanged.
+
 ## 2.9.2 — 2026-08-08
 
 **Nothing on a strip is drawn with a line through it any more.** A checkout's

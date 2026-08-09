@@ -106,6 +106,12 @@ SEQFILE = os.path.join(BUS, "events.seq")
 LIVEFILE = os.path.join(BUS, "live-count")
 TOKENFILE = os.path.join(BUS, "guard-tokens")
 PORTS = os.path.join(BUS, "ports.json")
+# Which party has already been told about which port, so that a run of the same
+# bypass costs its readers one message. One file rather than a directory: it is
+# read and rewritten whole under a mutex on a path nothing takes twice a second,
+# and a new directory would have to be threaded through `ensure_dirs`, whose "the
+# one created LAST" contract is easy to break from here for no gain.
+ASTRAY = os.path.join(BUS, "astray.json")
 
 STALE_BEAT = 45 * 60      # no heartbeat this long and no pid: the session is gone
 ABANDONED_BEAT = 3 * 3600  # this long without a heartbeat retires it either way
@@ -115,6 +121,13 @@ HARD_TTL = 45 * 60        # explicitly claimed lock
 COLLIDE_WINDOW = 15 * 60  # two sessions editing one file inside this window collide
 MAX_DELIVER = 12          # events shown at once; the rest are summarised
 ROTATE_AT = 5000          # events.jsonl lines before trimming
+# How long one wrong-port announcement stands for, and — the same number, doing
+# the same job from the other end — how quiet a party has to go before the next
+# one counts as new rather than as more of the same. Measured: 28 bypasses of one
+# port in 24 hours would be 28 identical sentences in everybody's context at one
+# per bypass, and four at one per six hours, each of the last three carrying how
+# many it is standing for. See `astray_again`.
+ASTRAY_AGAIN = 6 * 3600
 # Which revision of `git_facts` produced a record's repo_key. Bumped when the
 # derivation changes its answer for the same directory, which is the signal
 # `heal_derived` needs to re-derive a key written by a version that got it wrong.
@@ -1898,7 +1911,17 @@ def rotate_events():
 # itself, and the whole reason for writing it is that another chat should not
 # start the same work or should learn that what it was waiting for has landed.
 # Two lines per piece of work is what the roster costs today for one.
-DELIVERED_KINDS = {"note", "serve", "handoff", "task"}
+#
+# `wrong-port` is the one piece of machinery in here, and it is delivered because
+# of who the consequence belongs to. Every other refusal costs the session that
+# was refused: it is stopped, it reads the message, it is the only one who needs
+# to. A wrong-port guard that was switched off costs everybody else — the
+# checkout whose service now has another tree's requests in its log, and whoever
+# later reads a conclusion that was measured against code its author was not
+# looking at. Telling only the party that already decided to step over it is
+# telling the one person the news is not for. Bounded per party and per port by
+# `astray_again`, or a run of one mistake would be the noise 2.3.0 removed.
+DELIVERED_KINDS = {"note", "serve", "handoff", "task", "wrong-port"}
 
 
 def interesting_to(rec, me):
@@ -1922,6 +1945,12 @@ def interesting_to(rec, me):
         return False
     if rec.get("to"):
         return rec["to"] == me.get("agent")
+    # An event that says it is another of something already said. It is in the log,
+    # where a watcher counting a run wants it, and out of everybody's context,
+    # where the twenty-seventh copy of one sentence is worth less than nothing.
+    # Only `astray_again` marks one, and only after the first has been delivered.
+    if rec.get("again"):
+        return False
     if rec.get("kind") not in DELIVERED_KINDS:
         return False
     if rec.get("scope") == "machine":
@@ -5177,7 +5206,21 @@ def plan_for(me, cmd=None, names=None, sessions=None, probe_services=False):
         cfg = repo_config(me.get("repo_key", ""), me.get("root"))
         over = [h["name"] for h in resources_for(cmd, cfg)
                 if not h.get("_passthrough")]
-        return _plan(cmd, "allow", "opted-out", blocker={"overrode": over})
+        # And what the wrong-port check WOULD have said, because that is the one
+        # decision here with nothing on the other side of it: a lock bypass is a
+        # risk somebody accepted, while your own port exists and another
+        # checkout's answer is not about your tree however the config is written.
+        # Asked here rather than after the opt-out so that the answer is the same
+        # object the block would have carried — same facts, same exits, one
+        # wording — and asked at all because two of the three things it catches
+        # match no pattern in this checkout and so are not in `over` either: an
+        # override aimed at another worktree's allocated port went past this guard
+        # leaving nothing behind it at all, not even a line in the log.
+        wrong = wrong_port_check(
+            me, cfg, cmd,
+            sessions if sessions is not None else load_sessions())
+        return _plan(cmd, "allow", "opted-out",
+                     blocker={"overrode": over, "wrong": wrong})
     cfg = repo_config(me.get("repo_key", ""), me.get("root"))
     sessions = sessions if sessions is not None else load_sessions()
     if names is None:
@@ -5275,6 +5318,146 @@ def commit_plan(plan, me, sessions, tool_use_id=None):
     return plan
 
 
+def wrong_port_said(plan, whose="you"):
+    """What a wrong-port decision has to say, once, for either of the two
+    audiences it has.
+
+    The session that was stopped reads it in a block. The sessions a bypass of
+    that block lands on read it in their own context, and they need the same
+    facts: which port it was, whose checkout that port serves, which checkout the
+    command ran in, which port is that checkout's own, and what an answer from
+    the wrong one is worth. Written twice they drift the first time a port is
+    renamed — the block saying one thing about a command and the announcement
+    another — and a second copy of one explanation is the defect class
+    `plans/two-spines-refactor.md` spent a milestone collapsing.
+
+    `whose` is the whole difference between the two, and both persons are written
+    here side by side so that changing one is done in front of the other. The
+    runnable line is not here at all: it comes out of `plan["exits"]` for both,
+    like every other command this plugin prints.
+
+    Returns (facts, worth): the labelled lines, and what an answer from that port
+    is worth to whoever ends up reading it."""
+    b = plan.get("blocker") or {}
+    res = b.get("resource") or {}
+    port, name = b.get("port") or 0, res.get("name", "?")
+    if whose == "you":
+        return ([
+            "  :%d belongs to : %s" % (port, b.get("whose", "?")),
+            "  you are in    : %s" % short_path(b.get("mine") or ""),
+            "  yours is      : %d" % res.get("port", 0),
+        ], [
+            "  Each checkout runs its own '%s' so that a request answers with "
+            "the code you" % name,
+            "  are looking at. Reaching another one gives you a green result "
+            "for somebody",
+            "  else's tree — the exact failure per-worktree ports exist to "
+            "remove.",
+        ])
+    return ([
+        "  :%d belongs to : %s" % (port, b.get("whose", "?")),
+        "  they are in   : %s" % short_path(b.get("mine") or ""),
+        "  theirs is     : %d" % res.get("port", 0),
+    ], [
+        "  Whatever :%d answered came from that checkout's '%s', and it is "
+        "being reported as theirs." % (port, name),
+    ])
+
+
+def astray_again(me, port):
+    """Whether this bypass of the wrong-port guard is the one that speaks, and
+    how many it is speaking for. Writes; not for `plan_for`.
+
+    Returns (n, said_at, speak). Speaking, `n` is how many were swallowed since
+    the last announcement and `said_at` when that was, so the message can say
+    what it is standing for. Not speaking, `n` is which one of the run this is —
+    the count a watcher reads off the board — and nothing is delivered.
+
+    Bounded per party and per port because both halves were measured. Unbounded,
+    one subagent going past this guard 28 times at one port in a day is 28
+    identical sentences in everybody's context, which is exactly the noise 2.3.0
+    removed: of 88 bypass announcements over 48 hours, 76 were about nothing, and
+    they were hiding the twelve that were not. Making this one loud must not undo
+    that. Silent for ever after the first, though, and a party that goes on doing
+    it all day is mentioned once and then never again — which is how the last
+    quiet failure stayed quiet. So neither: the first is delivered in full, the
+    ones behind it are counted and stay out of context, and once the window is up
+    the next one is delivered saying how many there were.
+
+    Per party and per port, and deliberately not per command: the 28 were 25
+    `curl`s and 6 readiness loops, which is one mistake written six ways. Keying
+    on the command line would have made it six announcements, and a `while` loop
+    around it any number at all."""
+    key = "%s\0%d" % (party_key(me), port)
+    with Mutex("astray"):
+        reg = read_json(ASTRAY) or {}
+        rec = reg.get(key) or {}
+        # A pair nobody has been past for a whole window is a run that ended, and
+        # a record older than that changes no decision here — which is also why
+        # pruning needs no policy of its own below. An agent coming back to it
+        # tomorrow is not the agent that was told this morning, so it is a first
+        # one again, and loud.
+        live = now() - (rec.get("last") or 0) <= ASTRAY_AGAIN
+        said_at = rec.get("at", 0) if live else 0
+        swallowed = rec.get("n", 0) if live else 0
+        speak = now() - said_at > ASTRAY_AGAIN
+        reg[key] = {"at": now() if speak else said_at, "last": now(),
+                    "n": 0 if speak else swallowed + 1,
+                    "port": port, "repo": me.get("repo_key", "")}
+        for stale in [k for k, v in reg.items()
+                      if now() - (v.get("last") or 0) > ASTRAY_AGAIN]:
+            del reg[stale]
+        write_json(ASTRAY, reg)
+    if speak:
+        return swallowed, said_at, True
+    # This one, the ones swallowed before it, and the announcement that opened the
+    # run: "×3" on the board is the third time, not the third one nobody saw.
+    return swallowed + 2, said_at, False
+
+
+def note_astray(me, plan):
+    """A bypass of the wrong-port guard, put where the people it lands on read it.
+
+    The one override this plugin answers for. `AGENTBUS_OFF` in front of a lock
+    is a real escape — "I accept the contention risk", "this `psql` is aimed at a
+    staging box in another country" — and it stays exactly as it is. In front of
+    the wrong-port check there is no such case: your own port exists, and the
+    answer you get from another checkout's is not about your tree however the
+    config is written. So this one is announced rather than merely logged, and
+    every word of it is the block's own, read out in the third person.
+
+    Sent to the repository rather than to the port's owner alone. The owner is
+    the party whose service is being hit, but they may be nobody — the original
+    checkout often has no session in it — and the second consequence has no
+    owner at all: anybody who reads this agent's conclusions later is reading
+    another tree's results. `emit` addressed to one agent would reach one reader
+    and by design nobody else."""
+    b = plan.get("blocker") or {}
+    port = b.get("port") or 0
+    n, said_at, speak = astray_again(me, port)
+    head = ("went past the wrong-port guard on :%d with AGENTBUS_OFF — %s"
+            % (port, plan["cmd"].strip()[:120]))
+    if not speak:
+        # Short, and marked. It is in the log for whoever is counting the run and
+        # out of everybody's context; see `interesting_to`.
+        return emit(me.get("sid"), me.get("agent"), me.get("repo_key"),
+                    "wrong-port", head, extra={"again": n, "port": port})
+    facts, worth = wrong_port_said(plan, "they")
+    lines = [head] + facts + worth
+    # The correction that was skipped, in the words the block offered it in —
+    # `plan["exits"]` is where every runnable line in this plugin comes from, and
+    # an announcement that composed its own would be advertising a command
+    # nothing had checked.
+    if _exit_cmd(plan, "env"):
+        lines.append("  Skipped: %-22s  # %s" % (_exit_cmd(plan, "env"),
+                                                 _exit_when(plan, "env")))
+    if n:
+        lines.append("  And %d more of these since %s, not repeated."
+                     % (n, ago(said_at)))
+    return emit(me.get("sid"), me.get("agent"), me.get("repo_key"),
+                "wrong-port", "\n".join(lines), extra={"port": port})
+
+
 def note_plan_block(me, plan):
     """Put this Plan's refusal on the bus.
 
@@ -5321,21 +5504,17 @@ def render_block(plan):
         ])
 
     if reason == "wrong-port":
-        res = b["resource"]
+        # The facts and what they are worth come from `wrong_port_said`, which is
+        # also what the announcement reads out when somebody switches this block
+        # off — one wording, two audiences.
+        facts, worth = wrong_port_said(plan)
         return "\n".join([
             'agent-bus: BLOCKED. This command is aimed at :%d, which is not '
             'this checkout\'s.' % b["port"],
             "",
-            "  :%d belongs to : %s" % (b["port"], b["whose"]),
-            "  you are in    : %s" % short_path(b["mine"]),
-            "  yours is      : %d" % res.get("port", 0),
+        ] + facts + [
             "",
-            "  Each checkout runs its own '%s' so that a request answers "
-            "with the code you" % res["name"],
-            "  are looking at. Reaching another one gives you a green "
-            "result for somebody",
-            "  else's tree — the exact failure per-worktree ports exist to "
-            "remove.",
+        ] + worth + [
             "",
             "Use yours:",
             _exit_line(plan, "env", width=26, mark="# "),
@@ -5535,8 +5714,18 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
         # was stepped over, so a reader can tell the six maestro runs from the
         # eighty `sleep 30`s. An opt-out that overrode nothing is not a step over
         # the guard at all; see `plan_for`.
-        over = (plan.get("blocker") or {}).get("overrode") or []
-        if over:
+        #
+        # The wrong-port one first, and instead of the ordinary line rather than
+        # beside it — the same precedence `plan_for` gives the two when it is
+        # allowed to decide, and for the same reason: "ran past the guard on
+        # 'api'" is a weaker statement of the same event, and printing both would
+        # put two lines in the feed for one command. Announced rather than logged
+        # because the cost of this one lands on other people; see `note_astray`.
+        b = plan.get("blocker") or {}
+        over = b.get("overrode") or []
+        if b.get("wrong"):
+            note_astray(me, b["wrong"])
+        elif over:
             emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
                  "ran past the guard on %s with AGENTBUS_OFF — %s"
                  % (", ".join("'%s'" % n for n in over), cmd.strip()[:120]))
@@ -6510,6 +6699,15 @@ tr.pair td{padding:6px 13px;color:var(--dim);font-size:12px}
 .k-handoff .who{color:var(--violet)} .k-note .who{color:var(--accent)}
 .k-task .who{color:var(--green)}
 .k-lock .who,.k-join .who,.k-leave .who{color:var(--dim)}
+/* A guard that was switched off rather than answered, and the only one of those
+   with nobody on the other side of it: the checkout that owns the port did not
+   agree to this and is not the one that gets the wrong answer. It keeps the red
+   a block is written in — it IS a block — and carries a rule down its inside
+   edge so that a run of them reads as one shape in the feed instead of as more
+   block lines. `inset` and not `border-left`: a border would move every cell in
+   these rows three pixels right and in no other row. */
+.k-wrong-port .who{color:var(--red)}
+.k-wrong-port{box-shadow:inset 3px 0 0 var(--red)}
 .since{display:flex;align-items:center;gap:10px;cursor:pointer;padding:5px 13px;
  color:var(--accent);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
  border-bottom:1px solid var(--line)}
@@ -7197,7 +7395,11 @@ function makeEv(it){var d = el("div", "ev k-" + it.e.kind), c = {};
 function fillEv(d, it, made){var e = it.e, c = d.c;
  put(c.t, clock(e.ts));
  put(c.name, e.agent + (e.to ? " → " + e.to : ""));
- put(c.kind, e.kind);
+ /* The kind, and for one that repeats, which of the run this is. A wrong-port
+    bypass is announced once and counted after that, so the twenty-seventh line
+    carries no sentence of its own — the number is the only thing on it that is
+    new, and without it the row is indistinguishable from the first. */
+ put(c.kind, e.again > 1 ? e.kind + " ×" + e.again : e.kind);
  put(c.txt, e.text);
  /* Only measurable once it is in the document, and an event's text never
     changes afterwards, so this is asked once per event and not once per poll. */
@@ -8605,6 +8807,11 @@ def board_state(limit=60):
         out["events"].append({      # the unread counts; the feed keeps its tail
             "i": r.get("i"), "ts": r.get("ts"), "agent": r.get("agent"),
             "to": r.get("to") or "", "kind": r.get("kind"),
+            # Which one of a run this is. A wrong-port bypass says it out loud
+            # once and is counted after that, so without the number a run of 28
+            # is 27 rows that each look like the first — and the board is the one
+            # place where seeing the run is the point.
+            "again": r.get("again") or 0,
             "repo": r.get("repo", ""), "text": r.get("text", "")})
     out["events"].reverse()   # newest first: that is what a watcher looks at
     # The filter lists places there is something to watch. A repository that

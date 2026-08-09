@@ -82,6 +82,12 @@ which is recorded on the bus, so use it when it is true and not to jump a queue.
 Tell the human as well: an `unless` pattern on the resource stops it matching
 next time.
 
+**One block it is never true of: the wrong port.** Your own port exists, so
+"I really did mean another checkout's" is not a thing anybody means — and
+stepping over that one is announced to the other sessions in the repository,
+naming the port, the checkout it belongs to and the command you skipped. Ask for
+yours instead; it is one line, and it is in the block.
+
 The three commands a block tells you to run — `agentbus wait`, `agentbus
 release`, and `agentbus claim … --steal` — are never themselves blocked. They
 exist to act on a lock somebody else is holding, so the way out of a block
@@ -111,6 +117,17 @@ own. Reaching for somebody else's is blocked, because a request to their port
 answers with their code and reports it as yours — which is the failure this
 whole plugin exists to prevent, and the one thing isolation cannot prevent by
 itself.
+
+`AGENTBUS_OFF=1` still runs it, and this is the one block where taking that is
+**announced to the others** rather than only logged: the cost is not yours. The
+checkout you reached now has your requests in its service, and anyone who reads
+what you concluded is reading another tree's results. The message names the port,
+whose checkout it is, and the one command you skipped. A run of them is announced
+once and counted after that, so nobody gets the same sentence twenty-eight
+times — but the first one is loud, and it has your name on it.
+
+Subagents especially: you start at the end of a flow, so you have not seen the
+corrections your parent was given. Ask for the number instead of copying one.
 
 ## Running things
 
@@ -374,3 +391,10 @@ last one on the machine hands over nothing. Both would be noise.
 `AGENTBUS_OFF=1` in front of a command skips every check for that command. Use
 it when the bus is wrong, and say so with `agentbus post` — the other agents are
 relying on what it reports.
+
+It is an escape from a **lock**, where there is a real case for it: you accept
+the contention risk, or the command only looks like it touches the thing. There
+is no such case for the **wrong-port** check, so that one bypass answers for
+itself — it goes into the other sessions' context, not just the log, saying which
+port you took, whose checkout it serves, and that whatever it answered is being
+reported as yours. Repeating it does not repeat the message; it counts.
