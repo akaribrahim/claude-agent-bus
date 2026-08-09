@@ -2,6 +2,56 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.11.0 — 2026-08-10
+
+**Three facts a joining session was left to work out, and one it was told
+wrongly.** Everything here is situational — a number, a name, a state — and
+nothing here is a new rule. Measured by serving the 2.10.0 briefing to a session
+opening in a worktree of a repository whose `api` resource declares `"ports":
+"per-worktree"`: neither that session's own port nor the original checkout's
+appeared anywhere in what it was told — no port and no `env` at all — and the one
+thing it was told about `api` was `Free: api`, while nothing was serving it.
+
+**Your own ports, before the first command.** A session in a checkout that is not
+the one the config names is now told, at start, which port each per-worktree
+resource has here and that the number in the config belongs to the original
+checkout — plus `eval "$(agentbus env)"` for the whole set. 2.10.0 already blocked
+a request to somebody else's port and announced the bypass; the trouble is that a
+block is the wrong place to first learn your own address. By then the command
+exists, and the cheapest way past a refusal is to switch the guard off — which is
+exactly what happened, 28 times against one port, because the config said that
+number and nothing had said otherwise. The original checkout keeps the declared
+port and is told nothing, because there is nothing there it does not know.
+
+**"Free" and "not running" are two different answers.** They were given as one.
+A declared service that nothing is serving is now named on its own line with the
+port it is not answering on, and `agentbus serve` for the ones that can be
+started — one command for all of them, not a line each. A session told only
+`Free: api` calls it and spends turns on a connection refused, or reaches for the
+port in the config instead, which in a worktree belongs to another checkout and
+answers. `serving` already knew which of the two it was and the answer was being
+thrown away, so this costs no extra probe.
+
+**Who is standing in your checkout.** Sessions and subagents sharing this exact
+working copy are now named as such, rather than left as a path in the roster for
+you to compare against your own. Separate checkouts is the assumption the whole
+plugin rests on and inside one checkout it is simply false: same files, same
+index, and nothing for a guard to refuse, because somebody halfway through an
+edit is holding no lock. One `git add -A` puts their half-written work in your
+commit.
+
+**One line removed.** The briefing used to explain why `agentbus take` and
+`agentbus done` exist — "so the others can see what is taken and what they are
+waiting for without being asked". The verbs stay; the justification is gone. It
+carried no fact, and since 2.9.0 it is not even true: what each party last did is
+derived from the tool calls the hooks already see.
+
+A session that is alone on the machine is still told nothing at all, and a
+repository with no config is unchanged apart from the shared-checkout line, which
+is about git rather than about resources. The whole addition costs under half a
+millisecond at session start, against roughly 135 ms the briefing already spent
+asking the platform who is listening on a port.
+
 ## 2.10.0 — 2026-08-09
 
 **Switching off the wrong-port guard now tells the other sessions.** It was the

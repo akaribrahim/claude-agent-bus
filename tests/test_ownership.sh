@@ -165,6 +165,53 @@ out=$(ab_hook session-start "$(payload session sid=sess-b "cwd=$REPO")")
 assert_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
   "owns: api/**" "a session starting up is told what is spoken for"
 
+# ---- and who is standing in the same checkout it is ------------------------
+#
+# Everything else in this plugin assumes separate checkouts, and inside one
+# checkout the assumption is simply false: same files, same index, and no lock
+# held while somebody is halfway through an edit — so there is nothing for a
+# guard to refuse. One `git add -A` commits a neighbour's half-written work under
+# your message.
+#
+# The roster already prints everybody's path, so this is a comparison an agent
+# COULD make. Nothing else in the briefing suggests those paths are worth
+# comparing, which is why it does not make it.
+
+brief() {   # <sid> <cwd> → the whole text injected at that session's start
+  json_field "$(ab_hook session-start "$(payload session "sid=$1" "cwd=$2")")" \
+    hookSpecificOutput additionalContext
+}
+C=$(ab sess-c name)
+# The line itself, not the whole briefing: the roster names every session on the
+# repository, so a check over the whole text would be satisfied by the roster row
+# and would measure nothing.
+twins() { printf '%s\n' "$1" | grep '^In YOUR checkout too:'; }
+
+out=$(brief sess-b "$REPO")
+assert_contains "$out" "In YOUR checkout too: $A" \
+  "a session is told who is standing in its own working copy"
+assert_contains "$out" "git add -A" "and what that costs, since no block says it"
+assert_not_contains "$(twins "$out")" "$C" \
+  "and the session in another checkout of the same repo is not one of them"
+
+# The other checkout has nobody in it but itself, and is told so by omission —
+# a line naming nobody is a line paid for by every session that opens alone in
+# its own worktree, which is the ordinary case this plugin is built around.
+assert_not_contains "$(brief sess-c "$WT2")" "In YOUR checkout too" \
+  "a session alone in its worktree is told nothing about sharing it"
+
+# A subagent counts. It is a separate party with its own recorded tree, so one
+# working in this checkout is exactly as able to sweep the index as its parent —
+# and its parent's own row in the roster points somewhere else entirely.
+ab_hook subagent-start "$(payload subagent-start sid=sess-c "cwd=$REPO" \
+  agent_id=sub-here agent_type=general-purpose)" > /dev/null
+assert_equal "$REPO" "$(agent_field sess-c sub-here root)" \
+  "a subagent of the other checkout is working in this one"
+assert_contains "$(brief sess-b "$REPO")" "In YOUR checkout too: $A, $C/1" \
+  "and it is named alongside the sessions, not left out of the comparison"
+ab_hook subagent-stop "$(payload subagent-stop sid=sess-c "cwd=$REPO" \
+  agent_id=sub-here)" > /dev/null
+
 # ---- disown gives it back ---------------------------------------------------
 
 out=$(ab sess-a disown "api/**")

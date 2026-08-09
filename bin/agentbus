@@ -3840,6 +3840,21 @@ def resources_for(cmd, cfg):
 
 # ------------------------------------------------------------ formatting ----
 
+def in_my_tree(me, root):
+    """Is that party standing in the very same working copy as this one?
+
+    Not the same repository — the same directory. Both are resolved, because one
+    side may have arrived through a symlink (`/tmp` is one on macOS) and two
+    spellings of one checkout would otherwise read as two checkouts.
+
+    An empty root is never a match. A session outside any repository has none,
+    and `realpath("")` is the process's cwd, which would make two of them twins
+    of each other and of whatever directory the hook happened to run in."""
+    if not root or not me.get("root"):
+        return False
+    return os.path.realpath(root) == os.path.realpath(me["root"])
+
+
 def roster_text(me, sessions):
     same, other = [], []
     for s in sessions:
@@ -3849,6 +3864,7 @@ def roster_text(me, sessions):
     lines = []
     if same:
         lines.append("Other sessions on this repo (%d):" % len(same))
+        twins = []
         for s in same:
             idle = "" if now() - s.get("beat", 0) < IDLE_SECS else "  [idle]"
             lines.append("  - %s  %s  %s  (last seen %s)%s" % (
@@ -3856,13 +3872,29 @@ def roster_text(me, sessions):
                 ago(s.get("beat")), idle))
             if s.get("doing"):
                 lines.append("      doing: %s" % s["doing"])
+            if in_my_tree(me, s.get("root")):
+                twins.append(s.get("agent"))
             for a in load_agents(s["sid"]):
                 lines.append("      · %s  (%s, %s)" % (
                     a.get("name"), a.get("agent_type"),
                     short_path(a.get("root", ""))))
+                if in_my_tree(me, a.get("root")):
+                    twins.append(a.get("name"))
             owned = owns_summary(s["sid"])
             if owned:
                 lines.append("      owns: %s" % owned)
+        if twins:
+            # The roster prints everybody's path, so this is a string comparison
+            # an agent COULD make — and one it should not have to, because
+            # nothing else in the briefing suggests the paths are worth
+            # comparing. This is the one collision the separate-checkouts
+            # assumption does not cover: same files, same index, no lock held
+            # while somebody is halfway through an edit, and so nothing for a
+            # guard to refuse.
+            lines.append("In YOUR checkout too: %s — same files, same index, so "
+                         "a `git add -A`, `git stash` or `git checkout` of yours "
+                         "takes their half-written work with it."
+                         % ", ".join(t for t in twins if t))
     if other:
         labels = sorted({s.get("repo_label", "?") for s in other})
         lines.append("Elsewhere on this machine: %d session%s (%s)." % (
@@ -3887,7 +3919,7 @@ def locks_text(me, sessions, with_serving=True):
     if not resources:
         return ""
     mine = os.path.realpath(me.get("root") or "")
-    held, free, serves = [], [], []
+    held, free, serves, down = [], [], [], []
     for res in resources:
         shown = []
         for lock in contending_locks(me, res, lock_name(me, res)):
@@ -3906,14 +3938,24 @@ def locks_text(me, sessions, with_serving=True):
                 name, lock.get("agent"), yours,
                 held_for(lock.get("acquired_at")),
                 (', "%s"' % lock["why"]) if lock.get("why") else ""))
-        if shown:
-            held.extend(shown)
-        else:
-            free.append(res["name"])
+        # Asked once and used twice. `serving` shells out to `lsof`, so the
+        # free/not-running reckoning and the running-services list below read one
+        # probe between them rather than one each.
+        root, how = None, ""
         if with_serving and (res.get("port") or res.get("start")):
             root, how = serving(me.get("repo_key"), res)
-            if how == "down":
-                continue
+        if shown:
+            held.extend(shown)
+        elif how == "down":
+            # "Free" and "not running" are two different answers and this line
+            # used to give the first for both. A session told `Free: api` calls
+            # it, gets a connection refused, and spends turns deciding whose
+            # fault that is; or it reaches for the port in the config instead,
+            # which in a worktree belongs to another checkout and answers.
+            down.append(res)
+        else:
+            free.append(res["name"])
+        if how and how != "down":
             if root and os.path.realpath(root) == mine:
                 serves.append("  - %s serves YOUR worktree" % res["name"])
             elif root:
@@ -3928,10 +3970,72 @@ def locks_text(me, sessions, with_serving=True):
         out.extend(held)
     if free:
         out.append("Free: %s" % ", ".join(free))
+    if down:
+        out.append(down_text(down))
     if serves:
         out.append("Running services:")
         out.extend(serves)
     return "\n".join(out)
+
+
+def down_text(down):
+    """One line for the declared services that nothing is running.
+
+    Named with the port each one is not answering on, because that is the number
+    the reader is about to type and in a worktree it is not the number in the
+    config. `agentbus serve` is offered only for the ones it can actually
+    start — for a resource with no `start` command it returns success and does
+    nothing, and advertising an exit that quietly no-ops is worse than
+    advertising none."""
+    named = ", ".join("%s%s" % (r["name"], (" (:%d)" % r["port"]) if r.get("port")
+                                else "") for r in down)
+    startable = [r["name"] for r in down if r.get("start")]
+    line = ("Declared but NOT running: %s. Nothing is up there, so a call is "
+            "refused rather than answered by the wrong checkout." % named)
+    if startable:
+        line += " `agentbus serve %s` starts %s from yours." % (
+            ",".join(startable), "it" if len(startable) == 1 else "them")
+    return line
+
+
+def ports_text(me):
+    """The ports THIS checkout answers on, when they are not the declared ones.
+
+    The one fact a session in a worktree cannot work out and will get wrong by
+    default. The config, the README, the Makefile and every note in the
+    repository name the original checkout's port; a session that reads any of
+    them curls a service belonging to another tree, gets a perfectly good
+    answer, and reports it as its own. Measured on the live bus: a subagent in
+    exactly that position called the declared port 28 times, with `AGENTBUS_OFF`
+    in front of each one, because that was the number in the config and nothing
+    had told it otherwise.
+
+    The guard does catch it — that is what those 28 refusals were — which is the
+    point. A block is the wrong place to first learn your own address: by then
+    the command exists, and the cheapest way past a refusal is to switch the
+    guard off. This is the same sentence the block prints, moved to before there
+    is anything to refuse.
+
+    Costs nothing: `apply_ports` resolved these when `repo_config` was read, so
+    this compares two integers per resource and probes nothing. The original
+    checkout keeps the declared port and therefore gets no line at all."""
+    cfg = repo_config(me.get("repo_key", ""), me.get("root"))
+    rows = []
+    for res in cfg.get("resources", []):
+        if res.get("ports") != "per-worktree":
+            continue
+        port, declared = res.get("port"), res.get("_declared_port")
+        if not port or port == declared:
+            continue
+        rows.append("  - %s is on :%d here%s" % (
+            res["name"], port,
+            (" — the :%d in the config is the original checkout's" % declared)
+            if declared else ", allocated to this checkout"))
+    if not rows:
+        return ""
+    return ("Your own ports, because this checkout is not the one the config "
+            "names — `eval \"$(agentbus env)\"` exports the set:\n"
+            + "\n".join(rows))
 
 
 def short_path(p):
@@ -3973,9 +4077,14 @@ RULES = (
     "`agentbus serve <res>` to point a service at your worktree, "
     "`agentbus run <res> -- <cmd>` to do that and run one command, "
     "`agentbus post \"...\"` to tell the others something they cannot see, "
-    "`agentbus take \"...\"` when you start a piece of work and `agentbus done` "
-    "when it lands, so the others can see what is taken and what they are "
-    "waiting for without being asked. "
+    # The clause that used to justify these two — "so the others can see what is
+    # taken and what they are waiting for without being asked" — is gone. It
+    # carried no fact, and since 2.9.0 it is not even true: what each party last
+    # did is derived from the tool calls the hooks already see, and shown without
+    # anybody writing it down. Whatever moves `take` from one agent in six to
+    # more, it is not a sentence explaining why it exists.
+    "`agentbus take \"...\"` when you start a piece of work, `agentbus done` "
+    "when it lands. "
     "If you are working in a checkout other than the one this chat opened in, "
     "run `agentbus here` from it once — otherwise the others are told you are "
     "somewhere you are not, and the guards judge you there."
@@ -4240,6 +4349,10 @@ def hook_session_start(payload):
     r = roster_text(rec, sessions)
     if r:
         blocks.append(r)
+    # Before the resources, because it says which number their names mean.
+    pt = ports_text(rec)
+    if pt:
+        blocks.append(pt)
     lk = locks_text(rec, sessions)
     if lk:
         blocks.append(lk)

@@ -21,8 +21,10 @@ than one you remember, and use `agentbus whois` if you are unsure.
 
 ## What happens without you doing anything
 
-- At session start you were told who else is live, where, what is held, and which
-  checkout each running service is answering for.
+- At session start you were told who else is live, where, what is held, which
+  checkout each running service is answering for, which declared services are not
+  running at all, the ports this checkout has of its own, and who else is standing
+  in it.
 - Messages from other sessions arrive in your context at the start of each turn
   and after each batch of tool calls.
 - A Bash command that touches a declared shared resource takes it **for the
@@ -106,8 +108,10 @@ you left and will refuse you services you started yourself.
 ## Ports, when the repository gives you your own
 
 If a resource declares `"ports": "per-worktree"`, every checkout runs its own
-copy on its own port instead of taking turns on one. Ask for yours rather than
-copying a number out of a README:
+copy on its own port instead of taking turns on one. When this checkout's ports
+are not the ones the config names, you were given the numbers at session start,
+before any command existed to be blocked. Ask again rather than copying a number
+out of a README:
 
     eval "$(agentbus env)"        # exports every declared port for this checkout
     agentbus port api             # just the number
@@ -288,7 +292,11 @@ for any other block: ask them, then take the file explicitly once they agree.
 The same checkout also shares a working tree and a git index. `git checkout`,
 `stash`, `reset`, `add`, `commit` and package installs are serialised against
 other sessions **in that same checkout** when the repo declares a `worktree`
-resource — for the length of the command only.
+resource — for the length of the command only, which is the limit of what a lock
+can do here. Somebody halfway through an edit is holding nothing, so a `git add
+-A` of yours still takes their half-written files into your commit. Whoever is
+standing in your checkout is named at session start and by `agentbus status`; when
+one of them is, stage paths rather than everything.
 
 ## Declaring resources in a repository
 

@@ -69,6 +69,28 @@ except Exception as exc:
     print('unreachable: %s' % exc)"
 }
 
+# ---- "free" and "not running" are two different answers ----------------------
+#
+# Nothing has been started yet, so `web` is free AND down, and those call for
+# opposite next moves. A session told only "Free: web" curls it, gets a
+# connection refused, and spends turns deciding whose fault that is — or reaches
+# for the port in the config instead, which in a worktree belongs to another
+# checkout and answers. `serving` already knows which of the two it is; this is
+# whether anybody is told.
+
+brief() {   # <sid> <cwd> → the whole text injected at that session's start
+  json_field "$(ab_hook session-start "$(payload session "sid=$1" "cwd=$2")")" \
+    hookSpecificOutput additionalContext
+}
+
+out=$(brief sess-b "$WT2")
+assert_not_contains "$(printf '%s\n' "$out" | grep '^Free:')" "web" \
+  "a declared service that nothing is running is not called free"
+assert_contains "$out" "NOT running: web (:$PORT)" \
+  "it is named as not running, with the port it is not answering on"
+assert_contains "$out" "agentbus serve web,forked" \
+  "and one command starts every service that is down, not one line each"
+
 # ---- agent-bus starts it, so it knows whose tree it is serving ---------------
 
 out=$(ab sess-a serve web 2>&1)
@@ -89,6 +111,17 @@ assert_contains "$out" "restarted from your worktree" "a forking start command w
 out=$(ab sess-a serves)
 assert_equal 2 "$(printf '%s\n' "$out" | grep -c 'agent-bus')" \
   "both services are recognised as ours, however the shell ran them"
+
+# Both are up now, so the "not running" line has nothing left to say and the
+# briefing is back to the one warning that matters here: it is up, and it is not
+# yours. The two answers must not both be given about one service.
+out=$(brief sess-b "$WT2")
+assert_not_contains "$out" "NOT running" \
+  "once everything declared is up, nothing is reported as not running"
+assert_contains "$out" "web serves" \
+  "and the service that is up is reported as serving a checkout"
+assert_contains "$(printf '%s\n' "$out" | grep '^Free:')" "web" \
+  "with its lock free, which it is"
 
 # ---- the other worktree is refused even though no lock is held --------------
 

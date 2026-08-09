@@ -108,6 +108,34 @@ assert_contains "$out" "this checkout's own" "and says which are allocated"
 out=$(at "$REPO" sess-main env)
 assert_contains "$out" "export API_PORT=$DECLARED" "the main checkout exports the declared one"
 
+# ---- and the number is handed over before the first command ------------------
+#
+# `env` answers when asked, and the guard below answers when the wrong port is
+# typed. Neither of those is early enough. On the live bus a subagent in a
+# worktree called the declared port 28 times with AGENTBUS_OFF in front of every
+# one, because the config said that number and nothing had said otherwise — so
+# the block was doing its job and being paid to go away. A block is the wrong
+# place to first learn your own address; by then the command exists and the
+# cheapest way past a refusal is a bypass.
+
+brief() {   # <sid> <cwd> → the whole text injected at that session's start
+  json_field "$(ab_hook session-start "$(payload session "sid=$1" "cwd=$2")")" \
+    hookSpecificOutput additionalContext
+}
+
+out=$(brief sess-w1 "$WT1")
+assert_contains "$out" "api is on :$P1 here" \
+  "a session opening in a worktree is told its own port, unasked"
+assert_contains "$out" "the :$DECLARED in the config is the original checkout's" \
+  "and told that the number in the config belongs to somebody else"
+assert_contains "$out" 'eval "$(agentbus env)"' \
+  "and told the one command that hands over the whole set"
+
+# Nothing to say to the original checkout: its port IS the declared one, and a
+# line saying so would be paid for by every session that opens there.
+assert_not_contains "$(brief sess-main "$REPO")" "Your own ports" \
+  "while the original checkout is told nothing about ports at all"
+
 # ---- the one new way to be wrong, and the guard for it ----------------------
 #
 # Isolation removes contention. It cannot stop an agent typing the port it read
