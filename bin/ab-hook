@@ -140,6 +140,124 @@ acted() {   # <tool name>
   return 0
 }
 
+# ---- the commands the engine would exempt anyway ----------------------------
+#
+# `is_readonly` in the engine skips a segment whose head only reads, so
+# `command_targets` yields nothing for a command made of nothing else — and then
+# `resources_for` matches nothing, `wrong_port_check` sees no port,
+# `explicit_resources` names nothing and `leave_party_hint` has nothing to
+# record. The engine starts, finds nothing, and returns. Measured on a Windows
+# work machine: 478 ms to be told that, against 132 ms for the fast path
+# deciding it, and on that machine's real command mix 11 of 18 commands were
+# exactly this shape — `git status --short`, `git log --oneline -1`,
+# `git -C <path> worktree list`.
+#
+# The two lists are `FASTPATH_SKIP_HEADS` and `GIT_READONLY_SUBCOMMANDS` from
+# bin/agentbus, sorted, and `tests/test_matcher.py` fails if any of the three
+# copies drifts. They are carried rather than read from the bus because they are
+# code and not configuration: nothing about them varies per machine, and a list
+# shipped through the bus would leave a just-upgraded fast path reading the
+# previous version's until some engine ran again.
+#
+# Note what is NOT here. `agentbus` is in the engine's own read-only list and
+# deliberately absent from this one: an `agentbus` line names its resource
+# outright and leaves the party hint, neither of which goes through the
+# read-only skip. `kill` and `pkill` are absent for the engine's own reason —
+# killing the process that serves a resource is the most decisive way there is
+# of touching it — while `ps`, `pgrep` and `lsof` are here, because asking what
+# is running is not running it.
+RO_HEADS="|awk|basename|bat|cat|code|cut|date|diff|dirname|echo|false|fd|file|find|grep|head|jq|less|ll|ls|lsof|man|more|open|pgrep|printf|ps|pwd|realpath|rg|sed|sort|stat|tail|test|tree|true|type|uniq|wc|which|yq|"
+RO_GIT="|blame|branch|cat-file|check-ignore|config|describe|diff|fetch|for-each-ref|grep|log|ls-files|reflog|remote|rev-parse|shortlog|show|status|tag|worktree|"
+
+# The command, but only when JSON wrote it with no escape in it at all.
+#
+# `[^"\\]*` is the whole safety argument for the function below. A value
+# carrying `\"` cannot be read with a regex that stops at the first quote — the
+# match would end early and `echo \"x\" && npm run dev` would arrive as `echo \`,
+# which reads as read-only while the engine sees a command that claims the
+# checkout. A value carrying `\n` is several commands wearing one line. So a
+# value with either in it does not match here at all, and the engine decides,
+# exactly as it does today. `bin/hook.py` refuses the same values.
+RO_CMD_RE='"command"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+
+# Is every segment of this command one the engine would skip? 0 for yes.
+#
+# Allowed to be wrong in one direction only. Where it cannot be sure it says no
+# and the engine decides, because a wrong yes is a class of command nothing
+# guards and it fails silently. With no quote and no backslash anywhere in the
+# command — which `RO_CMD_RE` is what guarantees — splitting on `;`, `&&`, `||`
+# and `|` is exactly the split `split_segments` makes, and splitting on
+# whitespace is exactly what `tokens_of` returns.
+all_readonly() {   # <command>
+  local rest="$1" seg head sub t i n
+  local IFS=$' \t'
+  local -a toks
+  # The separators `split_segments` splits on, in its order: `&&` and `||` before
+  # the single `|` inside them. A lone `&` is not one of them there, so it is not
+  # one here either — `git status & npm run dev` is one segment to both.
+  rest=${rest//&&/$'\n'}
+  rest=${rest//||/$'\n'}
+  rest=${rest//;/$'\n'}
+  rest=${rest//|/$'\n'}
+  while [ -n "$rest" ]; do
+    seg=${rest%%$'\n'*}
+    if [ "$seg" = "$rest" ]; then rest=""; else rest=${rest#*$'\n'}; fi
+    toks=()
+    # `read -a` splits on IFS and performs no pathname expansion; `set --` would
+    # expand a `*` in the command against this directory.
+    read -r -a toks <<< "$seg"
+    # Leading `VAR=value` assignments and wrappers, as `command_targets` strips
+    # them: alternating, so `env FOO=1 git status` loses both. The assignment
+    # test is the engine's regular expression and not a looser glob — `a-b=c` is
+    # not an assignment to the engine, so stripping it here would uncover a
+    # read-only head the engine never sees.
+    while [ ${#toks[@]} -gt 0 ]; do
+      t=${toks[0]}
+      if [[ "$t" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+        toks=("${toks[@]:1}")
+        continue
+      fi
+      case "${t##*/}" in
+        sudo|time|nohup|exec|command|env|caffeinate) toks=("${toks[@]:1}") ;;
+        *) break ;;
+      esac
+    done
+    [ ${#toks[@]} -gt 0 ] || continue     # nothing left to act on
+    head=${toks[0]##*/}
+    if [ "$head" = git ]; then
+      # git's global options sit between the command and its subcommand, so
+      # `strip_git_globals` drops them and `git -C <path> status` reads as `git
+      # status`. Stopping early is safe: the subcommand then looks like an option
+      # instead, which is in no list, and the engine is woken.
+      i=1
+      n=${#toks[@]}
+      while [ $i -lt $n ]; do
+        case "${toks[$i]}" in
+          -C|-c|--namespace|--work-tree|--git-dir|--exec-path|--config-env)
+            i=$((i + 2)) ;;
+          --git-dir=*|--work-tree=*|--namespace=*|--exec-path=*|--config-env=*)
+            i=$((i + 1)) ;;
+          -p|--paginate|-P|--no-pager|--bare|--no-replace-objects|--literal-pathspecs)
+            i=$((i + 1)) ;;
+          *) break ;;
+        esac
+      done
+      sub=""
+      while [ $i -lt $n ]; do
+        case "${toks[$i]}" in
+          -*) i=$((i + 1)) ;;
+          *) sub=${toks[$i]}; break ;;
+        esac
+      done
+      case "$RO_GIT" in *"|$sub|"*) continue ;; esac
+      return 1
+    fi
+    case "$RO_HEADS" in *"|$head|"*) continue ;; esac
+    return 1
+  done
+  return 0
+}
+
 case "$ev" in
   post-batch)
     # Heartbeat is a bare truncate: the file's mtime IS the timestamp, so no
@@ -211,6 +329,15 @@ case "$ev" in
           shopt -u nocasematch
         else
           shopt -u nocasematch
+          exit 0
+        fi
+        # A token matched — but the pre-filter greps the whole payload, cwd
+        # included, so `git status` inside a checkout whose path names a guarded
+        # tool matches every time. The engine would skip every segment of a
+        # command like that and find nothing; see `all_readonly`. Second, because
+        # one match against the payload is cheaper than parsing the command, and
+        # most commands never get here.
+        if [[ "$payload" =~ $RO_CMD_RE ]] && all_readonly "${BASH_REMATCH[1]}"; then
           exit 0
         fi
         ;;

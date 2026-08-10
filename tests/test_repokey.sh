@@ -324,8 +324,14 @@ assert_equal Above:deadbe "$(agent_field sess-root sub-a repo_key)" \
   "the fixture really did leave a wrong key on the subagent's record"
 
 # Its own next hook, carrying the cwd already on its record.
-ab_hook pre-tool "$(payload bash "sid=sess-root" "cwd=$SUB" cmd=ls id=tu-sub \
-  agent_id=sub-a agent_type=general-purpose)" > /dev/null
+#
+# A hook the fast path passes through, which since 2.12.0 means a command that is
+# not read-only: `ls` used to reach the engine and no longer does, because the
+# engine would have found nothing in it to guard. Healing a key is not a guard
+# and it never had a hook of its own — it happens on whichever hook comes next,
+# and every SessionStart, UserPromptSubmit and PostToolBatch is still one.
+ab_hook pre-tool "$(payload bash "sid=sess-root" "cwd=$SUB" "cmd=npm run build" \
+  id=tu-sub agent_id=sub-a agent_type=general-purpose)" > /dev/null
 assert_equal "$ROOT_KEY" "$(agent_field sess-root sub-a repo_key)" \
   "a subagent's wrong key is corrected on its own next hook"
 

@@ -198,6 +198,35 @@ GIT_READONLY_SUBCOMMANDS = {
     "worktree", "fetch", "cat-file", "for-each-ref", "check-ignore",
 }
 
+# Heads that reach a guard by a route `command_targets` does not, so being
+# read-only to the pattern matcher does not make them uninteresting.
+#
+# `agentbus` is read-only — it reads and writes the bus, never the repository —
+# and `command_targets` duly skips it. But an `agentbus` line names its resource
+# outright, which `explicit_resources` reads and `plan_for` acts on, and it
+# leaves the party hint that the CLI process a few milliseconds later has no
+# other way of obtaining (`leave_party_hint`). Both happen for a command whose
+# targets are empty. So the two fast paths must go on waking the engine for it.
+GUARD_REACHING_HEADS = {"agentbus"}
+
+# What a fast path may answer for by itself, without starting this module.
+#
+# A command made only of these yields no targets, so `resources_for` matches
+# nothing, `wrong_port_check` sees no port, `explicit_resources` names nothing
+# and `leave_party_hint` has nothing to record — the engine starts, finds
+# nothing, and returns. Measured on a Windows work machine: 478 ms to start it
+# against 132 ms for the Python fast path deciding not to, and on that machine's
+# real command mix 11 of 18 commands were exactly this shape.
+#
+# `bin/ab-hook` and `bin/hook.py` carry this same list, because a fast path
+# cannot import this module without paying the cost it exists to avoid.
+# `tests/test_matcher.py` fails if any of the three drifts, and asserts the
+# direction that matters: whatever a fast path skips, the engine finds nothing
+# in. A head that is here and not in `READONLY_HEADS` is a command class nothing
+# guards, and it fails silently — it looks exactly like a resource nobody is
+# contending for.
+FASTPATH_SKIP_HEADS = READONLY_HEADS - GUARD_REACHING_HEADS
+
 # Wrappers to strip before deciding what a segment really runs.
 WRAPPERS = {"sudo", "time", "nohup", "exec", "command", "env", "caffeinate"}
 

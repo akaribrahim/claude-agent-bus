@@ -83,12 +83,144 @@ def field(text, key):
     return ""
 
 
+def raw_command(text):
+    """The Bash command, or None when it is not safe to read one this way.
+
+    `values` stops at the first `"`, so a command JSON had to escape arrives
+    truncated — and a truncation is the one error that must not happen here:
+    `echo \\"x\\" && npm run dev` cut to `echo \\` reads as a read-only command
+    while the engine sees one that claims the checkout. Any backslash at all
+    therefore means None. `bin/ab-hook` refuses exactly the same values by
+    matching `[^"\\\\]*`, and a missing key is None in both."""
+    cmd = next(values(text, "command"), None)
+    if cmd is None or "\\" in cmd:
+        return None
+    return cmd
+
+
 # Everything a party key may contain. The bash entry point refuses the same set
 # with `*[!A-Za-z0-9_.-]*` and the engine with a regular expression, so all three
 # agree about which ids get a line — and none of them can be talked into writing
 # outside the bus by a `/` in an id.
 KEYSAFE = set("abcdefghijklmnopqrstuvwxyz"
               "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+
+# ---- the commands the engine would exempt anyway ----------------------------
+#
+# `is_readonly` in the engine skips a segment whose head only reads, so
+# `command_targets` yields nothing for a command made of nothing else — and then
+# `resources_for` matches nothing, `wrong_port_check` sees no port,
+# `explicit_resources` names nothing and `leave_party_hint` has nothing to
+# record. The engine starts, finds nothing, and returns. Measured on the Windows
+# work machine this file exists for: 478 ms to be told that against 132 ms for
+# deciding it here, and on that machine's real command mix 11 of 18 commands were
+# exactly this shape — `git status --short`, `git log --oneline -1`,
+# `git -C <path> worktree list`.
+#
+# These are `FASTPATH_SKIP_HEADS` and `GIT_READONLY_SUBCOMMANDS` from
+# bin/agentbus, and `bin/ab-hook` carries the same two; `tests/test_matcher.py`
+# fails if any of the three copies drifts. They are carried rather than imported
+# because importing the engine is the cost this file exists to avoid, and carried
+# rather than read from the bus because they are code and not configuration —
+# nothing about them varies per machine, and a list shipped through the bus would
+# leave a just-upgraded fast path reading the previous version's.
+#
+# Note what is NOT here. `agentbus` is in the engine's own read-only list and
+# deliberately absent from this one: an `agentbus` line names its resource
+# outright and leaves the party hint, neither of which goes through the read-only
+# skip. `kill` and `pkill` are absent for the engine's own reason — killing the
+# process that serves a resource is the most decisive way there is of touching
+# it — while `ps`, `pgrep` and `lsof` are here, because asking what is running is
+# not running it.
+RO_HEADS = frozenset("""
+awk basename bat cat code cut date diff dirname echo false fd file find grep
+head jq less ll ls lsof man more open pgrep printf ps pwd realpath rg sed sort
+stat tail test tree true type uniq wc which yq
+""".split())
+RO_GIT = frozenset("""
+blame branch cat-file check-ignore config describe diff fetch for-each-ref grep
+log ls-files reflog remote rev-parse shortlog show status tag worktree
+""".split())
+# `WRAPPERS` in the engine, stripped before the head is read.
+RO_WRAPPERS = frozenset("sudo time nohup exec command env caffeinate".split())
+# git's global options, which sit between the command and its subcommand:
+# `strip_git_globals`. The first group takes an argument of its own.
+GIT_GLOBAL_2 = frozenset(
+    "-C -c --namespace --work-tree --git-dir --exec-path --config-env".split())
+GIT_GLOBAL_1 = frozenset(
+    "-p --paginate -P --no-pager --bare --no-replace-objects "
+    "--literal-pathspecs".split())
+GIT_GLOBAL_EQ = ("--git-dir=", "--work-tree=", "--namespace=", "--exec-path=",
+                 "--config-env=")
+# `^[A-Za-z_][A-Za-z0-9_]*=` without importing `re`, which is 60 ms here.
+ASSIGN_HEAD = set("abcdefghijklmnopqrstuvwxyz"
+                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ_")
+ASSIGN_REST = ASSIGN_HEAD | set("0123456789")
+
+
+def is_assignment(tok):
+    """`VAR=value`, by the engine's rule and not a looser one: `a-b=c` is not an
+    assignment to the engine, so stripping it here would uncover a read-only
+    head the engine never sees."""
+    if not tok or tok[0] not in ASSIGN_HEAD:
+        return False
+    for i, ch in enumerate(tok):
+        if ch == "=":
+            return i > 0
+        if ch not in ASSIGN_REST:
+            return False
+    return False
+
+
+def all_readonly(cmd):
+    """Is every segment of this command one the engine would skip?
+
+    Allowed to be wrong in one direction only. Where it cannot be sure it says
+    no and the engine decides, because a wrong yes is a class of command nothing
+    guards and it fails silently. It is only ever asked about a command JSON
+    wrote with no escape in it, which is what makes the two splits below exact:
+    with no quote and no backslash anywhere, splitting on `;`, `&&`, `||` and
+    `|` is the split `split_segments` makes, and splitting on whitespace is what
+    `tokens_of` returns.
+
+    `bin/ab-hook` makes the same decision by the same steps; every branch of it
+    is compared against this one in tests/test_pyhook.sh."""
+    # The separators `split_segments` splits on, in its order: `&&` and `||`
+    # before the single `|` inside them. A lone `&` is not one of them there, so
+    # it is not one here either.
+    for sep in ("&&", "||", ";", "|"):
+        cmd = cmd.replace(sep, "\n")
+    for seg in cmd.split("\n"):
+        toks = seg.split()
+        # Leading assignments and wrappers, as `command_targets` strips them:
+        # alternating, so `env FOO=1 git status` loses both.
+        while toks and (is_assignment(toks[0])
+                        or os.path.basename(toks[0]) in RO_WRAPPERS):
+            toks = toks[1:]
+        if not toks:
+            continue                      # nothing left to act on
+        head = os.path.basename(toks[0])
+        if head == "git":
+            # `strip_git_globals`, so that `git -C <path> status` reads as `git
+            # status`. Stopping early is safe: the subcommand then looks like an
+            # option instead, which is in no list, and the engine is woken.
+            i, n = 1, len(toks)
+            while i < n:
+                if toks[i] in GIT_GLOBAL_2:
+                    i += 2
+                elif toks[i] in GIT_GLOBAL_1 \
+                        or toks[i].startswith(GIT_GLOBAL_EQ):
+                    i += 1
+                else:
+                    break
+            sub = next((t for t in toks[i:] if not t.startswith("-")), "")
+            if sub in RO_GIT:
+                continue
+            return False
+        if head in RO_HEADS:
+            continue
+        return False
+    return True
 
 
 def acted(text, sid, tool):
@@ -279,6 +411,21 @@ def main():
             low = text.lower()
             if tokens != "." and not any(t and t.lower() in low
                                          for t in tokens.split("|")):
+                return 0
+            # A token matched — but the pre-filter scans the whole payload, cwd
+            # included, so `git status` inside a checkout whose path names a
+            # guarded tool matches every time. The engine would skip every
+            # segment of a command like that and find nothing; see
+            # `all_readonly`. Second, because one scan of the payload is cheaper
+            # than parsing the command, and most commands never get here.
+            #
+            # `raw_command` refuses a value JSON had to escape: a command read
+            # with a scan that stops at the first quote would arrive truncated,
+            # and `echo \"x\" && npm run dev` truncated to `echo \` reads as
+            # read-only while the engine sees a command that claims the
+            # checkout. `bin/ab-hook` refuses the same values, with `[^"\\]*`.
+            one = raw_command(text)
+            if one is not None and all_readonly(one):
                 return 0
         elif tool in ("Edit", "Write", "NotebookEdit"):
             if not sid:

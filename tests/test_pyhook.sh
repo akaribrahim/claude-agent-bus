@@ -433,10 +433,66 @@ slept "and a repository declaring nothing costs nothing"
 # The catch-all a resource with no mandatory literal produces. Waking the engine
 # on every command costs milliseconds; missing the guard costs a silently wrong
 # test, so the gate opens for everything — in both files, by different means.
+#
+# Asked with a command that WRITES. `$PLAIN_P` runs `echo`, and since 2.12.0 a
+# command every segment of which the engine would skip as read-only stops at the
+# gate below whatever the token line says — which is right even under the
+# catch-all, because a pattern with no mandatory literal still has no target to
+# match against. So it would answer this question with the next gate's answer.
 printf '.\n' > "$AGENTBUS_HOME/guard-tokens"
-gate "the catch-all token: both agree" pre-tool "$PLAIN_P"
+gate "the catch-all token: both agree" pre-tool \
+  "$(payload bash sid=sess-a cwd=/tmp "cmd=make release" id=g-catch)"
 woke_for pre-tool "and everything wakes the guard"
 printf '%s\n' "$TOK_WAS" > "$AGENTBUS_HOME/guard-tokens"
+
+# ---- and the second gate: a command the engine would exempt anyway ----------
+#
+# `is_readonly` skips a segment whose head only reads, so `command_targets`
+# yields nothing for a command made of nothing else and the engine starts up to
+# find nothing. Both files now answer that themselves. The saving is the whole
+# engine start — 478 ms against 132 ms on the Windows work machine this was
+# measured on, where 11 of 18 real commands were this shape.
+#
+# The lists behind it, and the invariant that whatever is skipped here the engine
+# finds nothing in, are in tests/test_matcher.py. What is asserted here is what
+# this file is for: that the two entry points draw the line in the same place.
+# Every payload below matches the token line — this suite runs under a directory
+# called `agentbus-tests…`, so a payload from inside it always does — which is
+# what makes the read-only rule the only thing left that can decide.
+
+gate "a read-only command: both agree" pre-tool \
+  "$(payload bash sid=sess-a "cwd=$REPO" "cmd=git status --short" id=g-ro1)"
+slept "and neither wakes the engine to be told there is nothing in it"
+gate "a global option in front of a reading subcommand: both agree" pre-tool \
+  "$(payload bash sid=sess-a "cwd=$REPO" "cmd=git -C $WT2 worktree list" id=g-ro2)"
+slept "and both strip it before reading the subcommand"
+gate "a writing subcommand: both agree" pre-tool \
+  "$(payload bash sid=sess-a "cwd=$REPO" "cmd=git add -A" id=g-ro3)"
+woke_for pre-tool "and both hand it to the guard"
+gate "one read segment and one that writes: both agree" pre-tool \
+  "$(payload bash sid=sess-a "cwd=$REPO" "cmd=git status && git stash" id=g-ro4)"
+woke_for pre-tool "because a compound command is exempt only if every segment is"
+
+# `agentbus` is in the engine's own read-only list and in neither fast path's: an
+# `agentbus` line names its resource outright and leaves the party hint the CLI
+# reads a moment later, and neither goes through the read-only skip. A fast path
+# that skipped it would take the guard off `agentbus run` in both files at once.
+gate "an agentbus line: both agree" pre-tool \
+  "$(payload bash sid=sess-a "cwd=$REPO" "cmd=agentbus serve db" id=g-ro5)"
+woke_for pre-tool "and neither skips the one read-only head that still decides"
+
+# A read-only command JSON had to escape. Neither file unescapes the payload —
+# `bin/ab-hook` scans it with a regular expression and `bin/hook.py` with plain
+# string search — and a value read to the first quote arrives truncated, which is
+# how `echo \"x\" && npm run dev` would read as a bare `echo`. Both refuse the
+# whole value instead.
+gate "a read-only command carrying a quote: both agree" pre-tool \
+  "$(payload bash sid=sess-a "cwd=$REPO" "cmd=grep -rn \"psql\" api/" id=g-ro6)"
+woke_for pre-tool "and both leave a value they would have to unescape to the engine"
+gate "a read-only first line of two: both agree" pre-tool \
+  "$(payload bash sid=sess-a "cwd=$REPO" "cmd=git status
+git stash" id=g-ro7)"
+woke_for pre-tool "and neither reads a newline as the end of the command"
 
 HOTFILE="$AGENTBUS_HOME/hot-for/sess-a"
 HOT_WAS=$(cat "$HOTFILE" 2>/dev/null)

@@ -2,6 +2,35 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.12.0 — 2026-08-10
+
+**A command that only reads no longer starts the engine.** `git status`,
+`git log`, `git -C <path> worktree list`, `grep`, `ps`, `lsof` — the guard has
+always let these through, but it let them through from the inside: the hook
+started a Python interpreter, read and compiled ten thousand lines, worked out
+that a reading command touches nothing, and returned. Both fast paths answer
+that themselves now. Measured on a Windows work machine, where a hook pays a
+full interpreter start: 478 ms for the engine to come back with nothing, against
+132 ms for the fast path knowing there was nothing, and 11 of the 18 commands in
+that machine's real mix were exactly this shape. On a quiet Mac it is 48 ms
+against 5 ms.
+
+Which commands are exempt has not changed by one word. The lists are the
+engine's own, carried into the two fast paths because neither can import the
+engine without paying the cost it exists to avoid, and `tests/test_matcher.py`
+fails if any of the three drifts — and fails on the direction that matters, by
+asking the real entry points what they skip and the engine what it would have
+found in it. `agentbus` is the deliberate exception: it is read-only to the
+pattern matcher and it still wakes the engine, because an `agentbus run sim --
+…` line names its resource outright and leaves the hint that tells the CLI a
+moment later which subagent is asking. A fast path that skipped it would take the
+guard off `agentbus run` on both platforms at once.
+
+One thing that used to happen on a read-only command's hook no longer does: a
+session or subagent record carrying a key from an older version of the
+derivation is healed on whichever hook comes next, and a `git status` is no
+longer one. Every SessionStart, UserPromptSubmit and PostToolBatch still is.
+
 ## 2.11.0 — 2026-08-10
 
 **Three facts a joining session was left to work out, and one it was told

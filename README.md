@@ -495,8 +495,10 @@ letting every agent past. `--as <your name>` settles it from inside a script.
 
 A bash fast path runs first and decides in a few milliseconds whether the Python
 engine needs to run at all — shell builtins only, short-circuiting before it has
-even read the payload when you are the only session. On hosts without bash the
-installer wires the hooks straight to Python instead.
+even read the payload when you are the only session, and again for a command
+every segment of which only reads, since there is nothing in one for the engine
+to find. On hosts without bash the installer wires the hooks straight to Python
+instead, which makes the same decisions in the same order.
 
 State lives in `~/.claude/agent-bus/` — sessions, cursors, locks, ownership,
 service ownership, one task ledger per repository, an append-only `events.jsonl`,
