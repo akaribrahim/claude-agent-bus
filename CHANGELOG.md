@@ -2,6 +2,25 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.12.1 — 2026-08-10
+
+**A git too old to compare two branches says so.** `agentbus merges` and the
+board's landing view rest on `git merge-tree --write-tree`, which arrived in git
+2.38. On anything older git answers by printing its own usage line, and that line
+was passed straight through as the reason: every pair on the page read *"could
+not be compared — usage: git merge-tree <base-tree> <branch1> <branch2>"*. A
+usage string is not an explanation, and it pointed at the branches when the
+feature was simply unavailable. It now names the cause and the version that has
+it. Every other failure is still passed through exactly as git said it — a branch
+that has been deleted is a fact about that branch and belongs on the page.
+
+Found by running the test suite on Windows for the first time, under WSL, whose
+git is 2.34.1: fifty-four failures, all of them this one cause. `test_landing.sh`
+now skips on such a git and says which version it needs, because a skip states
+that once and fifty-four reds state it in a way nobody reads. The probe asks the
+git that will actually run rather than the host's, since a suite run under WSL
+against a checkout on the Windows disk sees a different one.
+
 ## 2.12.0 — 2026-08-10
 
 **A command that only reads no longer starts the engine.** `git status`,

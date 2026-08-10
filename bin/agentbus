@@ -8101,11 +8101,24 @@ def merge_tree(root, a, b, env=None):
     reported as the first: "nothing conflicts" about a branch that has been
     deleted is the kind of green answer that gets somebody to run a merge. What
     separates them is stdout — a computed merge always prints its tree, and a
-    refused one prints nothing at all."""
+    refused one prints nothing at all.
+
+    A git older than 2.38 has `merge-tree` but not its `--write-tree` mode, and
+    answers by printing its own usage line. Passing that through as the reason
+    puts `usage: git merge-tree <base-tree> <branch1> <branch2>` on the page
+    where an explanation belongs — measured on WSL's git 2.34.1, where every
+    landing pair read "could not be compared" and nothing said why, or that the
+    whole feature was unavailable rather than the branches being awkward. The
+    version is not probed: a version call per pair costs a subprocess to learn
+    what the failure already said."""
     rc, out, err = git_probe(root, ("merge-tree", "--write-tree", "--name-only",
                                    "-z", a, b), env=env)
     if not out:
-        return "unknown", [], err.split("\n")[0] if err else "git said nothing"
+        first = err.split("\n")[0] if err else ""
+        if "usage:" in first and "merge-tree" in first:
+            return "unknown", [], ("this git is too old — `merge-tree "
+                                   "--write-tree` needs 2.38 or newer")
+        return "unknown", [], first or "git said nothing"
     # -z framing: the tree, then one field per conflicting path, then an empty
     # field, then the informational messages in groups of four. The empty field
     # is the terminator, which is why this stops rather than filtering.

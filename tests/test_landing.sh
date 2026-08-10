@@ -21,6 +21,19 @@
 
 . "$AB_ROOT/tests/lib.sh"
 
+# `merge-tree --write-tree` arrived in git 2.38, and everything in this file is
+# about what it answers. On an older git every pair comes back "could not be
+# compared" and every assertion here fails for one reason that has nothing to do
+# with this repository — measured on WSL's git 2.34.1: 54 failures, all of them
+# this. A skip says that once; fifty-four reds say it in a way nobody reads.
+#
+# Asked of the git that will actually be run, not of the host, because the two
+# differ: this suite has been run under WSL against a checkout on the Windows
+# disk, where `git --version` is the Linux one.
+if ! git merge-tree --write-tree --name-only HEAD HEAD > /dev/null 2>&1; then
+  skip_test "git $(git --version | awk '{print $3}') has no \`merge-tree --write-tree\` (needs 2.38)"
+fi
+
 REPO=$(make_repo landrepo)
 printf 'one\ntwo\nthree\n' > "$REPO/shared.py"
 printf 'top\nm1\nm2\nm3\nm4\nm5\nbottom\n' > "$REPO/common.py"
@@ -537,5 +550,31 @@ fi
 
 kill $BOARD_PID 2>/dev/null
 trap - EXIT
+
+# ---- a git too old to answer says so, and only then --------------------------
+#
+# The skip at the top of this file means these two cannot be asked of a real old
+# git here, so they are asked of `merge_tree` directly with the answer such a git
+# gives. Both directions matter: the version sentence has to replace git's usage
+# line, and it must not swallow every other failure — "not a valid object name"
+# is a fact about a branch and belongs on the page as it is.
+
+reason() {   # <rc> <stderr> → merge_tree's `why`
+  python3 -c "
+import importlib.machinery, importlib.util, sys
+ldr = importlib.machinery.SourceFileLoader('ab', '$AB_ROOT/bin/agentbus')
+ab = importlib.util.module_from_spec(importlib.util.spec_from_loader('ab', ldr))
+ldr.exec_module(ab)
+ab.git_probe = lambda root, args, env=None: (int(sys.argv[1]), '', sys.argv[2])
+print(ab.merge_tree('/nowhere', 'a', 'b')[2])" "$1" "$2"
+}
+
+assert_contains "$(reason 129 'usage: git merge-tree <base-tree> <branch1> <branch2>')" \
+  "too old" "a git without --write-tree is named as too old, not quoted at the reader"
+assert_contains "$(reason 129 'usage: git merge-tree <base-tree> <branch1> <branch2>')" \
+  "2.38" "with the version that has it, so the reader knows what would fix it"
+assert_equal "fatal: not a valid object name: nope" \
+  "$(reason 128 'fatal: not a valid object name: nope')" \
+  "while any other failure is passed through as git said it"
 
 finish
