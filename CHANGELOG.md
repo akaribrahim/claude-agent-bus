@@ -31,6 +31,27 @@ session or subagent record carrying a key from an older version of the
 derivation is healed on whichever hook comes next, and a `git status` is no
 longer one. Every SessionStart, UserPromptSubmit and PostToolBatch still is.
 
+**And a hook that does have work stopped recompiling the engine to do it.** Every
+wake used to read and compile ten thousand lines: a file the interpreter is handed
+as a script is `__main__`, and `__main__` is the one thing Python never writes a
+bytecode cache for. Both fast paths reach the engine by importing it now, so the
+compile is paid once per change to the file instead of once per hook. Measured
+here, quiet, median of fifteen: a woken PreToolUse went from 55 ms to 24 ms
+against a 15 ms bare interpreter start — 3.7 times the floor down to 1.6 — and on
+the Windows work machine the same change is worth 115 ms of a 313 ms floor. A
+guarded command that takes a lock now costs less than an idle wake used to.
+
+Nothing about how the hooks are wired changed, so no reinstall is needed and a
+machine running an older install is not left pointing at anything that has moved.
+`agentbus` on PATH and `agentbus hook <event>` both still work exactly as
+documented; the second is simply not what a hook runs any more.
+
+A plugin directory that cannot be written to gets no cache. Python swallows the
+failed write, the engine loads and runs exactly as it would otherwise, and the
+saving is quietly gone for the life of the install — so `agentbus doctor` now
+reports whether the bytecode is cached, and says which of the two reasons it is
+not.
+
 ## 2.11.0 — 2026-08-10
 
 **Three facts a joining session was left to work out, and one it was told

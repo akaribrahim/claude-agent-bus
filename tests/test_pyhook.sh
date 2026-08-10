@@ -137,6 +137,17 @@ ab_pyhook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" "cmd=$CMD" id=py-10)" >
 assert_file "$AB_ROOT/bin/__pycache__" \
   "waking the engine through hook.py leaves a bytecode cache behind"
 
+# And since 2.12.0 the shell entry point gets it too, which is the point of that
+# release: `bin/ab-hook` used to exec the engine, so on every POSIX host every
+# wake read and compiled ten thousand lines again. It hands the payload to
+# `bin/hook.py wake <event>` instead, which imports it. Asserted through the real
+# `bin/ab-hook` against the real engine, because what is being checked is that the
+# handover happens at all.
+rm -rf "$AB_ROOT/bin/__pycache__"
+ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" "cmd=$CMD" id=sh-10)" > /dev/null
+assert_file "$AB_ROOT/bin/__pycache__" \
+  "and so does waking it through bash, which is what 2.12.0 changed"
+
 # ---- and it never loads the engine when there is nothing to do --------------
 #
 # The whole saving is here: on a host with no fast path the engine was loaded
@@ -201,6 +212,10 @@ def _note(event):
     if path:
         with open(path, "a") as fh:
             fh.write((event or "?") + "\n")
+
+
+def use_utf8():
+    pass
 
 
 def ensure_dirs():
@@ -281,6 +296,86 @@ GATE_ENV="AGENTBUS_HOME=$TEST_TMP/no-such-bus"
 gate "no state directory at all: both agree" pre-tool "$BASH_P"
 slept "and neither wakes the engine looking for one"
 GATE_ENV=""
+
+# The handover, and the fallback behind it. `bin/ab-hook` reaches the engine
+# through `bin/hook.py wake <event>` so that the bytecode cache applies; a
+# checkout that arrived without its mode bits — a zip download, a clone on a
+# filesystem that has none — has no executable entry point to hand over to, and
+# must then reach the engine the way it always did rather than stop guarding.
+printf '2\n' > "$AGENTBUS_HOME/live-count"
+chmod -x "$FAST/hook.py"
+gate "an entry point without its mode bits: both agree" pre-tool "$BASH_P"
+woke_for pre-tool "and the shell path reaches the engine the old way instead"
+chmod +x "$FAST/hook.py"
+
+# An engine older than the entry point in front of it. A plugin update replaces a
+# directory file by file, so for a moment one of the two is from the previous
+# release — and `wake` calls into the engine by name, which means a renamed or
+# not-yet-existing helper could take every guard off at once rather than lose the
+# thing it was calling for. Written out here as an engine with nothing but the two
+# functions the contract has always had.
+cp "$FAST/agentbus" "$TEST_TMP/agentbus.current"
+cat > "$FAST/agentbus" <<'PY'
+#!/usr/bin/env python3
+"""An engine from before this release: no `use_utf8` to call."""
+import os
+import sys
+
+
+def _note(event):
+    path = os.environ.get("FASTPATH_LOG")
+    if path:
+        with open(path, "a") as fh:
+            fh.write((event or "?") + "\n")
+
+
+def ensure_dirs():
+    pass
+
+
+def run_hook(event, raw):
+    _note(event)
+
+
+if __name__ == "__main__":
+    _note(sys.argv[2] if len(sys.argv) > 2 else "")
+PY
+chmod +x "$FAST/agentbus"
+gate "an engine older than the entry point: both agree" pre-tool "$BASH_P"
+woke_for pre-tool "and it still gets the hook, rather than the guard going quiet"
+cp "$TEST_TMP/agentbus.current" "$FAST/agentbus"
+chmod +x "$FAST/agentbus"
+rm -rf "$FAST/__pycache__"
+
+# Where the bytecode goes, and what happens when it cannot go there. Python
+# writes the cache beside the file it compiled; when that directory is read-only
+# — a system-wide install, a marketplace copy on a locked volume — the write
+# fails, Python swallows it, and the engine loads and runs exactly as it would
+# otherwise. What is lost is only the saving, silently and for the life of the
+# install, which is why `agentbus doctor` now reports it.
+rm -rf "$FAST/__pycache__"
+gate "a writable plugin directory: both agree" pre-tool "$BASH_P"
+assert_file "$FAST/__pycache__" \
+  "the handover caches the engine's bytecode beside it"
+rm -rf "$FAST/__pycache__"
+chmod a-w "$FAST"
+# The precondition, asserted rather than assumed: root can write to a directory
+# with no write bits, and the two assertions below would then be passing against a
+# directory that was writable all along.
+if [ -w "$FAST" ]; then
+  _bad "the fixture really did take the write bit off the plugin directory" \
+    "still writable as $(id -un)"
+else
+  _ok "the fixture really did take the write bit off the plugin directory"
+  gate "a plugin directory that cannot be written to: both agree" pre-tool "$BASH_P"
+  woke_for pre-tool "and the engine still runs, cache or no cache"
+  # That there is no cache to show for it, and what a reader is told about that,
+  # is in tests/test_install.sh — asserted through `agentbus doctor`, which is the
+  # only place it is ever visible. Asserting the absence here would be asserting a
+  # property of the filesystem: nothing this repository can change would make a
+  # `__pycache__` appear in a directory with no write bit.
+fi
+chmod u+w "$FAST"
 
 # An AGENTBUS_HOME that is set and EMPTY, which is the same shape of divergence
 # and was live until 2.5.0. An empty value is not an absent one:

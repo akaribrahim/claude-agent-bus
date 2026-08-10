@@ -16,16 +16,36 @@ ev="$1"
 BUS="${AGENTBUS_HOME:-$HOME/.claude/agent-bus}"
 HERE="$(dirname "$0")"
 ENGINE="$HERE/agentbus"
+WAKE="$HERE/hook.py"
 
 [ -n "$AGENTBUS_OFF" ] && exit 0
 [ -x "$ENGINE" ] || exit 0
 
+# Hand the payload to the engine, replacing this shell. Stdin is whatever the
+# caller arranged: inherited on the ungated events, so a large payload never
+# passes through bash at all, and a here-string on the gated ones, where the
+# payload has already been read and must not be read twice.
+#
+# Through `bin/hook.py`, which reaches the engine by IMPORTING it. That is the
+# only way Python's bytecode cache applies: a file the interpreter is handed as a
+# script is `__main__`, and `__main__` is never cached, so every wake used to read
+# and compile ten thousand lines again. Measured on a Windows work machine, 238 ms
+# of a 313 ms floor, of which the cache gives back 115 ms; on a quiet Mac, 36 ms of
+# 54 ms. It costs nothing to go this way — `bin/hook.py` imports `os` and `sys` and
+# nothing else, and the interpreter start is the same one either way.
+#
+# Falls back to the engine's own CLI when that file is not executable, which
+# leaves a checkout that arrived without its mode bits behaving exactly as it did
+# before rather than not guarding at all.
+wake() {   # <event>
+  [ -x "$WAKE" ] && exec "$WAKE" wake "$1"
+  exec "$ENGINE" hook "$1"
+}
+
 case "$ev" in
   session-start|session-end|prompt-submit|subagent-start|subagent-stop)
-    # Once per session, per user turn, or per subagent — always worth the
-    # engine. stdin is inherited rather than slurped, so the payload never
-    # passes through bash.
-    exec "$ENGINE" hook "$ev"
+    # Once per session, per user turn, or per subagent — always worth the engine.
+    wake "$ev"
     ;;
 esac
 
@@ -79,7 +99,7 @@ case "$ev" in
     # That work happens on post-batch instead.
     set -- "$BUS"/autoclaim/*
     [ -e "$1" ] || exit 0
-    exec "$ENGINE" hook post-bash
+    wake post-bash
     ;;
 esac
 
@@ -281,8 +301,7 @@ case "$ev" in
       [ -r "$BUS/cursors/$sid" ] && read -r cur < "$BUS/cursors/$sid"
       [ "$seq" = "$cur" ] && exit 0
     fi
-    "$ENGINE" hook post-batch <<< "$payload"
-    exit $?
+    wake post-batch <<< "$payload"
     ;;
 
   record-write)
@@ -350,8 +369,7 @@ case "$ev" in
         exit 0
         ;;
     esac
-    "$ENGINE" hook pre-tool <<< "$payload"
-    exit $?
+    wake pre-tool <<< "$payload"
     ;;
 esac
 

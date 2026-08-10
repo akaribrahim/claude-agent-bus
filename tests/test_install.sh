@@ -133,6 +133,58 @@ out=$(env HOME="$FAKE_HOME" PATH="$FAKE_HOME/.local/bin:$BARE_PATH" \
 assert_contains "$out" "command      : $FAKE_HOME/.local/bin/agentbus" \
   "and reports where it is when it can"
 
+# ---- and whether the engine's bytecode is cached ----------------------------
+#
+# Both fast paths reach the engine by importing it so that Python caches the
+# compiled form: it is 26 ms of a 54 ms wake here and 115 ms of 313 ms on the
+# Windows work machine this was measured on. A plugin directory that cannot be
+# written to gets no cache — Python swallows the failed write, the engine runs
+# exactly as it would otherwise, and the saving is gone for the life of the
+# install with nothing anywhere saying so. Hence a line, and hence these two.
+rm -rf "$AB_ROOT/bin/__pycache__"
+out=$(env HOME="$FAKE_HOME" AGENTBUS_HOME="$AGENTBUS_HOME" \
+  python3 "$AB_ROOT/bin/agentbus" doctor 2>&1)
+assert_contains "$out" "bytecode     : NOT cached" \
+  "doctor says so when no wake has cached the engine's bytecode"
+# Woken through the entry point both fast paths use, on the one event that is
+# certain to touch nothing: a finished command whose id nothing claimed. It has to
+# leave the bus exactly as it found it — the assertions below this need one live
+# session and no more.
+printf '%s' "$(payload post-bash sid=inst-cache cwd=/tmp id=nothing)" \
+  | env AGENTBUS_HOME="$AGENTBUS_HOME" python3 "$AB_ROOT/bin/hook.py" \
+      wake post-bash > /dev/null 2>&1
+out=$(env HOME="$FAKE_HOME" AGENTBUS_HOME="$AGENTBUS_HOME" \
+  python3 "$AB_ROOT/bin/agentbus" doctor 2>&1)
+assert_not_contains "$out" "NOT cached" \
+  "and stops saying it once a wake has written one"
+
+# And the case nobody would otherwise find: a plugin directory that cannot be
+# written to. Python swallows the failed cache write, so the engine loads and runs
+# exactly as it would otherwise and the only symptom is the recompile — on every
+# woken hook, for the life of the install. `doctor` is the one place it shows.
+LOCKED="$TEST_TMP/locked-plugin"
+mkdir -p "$LOCKED/bin"
+cp "$AB_ROOT/bin/agentbus" "$AB_ROOT/bin/hook.py" "$LOCKED/bin/"
+chmod +x "$LOCKED/bin/agentbus" "$LOCKED/bin/hook.py"
+chmod a-w "$LOCKED/bin"
+# The precondition, asserted rather than assumed: root can write to a directory
+# with no write bits, and the assertion below would then be passing against a
+# directory that was writable all along.
+if [ -w "$LOCKED/bin" ]; then
+  _bad "the fixture really did take the write bit off a plugin directory" \
+    "still writable as $(id -un)"
+else
+  _ok "the fixture really did take the write bit off a plugin directory"
+  printf '%s' "$(payload post-bash sid=inst-locked cwd=/tmp id=nothing)" \
+    | env AGENTBUS_HOME="$AGENTBUS_HOME" python3 "$LOCKED/bin/hook.py" \
+        wake post-bash > /dev/null 2>&1
+  out=$(env HOME="$FAKE_HOME" AGENTBUS_HOME="$AGENTBUS_HOME" \
+    python3 "$LOCKED/bin/agentbus" doctor 2>&1)
+  assert_contains "$out" "NOT cached (this directory is not writable)" \
+    "and names an unwritable directory as the reason, rather than leaving it invisible"
+fi
+chmod u+w "$LOCKED/bin"
+
 # ---- the session is told, once, and only when it matters -------------------
 
 REPO=$(make_repo instrepo)

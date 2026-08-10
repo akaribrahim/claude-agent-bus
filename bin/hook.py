@@ -283,7 +283,19 @@ def anybody_behind():
 def wake(event, raw):
     """Hand over to the engine, importing it as a module so the bytecode cache
     applies. Anything at all going wrong here exits quietly: a coordination
-    layer must never be the reason a session breaks."""
+    layer must never be the reason a session breaks.
+
+    This is the only way into the engine either fast path uses, `bin/ab-hook`
+    included since 2.12.0 — a file the interpreter is handed as a script is
+    `__main__`, and `__main__` is never cached, so running it recompiled ten
+    thousand lines on every wake. On the Windows work machine that was 238 ms of
+    a 313 ms floor and the cache gives back 115 ms of it; on a quiet Mac it is
+    36 ms of 54 ms.
+
+    When the plugin directory is not writable there is no cache to apply: Python
+    swallows the failed write, the engine loads and runs exactly as it would
+    otherwise, and every wake pays the compile again. Nothing breaks and nothing
+    says so, which is why `agentbus doctor` now reports it."""
     try:
         import importlib.machinery
         import importlib.util
@@ -291,6 +303,20 @@ def wake(event, raw):
         spec = importlib.util.spec_from_loader("agentbus_engine", loader)
         engine = importlib.util.module_from_spec(spec)
         loader.exec_module(engine)
+        # `main` is not reached this way, and the console encoding was the first
+        # thing it did. A hook's own decisions are ASCII JSON, but its "could not
+        # read the payload" warning is not, and that warning exists because a
+        # guard which fails open must say so out loud.
+        #
+        # Guarded, because this file and the engine beside it are not guaranteed
+        # to be the same version: a plugin update replaces a directory file by
+        # file, and for the moment in between, one of them is older. A hook that
+        # decided nothing because a helper had been renamed would take every guard
+        # off, which is a far worse outcome than a mojibake warning.
+        try:
+            engine.use_utf8()
+        except AttributeError:
+            pass
         engine.ensure_dirs()
         engine.run_hook(event, raw)
     except SystemExit:
@@ -313,6 +339,13 @@ def main():
     # file answers yes, so this is the same test there as before.
     if not event or not os.access(ENGINE, os.X_OK):
         return 0
+
+    # `hook.py wake <event>` — the gate has already been passed, by `bin/ab-hook`,
+    # which cannot import the engine itself and so hands over here to get the
+    # bytecode cache. Nothing is re-decided: the shell fast path decided, and two
+    # files deciding the same thing twice is how they come to disagree.
+    if event == "wake" and len(sys.argv) > 2:
+        return wake(sys.argv[2], sys.stdin.buffer.read())
 
     if event in UNGATED:
         # Once per session, per user turn, or per subagent: always worth it.

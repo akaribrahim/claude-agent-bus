@@ -5,11 +5,10 @@
 
 Every hook this plugin wires runs in front of, or behind, a tool call — so its
 cost is added to the wall clock, not hidden behind the model. On macOS the bash
-fast path answers the common case in ~5 ms and the engine is woken only for real
-work; on Windows there is no fast path, so every hook pays for a full
-interpreter start and a 5000-line recompile. This measures that split, and three
-specific suspicions, so an optimisation lands where the time is rather than
-where it is assumed to be.
+fast path answers the common case in ~5 ms; on Windows `bin/hook.py` answers it
+for the price of an interpreter start; and on both, a hook that really has work
+wakes the engine. This measures that split, and three specific suspicions, so an
+optimisation lands where the time is rather than where it is assumed to be.
 
 It touches nothing: an isolated AGENTBUS_HOME under the system temp directory,
 never the live bus, and it starts no sessions.
@@ -63,6 +62,19 @@ def hooked_interpreter():
     return None
 
 
+def engine_argv(py, event):
+    """The command a hook actually runs to reach the engine.
+
+    Since 2.12.0 both fast paths reach it by importing it — `bin/hook.py wake
+    <event>` — because a file the interpreter is handed as a script is `__main__`
+    and `__main__` is never bytecode-cached. Measuring `agentbus hook <event>`
+    instead would be measuring the CLI, which no hook uses."""
+    gate = os.path.join(ROOT, "bin", "hook.py")
+    if os.path.exists(gate):
+        return [py, gate, "wake", event]
+    return [py, ENGINE, "hook", event]
+
+
 def ms(fn, runs=None):
     runs = runs or RUNS
     fn()                                   # warm-up, discarded
@@ -113,16 +125,16 @@ def setup_contended(py):
         # Give the claim back between runs, or every run after the first is
         # measuring "already yours" instead of taking a lock.
         def once():
-            subprocess.run([py, ENGINE, "hook", "pre-tool"], input=payload,
+            subprocess.run(engine_argv(py, "pre-tool"), input=payload,
                            capture_output=True, env=env)
-            subprocess.run([py, ENGINE, "hook", "post-bash"],
+            subprocess.run(engine_argv(py, "post-bash"),
                            input=json.dumps({
                                "session_id": "perf-a", "cwd": repo,
                                "hook_event_name": "PostToolUse",
                                "tool_use_id": "perf-guarded"}).encode("utf-8"),
                            capture_output=True, env=env)
         pair = ms(once)
-        solo = ms(spawn([py, ENGINE, "hook", "post-bash"],
+        solo = ms(spawn(engine_argv(py, "post-bash"),
                         json.dumps({"session_id": "perf-a", "cwd": repo,
                                     "hook_event_name": "PostToolUse",
                                     "tool_use_id": "nothing"}).encode("utf-8")))
@@ -148,24 +160,42 @@ def main():
     bare = ms(spawn([py, "-c", "pass"]))
     row("bare interpreter start", bare)
     if os.name == "nt":
-        row("cmd.exe start, for comparison", ms(spawn(["cmd", "/c", "exit"])),
-            "a .cmd fast path could not beat this")
+        # What a `.cmd` gate in front of the Python one would start from. Read it
+        # against the row above and not against the engine: a shell that starts
+        # faster than the interpreter is the whole argument for having one.
+        shell = ms(spawn(["cmd", "/c", "exit"]))
+        row("cmd.exe start, for comparison", shell,
+            "%.0f ms under the interpreter's own start" % (bare - shell)
+            if shell < bare else
+            "no cheaper than starting Python, so a .cmd gate would buy nothing")
 
-    print("\nTHE ENGINE, AS THE HOOKS RUN IT (a script: no bytecode cache)")
+    print("\nTHE ENGINE AS A SCRIPT (`agentbus hook <event>`: no bytecode cache)")
     off = ms(spawn([py, ENGINE, "hook", "pre-tool"], PAYLOAD, {"AGENTBUS_OFF": "1"}))
     row("earliest possible return (AGENTBUS_OFF=1)", off,
         "+%.0f ms over the floor" % (off - bare))
-    full = ms(spawn([py, ENGINE, "hook", "pre-tool"], PAYLOAD))
-    row("a PreToolUse, alone on the bus", full,
+    script = ms(spawn([py, ENGINE, "hook", "pre-tool"], PAYLOAD))
+    row("a PreToolUse, alone on the bus", script,
         "returns at the live-count check")
+
+    # How a hook reaches it, which since 2.12.0 is by importing it. Same
+    # interpreter start, same work, and the compile paid once per change to the
+    # file rather than once per hook.
+    print("\nTHE ENGINE AS A MODULE (`hook.py wake <event>`: what the hooks run)")
+    full = ms(spawn(engine_argv(py, "pre-tool"), PAYLOAD))
+    row("the same PreToolUse, imported", full,
+        "%.0f ms saved per wake, %.1fx the bare floor"
+        % (script - full, full / bare if bare else 0))
 
     # The path that actually matters: somebody else is live, and the command
     # touches something the repository declares. This is what a guarded call
     # costs, and it is the number to compare against a machine with a fast path.
     guarded = setup_contended(py)
     if guarded:
+        # Against the idle wake above and not against the script floor: both are
+        # measured through the entry point the hooks use, so the difference is the
+        # guard's own work and nothing else.
         row("a PreToolUse that takes a lock", guarded,
-            "+%.0f ms of real work" % (guarded - off))
+            "+%.0f ms of real work" % (guarded - full))
     else:
         guarded = full
         print("  ! could not set up the contended case; using the quiet number")
@@ -221,17 +251,18 @@ def main():
     print("  %-46s %8.0f us  %s" % ("one isdir, which could replace it", st,
                                     "%.0fx cheaper" % (mk / st if st else 0)))
 
-    print("\nTHE PYTHON FAST PATH — what Windows now runs")
+    print("\nTHE PYTHON FAST PATH — what Windows runs in front of all of it")
     gate = os.path.join(ROOT, "bin", "hook.py")
+    quiet = None
     if os.path.exists(gate):
         quiet = ms(spawn([py, gate, "pre-tool"], PAYLOAD))
         row("a hook with nothing to do", quiet,
-            "%.0f ms saved against the engine" % (off - quiet))
+            "%.0f ms saved against a wake" % (full - quiet))
         row("  ... its floor is the interpreter", bare, "so this is close to free")
     else:
         print("  ! no bin/hook.py in this copy")
 
-    print("\nSUSPICION 3 — is there a shell fast path in front of it?")
+    print("\nSUSPICION 3 — is there a shell fast path in front of that?")
     hook = os.path.join(ROOT, "bin", "ab-hook")
     wired = ""
     try:
@@ -241,11 +272,18 @@ def main():
     if "ab-hook" in wired and os.name != "nt":
         fast = ms(spawn([hook, "pre-tool"], PAYLOAD))
         row("the shell fast path, alone on the bus", fast,
-            "%.0fx cheaper than waking the engine" % (off / fast if fast else 0))
+            "%.0fx cheaper than waking the engine" % (full / fast if fast else 0))
+    elif quiet is not None:
+        # Not "none, so every hook pays for the engine". `bin/hook.py` IS the fast
+        # path here and the row above is what it costs; what is absent is only a
+        # shell one in front of IT, and on Windows there is no shell worth putting
+        # there — see the cmd.exe row at the top for the one that might be.
+        row("none in front of bin/hook.py, which is the fast path", quiet,
+            "so a hook with nothing to do pays this, not the %.0f ms above" % full)
     else:
         print("  %-46s %8s      %s"
-              % ("none — hooks call Python directly", "-",
-                 "so every hook pays the %.0f ms above" % off))
+              % ("no fast path at all in this copy", "-",
+                 "so every hook pays the %.0f ms above" % full))
 
     print("\nWHAT A TURN COSTS, from these numbers")
     for label, batches, edits, bash in (("reading around", 5, 0, 0),

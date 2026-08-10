@@ -317,6 +317,8 @@ def stand_in_engine(where):
                  '    p = os.environ.get("FASTPATH_LOG")\n'
                  '    if p:\n'
                  '        open(p, "a").write((event or "?") + "\\n")\n'
+                 'def use_utf8():\n'
+                 '    pass\n'
                  'def ensure_dirs():\n'
                  '    pass\n'
                  'def run_hook(event, raw):\n'

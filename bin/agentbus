@@ -10400,6 +10400,25 @@ def cli_doctor(_args):
     found = shutil.which("agentbus")
     print("command      : %s" % (found or "NOT on PATH — run `%s install`"
                                  % os.path.realpath(__file__)))
+    # Whether this file's bytecode is cached, which is worth a line because when
+    # it is not, every hook that wakes the engine reads and compiles ten thousand
+    # lines again — 238 ms of a 313 ms floor on the Windows host that was measured
+    # on — and nothing about paying it is visible from the outside. Both fast paths
+    # import this file so that the cache applies; a plugin directory that is not
+    # writable gets no cache, silently, for the life of the install.
+    import importlib.util
+    src = os.path.realpath(__file__)
+    try:
+        pyc = importlib.util.cache_from_source(src)
+        cached = os.path.getmtime(pyc) >= os.path.getmtime(src)
+    except (OSError, NotImplementedError, ValueError):
+        pyc, cached = "", False
+    print("bytecode     : %s" % (
+        short_path(pyc) if cached else
+        "NOT cached (%s) — every woken hook recompiles this file"
+        % ("this directory is not writable"
+           if not os.access(os.path.dirname(src), os.W_OK)
+           else "no hook has woken the engine since it last changed")))
 
 
 COMMANDS = {
@@ -10495,17 +10514,30 @@ def read_payload():
     return json.loads(raw.decode("utf-8-sig", "replace") or "{}")
 
 
-def main():
-    # Windows consoles are not UTF-8 by default, so every message this prints
-    # with an em-dash in it arrives as mojibake — which is enough to make agents
-    # on a Turkish machine start transliterating what they say to each other so
-    # it stays readable.
+def use_utf8():
+    """Print UTF-8 whatever the console thinks it is.
+
+    Windows consoles are not UTF-8 by default, so every message this prints with
+    an em-dash in it arrives as mojibake — which is enough to make agents on a
+    Turkish machine start transliterating what they say to each other so it stays
+    readable.
+
+    A function rather than the first lines of `main` because `main` is no longer
+    the only way in. Both fast paths reach this module by importing it and calling
+    `run_hook`, so an entry point that skipped this would write the hook's own
+    "could not read the payload" warning to a console that cannot encode it — and
+    that warning exists precisely because a guard which fails open has to say so.
+    Losing it inside a UnicodeEncodeError is the silence it was written against."""
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             try:
                 stream.reconfigure(encoding="utf-8")
             except (OSError, ValueError):
                 pass
+
+
+def main():
+    use_utf8()
     ensure_dirs()
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help", "help"):

@@ -520,13 +520,18 @@ floors.
 |---|---|
 | Alone, any hook | ~5 ms — the fast path reads one small file and exits |
 | Two sessions, a tool batch that ran no command | ~5 ms |
-| Two sessions, a tool batch that ran a command | ~46 ms — one engine start per batch, not per command |
-| Two sessions, a guarded command | ~48 ms, and it takes the lock |
+| Two sessions, a command that only reads | ~5 ms — the fast path answers it |
+| Two sessions, a tool batch that ran a command | ~24 ms — one engine start per batch, not per command |
+| Two sessions, a guarded command | ~24 ms, and it takes the lock |
 
-Nearly all of that ~46 ms is Python arriving: ~16 ms to start the interpreter
-and ~26 ms to read and compile the engine, which a hook script never gets to
-cache. The guard's own work — deciding, taking the lock — is the couple of
-milliseconds between the last two rows.
+Nearly all of that ~24 ms is Python arriving: ~15 ms to start the interpreter,
+and the rest unpickling the engine's cached bytecode. Compiling it is ~31 ms more
+and is paid once per change to the file rather than once per hook, because both
+fast paths reach the engine by importing it — a file the interpreter is handed as
+a script is never cached, and that is what `agentbus hook <event>` still costs if
+you call it by hand. `agentbus doctor` reports whether the cache is there; a
+plugin directory that cannot be written to never gets one. The guard's own work —
+deciding, taking the lock — is under a millisecond of the last two rows.
 
 There is no daemon and nothing runs between sessions. Alone, it is effectively
 free.
