@@ -1,0 +1,36 @@
+# Line endings, and why this file has to exist.
+#
+# The repository stores LF everywhere. A Windows clone with `core.autocrlf=true`
+# — which is git-for-Windows' own default, and what a marketplace install ends up
+# with — rewrites every text file to CRLF on checkout. For prose that is
+# harmless. For `bin/ab-hook` it is not: a shell script whose lines end in CR
+# does not parse, and `bash` reports `$'\r': command not found` on every line.
+#
+# That matters more than a broken test run. `bin/ab-hook` is a HOOK. The two
+# invariants this plugin is built on are that a hook always exits 0 and prints
+# nothing or valid JSON, because a non-zero exit blocks the user's tool call. A
+# CRLF `ab-hook` violates both on every single call.
+#
+# Today that is latent rather than live: `install.ps1` wires the Python entry
+# point on Windows (`use_bash = not IS_WIN`), so `ab-hook` is never executed
+# there. It goes live the moment a Windows machine with Git Bash or WSL picks the
+# POSIX path — then the fast path in front of every tool call fails to parse.
+# Measured on a Windows 10 work machine, 2026-08-10: every one of the 23 shell
+# files in a fresh marketplace clone was CRLF, `ab-hook` included, and
+# `bash tests/run.sh` died on line 15 before running an assertion.
+#
+# `eol=lf` overrides `core.autocrlf` per path, so this needs no renormalising —
+# the blobs are already LF.
+
+* text=auto
+
+# Anything a shell has to parse, or Python has to exec as a script.
+*.sh          text eol=lf
+bin/ab-hook   text eol=lf
+bin/agentbus  text eol=lf
+bin/hook.py   text eol=lf
+install.sh    text eol=lf
+
+# PowerShell is the one place CRLF is the native convention, and the installer
+# is the file a Windows user is most likely to open in an editor that cares.
+*.ps1         text eol=crlf
