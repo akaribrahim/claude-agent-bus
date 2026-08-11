@@ -401,5 +401,52 @@ ab_hook prompt-submit "$(payload session sid=sess-free "cwd=$INNER")" > /dev/nul
 assert_equal "$INNER" "$(session_field sess-free root)" \
   "a session that has not pinned itself is still followed"
 
+# ---- a service record nobody can be served by, and one that still serves ----
+#
+# `serves/` was the one state directory with no cleanup path, and the one that
+# could not have the ordinary one: every other record belongs to a party, so
+# `forget_session` takes it, while a service DELIBERATELY outlives the chat that
+# started it. Found with four dead records on the development machine, two under
+# repository keys only the `--git-common-dir` defect could have produced.
+#
+# The third assertion is the one that matters. A record whose process is still
+# answering must survive its chat closing, because that is the dangerous case the
+# whole file above is about — a detached dev server serving a tree nobody is
+# sitting in. Sweeping it would blind the guard to exactly the failure it exists
+# for, and the sweep would look tidy while doing it.
+
+plant() {   # <name> <repo key> <pid>
+  python3 -c "
+import json, os, sys
+json.dump({'resource': sys.argv[1], 'repo': sys.argv[2], 'root': '/nowhere',
+           'by': 'gone', 'pid': int(sys.argv[3]), 'port': 1},
+          open(os.path.join('$AGENTBUS_HOME', 'serves',
+                            '%s__%s.json' % (sys.argv[2].replace(':', '_'),
+                                             sys.argv[1])), 'w'))" "$1" "$2" "$3"
+}
+served() {   # → the serve files still on disk, sorted
+  (cd "$AGENTBUS_HOME/serves" && ls 2>/dev/null | sort | paste -sd' ' -)
+}
+
+# A process of its own, deliberately not this shell's: `run.sh`'s `reap_services`
+# signals every pid it finds in `serves/`, and by the process GROUP first — so a
+# record planted with `$$` makes the harness kill the test that planted it, which
+# it duly did on the first run of this block.
+sleep 120 & STILL_UP=$!
+
+MYKEY=$(session_field sess-a repo_key)
+plant orphan  "ghostrepo:0000" 999999        # dead pid, repo nobody is in
+plant mineoff "$MYKEY"         999999        # dead pid, but this repo IS live
+plant detached "ghostrepo:0000" "$STILL_UP"  # still answering, chat gone
+
+assert_contains "$(served)" "ghostrepo_0000__orphan.json" "three records are planted"
+ab sess-a status > /dev/null                # any command refreshes the derived files
+
+assert_not_contains "$(served)" "ghostrepo_0000__orphan.json" \
+  "a service whose process is gone, in a repository nobody is in, is forgotten"
+assert_contains "$(served)" "__mineoff.json" \
+  "while one in a repository somebody is still working in is kept, to be restarted"
+assert_contains "$(served)" "ghostrepo_0000__detached.json" \
+  "and one still answering outlives the chat that started it, which is the whole point"
 
 finish

@@ -2,6 +2,26 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.12.2 — 2026-08-11
+
+**A dev server nobody can be served by stops being remembered.** `serves/` was
+the one piece of state with no cleanup path, and the one that could not have the
+ordinary one: every other record belongs to a party, so ending a chat takes it,
+while a service is *meant* to outlive the chat that started it — a detached dev
+server still answering for a tree nobody is sitting in is the dangerous case this
+plugin exists to catch. So the test is not age. It is the two facts the board
+already filters on: the process is gone, and no live session is in that
+repository, so nobody can be served by it and nobody will come back for it.
+
+Found with four such records on the machine this is developed on, two of them
+filed under repository keys that only the `--git-common-dir` defect fixed in
+2.7.0 could have produced — keys nothing will ever read again, that nothing would
+ever have removed.
+
+A service still answering is kept, chat or no chat, and there is an assertion
+whose only job is to keep it that way: sweeping it would blind the guard to
+exactly the failure it exists for, and would look tidy while doing it.
+
 ## 2.12.1 — 2026-08-10
 
 **A git too old to compare two branches says so.** `agentbus merges` and the

@@ -1,7 +1,7 @@
 {
   "name": "agent-bus",
   "description": "Coordination for parallel Claude Code sessions on one machine: presence, shared-resource locks, service ownership, declared file ownership, an interference guard and handoff summaries.",
-  "version": "2.12.1",
+  "version": "2.12.2",
   "author": {
     "name": "Ibrahim Akar"
   },

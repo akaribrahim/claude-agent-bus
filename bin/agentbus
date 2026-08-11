@@ -784,7 +784,56 @@ def refresh_derived(sessions=None):
     sweep_tasks(sessions)
     sweep_declared()
     sweep_acted(sessions)
+    sweep_serves(sessions)
     rebuild_hot(sessions)
+
+
+def sweep_serves(sessions):
+    """Forget a service record whose process is gone and whose repository nobody
+    is in.
+
+    This was the one state directory with no cleanup path at all, and it is the
+    one that could not have the ordinary one: every other record belongs to a
+    party, so `forget_session` and `forget_agent` take it. A service deliberately
+    outlives the session that started it — a detached dev server still answering
+    for a tree whose chat has closed is the dangerous case this plugin exists to
+    catch — so ending a session must not forget its service.
+
+    What makes a record cruft is therefore not age. It is the pair of facts the
+    board already filters on: the process is not running, and no live session is
+    in that repository, so nobody can be served by it and nobody will come back
+    for it. Found with four such records on the development machine, two of them
+    under repository keys that only the `--git-common-dir` defect of 2.7.0 could
+    have produced — keys nothing will ever read again.
+
+    This directory holds two kinds of file and only one of them is a service.
+    `moves_path` keeps a service's handover history here as `<key>__<res>.moves`,
+    deliberately beside the record rather than inside it, because stopping a
+    service deletes the record and a handover *is* a stop followed by a start —
+    so the history has to outlive it. Those files carry no `repo` and no `pid`,
+    which the first version of this function read as evidence of death: it
+    deleted the churn history and four assertions about repeated handovers went
+    quiet. So the extension is the test, matching `serve_path`.
+
+    Only pids this plugin recorded are examined, and none is signalled."""
+    live = {s.get("repo_key") for s in sessions if s.get("repo_key")}
+    try:
+        names = os.listdir(SERVES)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith(".json"):
+            continue      # `.moves` is the history, and outliving is its job
+        path = os.path.join(SERVES, name)
+        rec = read_json(path)
+        if not rec or rec.get("repo") in live:
+            continue
+        if pid_alive(rec.get("pid", 0)):
+            continue      # answering for somebody, chat or no chat
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def sweep_autoclaims():
