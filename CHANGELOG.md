@@ -2,6 +2,59 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.13.1 — 2026-08-12
+
+**A JSON file with a byte-order mark on it is read, not refused.** PowerShell
+and Notepad both write one, so on Windows any JSON a person has touched has a
+BOM — and `json.loads` refuses it at the very first character. Two files sit in
+that position. `~/.claude/settings.json` is the one that was found: the
+installer read it, failed, and told the user their settings were not valid JSON
+when they were. The one that costs more is a repository's own
+`.claude/agent-bus.json`, because a config that does not parse is every guard in
+that repository quietly not existing. Every read is `utf-8-sig` now and every
+write is plain `utf-8` — on reading it strips a mark if there is one and is
+ordinary UTF-8 if there is not, and on writing it would add one, which is the
+asymmetry. `read_payload` has treated the BOM this way since 2.3.0; the state
+files had not. Not a regression from 2.13.0 spelling the encoding out: `cp1254`
+refused a BOM too, only with a vaguer complaint.
+
+**The Windows installer looks for a Python where one has already been found.**
+`install.ps1` probed `py`, `python` and `python3` on PATH and gave up. On a
+machine where policy refuses the Python MSI, the interpreter is an embeddable
+zip in the user's profile and PATH holds only the Microsoft Store alias, which
+answers "not found" and exits 9009 — so the documented Windows install was dead
+there and every install had to be done by calling `bin/agentbus install` by
+hand. But that hand-run wrote the interpreter's absolute path down twice, in the
+`agentbus.cmd` shim and in the `command` of every hook it wired. Both are read
+now before giving up, and each candidate still has to pass the same version
+check, because a recorded path can outlive the interpreter. It makes the manual
+step something you do once rather than every time; if it still cannot find one,
+it now says what to run to bootstrap it.
+
+**`agentbus status` also reports the copy it is running from.** The
+unwired-copy warning added in 2.13.0 asked `loaded_copies`, which answers "the
+*other* copies" — right for the ordinary shape, where a shim points at the wired
+older version and the fresh unwired one is beside it. But running the unwired
+copy's own engine is what somebody checking on it actually does, and it said
+nothing at all.
+
+**The fix for a pre-2.12.0 clone, correctly this time.** 2.13.0 said to run `git
+add --renormalize .`. That does not work: it normalizes the index, and the index
+was already LF — the CRLF is in the working copy, which the command never
+touches. What re-checks the files out is `git rm --cached -r . && git reset
+--hard`, or a fresh clone. Measured on such a clone: 17 of 25 shell files still
+CRLF, and the suite dying on `$'\r'` in whichever one it reached first.
+
+Everything 2.13.0 claimed about Windows was re-measured on the machine that
+reported it, and holds: the serve record's pid and the pid `netstat` shows
+LISTENING came back 40564 and 40564, `spawned` held cmd.exe, a second `serve`
+from the same worktree said "already serving your worktree" and left the process
+alone, a detached service that used to survive `taskkill` now stops in 5.9
+seconds, the em dash round-trips through the log, the rotation trims 6000 lines
+to 1000 with its non-ASCII tail intact, and two sessions in a checkout whose path
+carries Turkish diacritics agree on the repository key. What could not be
+measured there is the one thing needing a Windows in another display language.
+
 ## 2.13.0 — 2026-08-12
 
 **On Windows no service could be attributed to a checkout at all — including one
@@ -67,9 +120,10 @@ Two smaller ones from the same report. The Git Bash shim the installer writes
 was itself CRLF, because Windows text mode rewrites `\n` and that shim spells
 its own line ends out — the `.gitattributes` breakage arriving through the one
 door `git add --renormalize` cannot reach, since the file is generated rather
-than checked out. And on a clone made before 2.12.0, run `git add --renormalize
-.` once: attributes do not repair a working copy checked out before they
-existed, so `tests/run.sh` still dies there on `$'\r'`.
+than checked out. And a clone made before 2.12.0 still has CRLF working copies,
+which attributes cannot repair on their own, so `tests/run.sh` dies there on
+`$'\r'` — see 2.13.1 for the command that fixes it. The one printed here first
+was wrong.
 
 The Windows-only branches are now exercised on every platform, in
 `tests/test_windows.py`, fed the bytes that machine actually produced. None of

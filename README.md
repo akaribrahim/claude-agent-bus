@@ -598,10 +598,22 @@ what it is about to spend and stops unless you add `--yes`.
   Two things still ask something of you there. After a `claude plugin update`,
   re-run the installer: the cache path carries the version, so a bump leaves a
   fresh copy wired to the committed hooks, which name a shell entry point
-  Windows does not have. `agentbus status` now says so when it is the case. And
-  if you cloned before 2.12.0, run `git add --renormalize .` once — the
-  `.gitattributes` that keeps shell scripts LF cannot repair a working copy that
-  was checked out before it existed, so `tests/run.sh` still dies on `$'\r'`.
+  Windows does not have. `agentbus status` now says so when it is the case.
+
+  And a clone made before 2.12.0 still has CRLF working copies that
+  `.gitattributes` cannot repair by itself — 17 of the 25 shell files on one such
+  clone, which is `bash tests/run.sh` dying on `$'\r'`. `git add --renormalize .`
+  does *not* fix it: that normalizes the index, and the index was already LF.
+  What re-checks the files out is
+
+  ```bash
+  git rm --cached -r . && git reset --hard
+  ```
+
+  or a fresh clone. If you also drive `agentbus` from Git Bash and get
+  `Permission denied` on the interpreter, that is not this: some endpoint
+  protection refuses a Windows executable launched from inside `sh -c`, and the
+  same interpreter called directly works. Use the `.cmd` shim there.
 
 ## Tests
 

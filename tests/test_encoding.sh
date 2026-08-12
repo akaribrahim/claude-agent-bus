@@ -133,6 +133,47 @@ out=$(ab sess-b status 2>&1)
 assert_contains "$out" "ölçüm-günlüğü.txt" \
   "a written path with diacritics in it survives into the handoff"
 
+# ---- a byte-order mark on a file a person edited ----------------------------
+#
+# PowerShell and Notepad both put a BOM on what they write, so on Windows any
+# JSON somebody has touched has one — and `json.loads` refuses it outright, at
+# the first character. Two files are in that position. `~/.claude/settings.json`
+# is the one that was found: the installer read it, failed, and told the user
+# their settings were not valid JSON when they were. The one below is the same
+# file in the same position and costs more, because a repository config that
+# does not parse is every guard in that repository quietly not existing.
+#
+# Not a regression from spelling the encoding out — `cp1254` refused a BOM too,
+# with a vaguer message. Reported from Windows 10 on 2026-08-12.
+
+head3() {   # <path> → its first three bytes as hex, single-spaced
+  od -An -tx1 -N3 "$1" | tr -s ' ' | sed 's/^ //; s/ $//'
+}
+
+BOMREPO=$(make_repo bomrepo)
+mkdir -p "$BOMREPO/.claude"
+printf '\357\273\277' > "$BOMREPO/.claude/agent-bus.json"
+cat >> "$BOMREPO/.claude/agent-bus.json" <<'JSON'
+{"resources": [{"name": "bomdb", "desc": "the shared development database",
+                "patterns": ["\\bpsql\\b"]}]}
+JSON
+commit_all "$BOMREPO"
+new_session sess-c "$BOMREPO"
+
+assert_equal "ef bb bf" "$(head3 "$BOMREPO/.claude/agent-bus.json")" \
+  "the fixture really does start with a byte-order mark"
+out=$(ab sess-c status 2>&1)
+assert_contains "$out" "bomdb" \
+  "a repository config a Windows editor wrote is still read"
+assert_not_contains "$out" "No shared resources declared" \
+  "rather than leaving the repository looking like it declares nothing"
+
+# The same on the write side: what this reads back it must not have BOM'd itself,
+# or every file it owns grows one more mark per pass.
+ab sess-c post "$MARK" > /dev/null
+assert_not_contains "$(head3 "$AGENTBUS_HOME/events.jsonl")" "ef bb bf" \
+  "and nothing this plugin writes gets a mark of its own"
+
 # ---- reading the repository, in that locale ----------------------------------
 #
 # `init-repo` reads a project's own files to find its services. Those are files

@@ -281,10 +281,24 @@ def ensure_dirs():
 # `errors="replace"` on the reads is deliberate and is not belt-and-braces: a
 # file some earlier version already mangled has to stay parseable, or the
 # rotation that would finally clear it can never run.
+#
+# And every read is `utf-8-sig` while every write is plain `utf-8`, which is the
+# one asymmetry here worth stating out loud. On reading, `utf-8-sig` strips a
+# byte-order mark if there is one and is ordinary UTF-8 if there is not, so it
+# is a superset and never the wrong choice; on writing it would *add* a BOM to
+# every file this plugin owns, which is why the writes must not use it. Windows
+# is where this matters: PowerShell and Notepad both put a BOM on what they
+# write, so any JSON a person has touched there has one. `~/.claude/settings.json`
+# is exactly that file, and the installer read it, failed, and told the user
+# their settings were not valid JSON when they were. Measured on Windows 10 on
+# 2026-08-12 — and a repository's own `.claude/agent-bus.json` is the same file
+# in the same position, where the cost is not a wrong message but every guard in
+# that repository quietly not existing. `read_payload` has taken the BOM
+# seriously since 2.3.0 for the same reason; the state files had not.
 
 def read_json(path, default=None):
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
             return json.load(fh)
     except Exception:
         return default
@@ -324,7 +338,7 @@ def write_json_pretty(path, obj):
 
 def read_int(path, default=0):
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
             return int(fh.read().strip() or default)
     except Exception:
         return default
@@ -968,7 +982,7 @@ def recent_writes(sid, cutoff, compact=False):
     path = os.path.join(WRITES, "%s.log" % sid)
     out = []
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
             lines = fh.readlines()[-800:]
     except OSError:
         return out
@@ -1470,7 +1484,7 @@ def last_action(key):
     if not path:
         return None
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8-sig", errors="replace") as fh:
             line = fh.readline(512).strip()
         at = int(os.path.getmtime(path))
     except (OSError, IOError, ValueError):
@@ -1976,7 +1990,7 @@ def emit(sid, agent, repo_key, kind, text, to=None, extra=None):
 def read_events(after=0):
     out = []
     try:
-        with open(EVENTS, "r", encoding="utf-8", errors="replace") as fh:
+        with open(EVENTS, "r", encoding="utf-8-sig", errors="replace") as fh:
             for line in fh:
                 try:
                     rec = json.loads(line)
@@ -1999,7 +2013,7 @@ def rotate_events():
     # discards everything appended in between.
     with Mutex("events"):
         try:
-            with open(EVENTS, "r", encoding="utf-8", errors="replace") as fh:
+            with open(EVENTS, "r", encoding="utf-8-sig", errors="replace") as fh:
                 lines = fh.readlines()
         except OSError:
             return
@@ -10019,7 +10033,7 @@ def lit(word):
 
 def read_text(path, limit=200000):
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
             return fh.read(limit)
     except (OSError, UnicodeDecodeError):
         return ""
@@ -10391,7 +10405,7 @@ def hooks_look_wrong(root):
     """Why a copy's wiring cannot work here, or "" when it looks fine."""
     path = os.path.join(root, "hooks", "hooks.json")
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8-sig") as fh:
             text = fh.read()
     except OSError:
         return "has no hooks.json at all"
@@ -10417,7 +10431,18 @@ def unwired_copies():
     confused agent runs, and `status` is."""
     out = []
     try:
-        for other in loaded_copies():
+        roots = list(loaded_copies())
+        # And the copy this is running from, when that is itself one Claude Code
+        # loads. `loaded_copies` answers "the OTHER copies" on purpose — the
+        # ordinary shape is a shim pointing at the wired older version, warning
+        # about the fresh unwired one beside it. But running the unwired copy's
+        # own engine is what somebody checking on it actually does, and it
+        # answered with nothing at all. Reported from Windows 10 on 2026-08-12
+        # by exactly that route.
+        here = os.path.realpath(plugin_root())
+        if os.path.join(".claude", "plugins", "cache") in here:
+            roots.append(here)
+        for other in roots:
             why = hooks_look_wrong(other)
             if why:
                 out.append((other, why))
@@ -10463,7 +10488,7 @@ def cli_install(args):
                 and not flag(args, "--python-hooks"))
     src = "hooks.posix.json" if use_bash else "hooks.python.json"
     try:
-        with open(os.path.join(root, "hooks", src), encoding="utf-8") as fh:
+        with open(os.path.join(root, "hooks", src), encoding="utf-8-sig") as fh:
             text = fh.read()
         if not use_bash:
             text = text.replace("__PYTHON__", json.dumps(sys.executable)[1:-1])
