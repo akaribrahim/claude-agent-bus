@@ -2,6 +2,83 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.13.0 — 2026-08-12
+
+**On Windows no service could be attributed to a checkout at all — including one
+agent-bus had started itself.** That is the failure this whole plugin exists to
+catch, and there it had never once fired. Three things can recognise a running
+service: the pid written down when it was started, a shared process group, and
+reading the listener's working directory. The last two are `return False` and
+`return None` on Windows by construction, and the first was never true there
+either — `shell=True` runs `cmd /c`, so the pid that comes back belongs to the
+shell and not to whatever ends up listening. All three failed together and the
+answer came back 'unknown', which is not 'down', so every `serve` and every `run`
+stopped the service and started it again and none of them ever said "already
+serving your worktree". Measured on Windows 10: recorded pid 9904, listening pid
+31416.
+
+The pid recorded now is whoever holds the port once the service is ready.
+Nothing was listening on it a moment earlier — the code either cleared it or
+refused to go on — and this command is what has run since, so what holds it is
+ours. That inference needs no platform support at all, and it makes the pid
+written down the same pid every later check compares against. The shell it was
+spawned from is kept beside it, because killing a process tree still needs it.
+Linux gets the correction for free: the process-group bridge was papering over a
+fork there, and is now only a fallback.
+
+**A dev server on a Windows in any language but English read as down.** The pid
+holding a port was found by matching the literal word "LISTENING" in `netstat`
+output, and Windows translates that column. On such a machine every declared
+service reported down — silently, which is the answer that makes the plugin do
+nothing rather than something visibly wrong. What is matched now is the shape of
+the row instead: a listening socket is the one whose foreign address is the
+wildcard, and no display language changes that.
+
+**A service that will not stop now says what it tried.** The Windows branch was
+one `taskkill` with no wait and no escalation, its exit code and its stderr both
+collected and thrown away, the whole thing inside an `except: pass`. It waits
+now, escalates to `Stop-Process -Force`, and carries back what each attempt
+said. It has to: measured against corporate endpoint protection, `taskkill`
+exits 1 with "ERROR: Not found" both for a pid it did kill and for one it could
+not touch, so its exit status settles nothing and only the probe after it does —
+and `Stop-Process` was the one thing that ended a service created detached,
+which is how every service on Windows is created.
+
+**What one machine writes, another can read.** Every file this plugin owns is
+UTF-8 now, on both sides, said out loud. Python takes a text file's encoding
+from the locale when nobody tells it otherwise, so on a Turkish Windows the
+event log was written as UTF-8 and read back as cp1254, and every em dash
+agent-bus prints in its own text came back as `â€”`. Cosmetic in the roster; not
+in the rotation, which reads the log and writes it back, and which turned out to
+be quietly failing to run at all rather than doing it wrong. The same door was
+open on git's output, where it decides a repository key: one diacritic in a
+checkout's path was enough to register a session against a repository nobody
+else was in.
+
+**`agentbus status` says when the copy Claude Code loads cannot work.** A
+`claude plugin update` writes a new cache directory holding the committed hooks,
+and those name a shell entry point Windows does not have — so until the
+installer is re-run every hook in it dies, no session registers, nothing is
+recorded, and the first thing anybody sees is a roster that has gone quiet.
+`doctor` and `install` have reported this since it was found. Neither of them is
+what a confused agent runs, and `status` is.
+
+Two smaller ones from the same report. The Git Bash shim the installer writes
+was itself CRLF, because Windows text mode rewrites `\n` and that shim spells
+its own line ends out — the `.gitattributes` breakage arriving through the one
+door `git add --renormalize` cannot reach, since the file is generated rather
+than checked out. And on a clone made before 2.12.0, run `git add --renormalize
+.` once: attributes do not repair a working copy checked out before they
+existed, so `tests/run.sh` still dies there on `$'\r'`.
+
+The Windows-only branches are now exercised on every platform, in
+`tests/test_windows.py`, fed the bytes that machine actually produced. None of
+what is fixed here could have failed a test on the Mac this is written on,
+because the code under it never ran there — which is the whole reason it took a
+second Windows session to find, and the reason that file exists.
+`tests/test_encoding.sh` runs the bus in a locale that is not UTF-8 and asserts
+what survives the crossing, in both directions.
+
 ## 2.12.2 — 2026-08-11
 
 **A dev server nobody can be served by stops being remembered.** `serves/` was

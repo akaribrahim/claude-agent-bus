@@ -112,6 +112,53 @@ out=$(ab sess-a serves)
 assert_equal 2 "$(printf '%s\n' "$out" | grep -c 'agent-bus')" \
   "both services are recognised as ours, however the shell ran them"
 
+# ---- the record names the process holding the port, not the shell -----------
+#
+# `serving` has three ways to recognise a service it started: pid equality, a
+# shared process group, and reading the listener's working directory. On Windows
+# the last two are `return False` and `return None` unconditionally, and
+# `shell=True` there runs `cmd /c` — so the recorded pid was never the
+# listener's and all three failed together. `serving` answered 'unknown', which
+# is not 'down', so `ensure_serving` stopped and restarted the service on every
+# single serve and never once said it was already yours. Measured on Windows 10
+# on 2026-08-12: recorded pid 9904, listening pid 31416.
+#
+# The pid written down is therefore whoever holds the port once the service is
+# ready — a fact that needs no platform call, only the port — and the shell it
+# was spawned from is kept beside it, because that is the other handle to kill
+# by. Asserted on the forking resource because that is the one where the two
+# genuinely differ on this machine.
+
+serve_rec() {   # <resource> <key> → one field of that resource's serve record
+  python3 -c '
+import glob, json, os, sys
+for p in glob.glob(os.path.join(os.environ["AGENTBUS_HOME"], "serves",
+                                "*__%s.json" % sys.argv[1])):
+    print(json.load(open(p)).get(sys.argv[2], ""))
+    break' "$1" "$2"
+}
+
+if command -v lsof > /dev/null 2>&1; then
+  LISTEN=$(lsof -ti "tcp:$PORT2" -sTCP:LISTEN 2>/dev/null | head -1)
+  assert_equal "$LISTEN" "$(serve_rec forked pid)" \
+    "the serve record names the process that is actually holding the port"
+  if [ "$(serve_rec forked spawned)" != "$LISTEN" ]; then
+    _ok "and remembers the shell it was started through, separately"
+  else
+    _bad "and remembers the shell it was started through, separately" \
+         "spawned=$(serve_rec forked spawned) listener=$LISTEN"
+  fi
+fi
+
+# The consequence, which is what anybody actually noticed: serving it again from
+# the worktree it already serves has to be a no-op, not a restart.
+PID_WAS=$(serve_rec forked pid)
+out=$(ab sess-a serve forked 2>&1)
+assert_contains "$out" "already serving your worktree" \
+  "serving it again from the worktree it already serves does nothing"
+assert_equal "$PID_WAS" "$(serve_rec forked pid)" \
+  "and the process was left alone rather than stopped and started again"
+
 # Both are up now, so the "not running" line has nothing left to say and the
 # briefing is back to the one warning that matters here: it is up, and it is not
 # yours. The two answers must not both be given about one service.

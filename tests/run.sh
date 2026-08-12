@@ -82,14 +82,20 @@ reap_services() {   # <bus dir>
   local f pid
   for f in "$1"/serves/*.json; do
     [ -f "$f" ] || continue
+    # Both pids: `pid` is whoever holds the port and `spawned` is the shell it
+    # was started through, and since 2.13.0 those are deliberately not the same
+    # record field. Killing only the listener can leave its shell behind.
     pid=$(python3 -c '
 import json, sys
 try:
-    print(json.load(open(sys.argv[1])).get("pid") or "")
+    rec = json.load(open(sys.argv[1]))
+    print(" ".join(str(rec.get(k)) for k in ("spawned", "pid") if rec.get(k)))
 except Exception:
     pass' "$f" 2>/dev/null)
     [ -n "$pid" ] || continue
-    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    for p in $pid; do
+      kill -TERM "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+    done
   done
 }
 

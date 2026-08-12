@@ -587,15 +587,21 @@ what it is about to spend and stops unless you add `--yes`.
   each subagent as its own party, but the file-collision guard and the
   interference note still work per session, so two subagents editing one file
   are not warned about each other.
-- **Windows is verified but young.** Two sessions were run on Windows 10 with a
-  Turkish locale and an embeddable Python; presence, messaging, locks, the
-  ownership guard, `here`, `status`, `serves` and session renaming all behaved.
-  What that run also found is fixed here: a marketplace install patched the
-  clone rather than the cache copy Claude Code loads, so every hook died while
-  the installer reported success; a UTF-8 BOM on a payload turned a guard off
-  silently; and the console mangled every non-ASCII message. After a
-  `claude plugin update`, re-run the installer — the cache path carries the
-  version, so a bump leaves a fresh unwired copy.
+- **Windows is verified but young.** Sessions have been run twice on Windows 10
+  with a Turkish locale and an embeddable Python; presence, messaging, locks,
+  the ownership and file-collision guards, `here`, `status`, `serves`, the
+  board, `merges` and session renaming all behaved. Both rounds found real
+  defects and both are fixed here — the second round's are in 2.13.0, and the
+  headline one is that no service could be attributed to a checkout on Windows
+  at all, including one agent-bus had started itself.
+
+  Two things still ask something of you there. After a `claude plugin update`,
+  re-run the installer: the cache path carries the version, so a bump leaves a
+  fresh copy wired to the committed hooks, which name a shell entry point
+  Windows does not have. `agentbus status` now says so when it is the case. And
+  if you cloned before 2.12.0, run `git add --renormalize .` once — the
+  `.gitattributes` that keeps shell scripts LF cannot repair a working copy that
+  was checked out before it existed, so `tests/run.sh` still dies on `$'\r'`.
 
 ## Tests
 

@@ -263,9 +263,28 @@ def ensure_dirs():
             pass
 
 
+# Every file this plugin owns is UTF-8, on every platform, said out loud.
+#
+# Python opens a text file in `locale.getpreferredencoding()` when you do not
+# tell it otherwise. So on a Turkish Windows the bus wrote `events.jsonl` as
+# UTF-8 — that one had an explicit `.encode("utf-8")` — and read it back as
+# cp1254: every em dash agent-bus prints in its own event text came back as
+# `â€”`. The console was not the cause and had already been ruled out; it was
+# the read. Reported from Windows 10 in Turkish on 2026-08-12.
+#
+# Cosmetic in the board. Not cosmetic in `rotate_events`, which reads the file
+# and writes it back: at ROTATE_AT it persists the mangling into the file, and
+# one character outside the codepage raises inside the rotation instead — the
+# one place a decode error takes the whole event log with it. Same shape in the
+# write log, which stores paths, and a path can hold anything a filesystem does.
+#
+# `errors="replace"` on the reads is deliberate and is not belt-and-braces: a
+# file some earlier version already mangled has to stay parseable, or the
+# rotation that would finally clear it can never run.
+
 def read_json(path, default=None):
     try:
-        with open(path, "r") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             return json.load(fh)
     except Exception:
         return default
@@ -274,7 +293,7 @@ def read_json(path, default=None):
 def write_json(path, obj):
     tmp = "%s.tmp.%d" % (path, os.getpid())
     try:
-        with open(tmp, "w") as fh:
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(obj, fh)
         os.replace(tmp, path)
         return True
@@ -290,7 +309,7 @@ def write_json_pretty(path, obj):
     """For files a human reads and edits — atomically, like everything else."""
     tmp = "%s.tmp.%d" % (path, os.getpid())
     try:
-        with open(tmp, "w") as fh:
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(obj, fh, indent=2)
             fh.write("\n")
         os.replace(tmp, path)
@@ -305,7 +324,7 @@ def write_json_pretty(path, obj):
 
 def read_int(path, default=0):
     try:
-        with open(path, "r") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             return int(fh.read().strip() or default)
     except Exception:
         return default
@@ -314,7 +333,7 @@ def read_int(path, default=0):
 def write_text(path, text):
     tmp = "%s.tmp.%d" % (path, os.getpid())
     try:
-        with open(tmp, "w") as fh:
+        with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(text)
         os.replace(tmp, path)
         return True
@@ -406,10 +425,17 @@ def git_facts(cwd):
     import hashlib
     import subprocess
     try:
+        # `encoding=` and not bare `text=True`, here and at every other git call:
+        # git writes paths and refs as UTF-8, while `text=True` alone decodes in
+        # the locale codepage. On a Turkish Windows that turns a checkout under a
+        # path with one diacritic in it into a *different* toplevel string —
+        # which is the repository key, so the session registers against a repo
+        # nobody else is in and every guard silently stops matching.
         out = subprocess.run(
             ["git", "rev-parse", "--git-common-dir", "--show-toplevel",
              "--abbrev-ref", "HEAD"],
             cwd=cwd, capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
         )
         common, root, branch = (out.stdout.strip().split("\n") + ["", "", ""])[:3]
         # Not gated on the exit status. In a repository with no commits yet,
@@ -423,7 +449,8 @@ def git_facts(cwd):
         if branch in ("", "HEAD"):
             # Unborn, or detached. symbolic-ref answers for the first.
             ref = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"],
-                                 cwd=cwd, capture_output=True, text=True, timeout=5)
+                                 cwd=cwd, capture_output=True, text=True,
+                                 timeout=5, encoding="utf-8", errors="replace")
             branch = ref.stdout.strip() if ref.returncode == 0 else ""
     except Exception:
         root = cwd
@@ -941,7 +968,7 @@ def recent_writes(sid, cutoff, compact=False):
     path = os.path.join(WRITES, "%s.log" % sid)
     out = []
     try:
-        with open(path, "r") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()[-800:]
     except OSError:
         return out
@@ -1443,7 +1470,7 @@ def last_action(key):
     if not path:
         return None
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             line = fh.readline(512).strip()
         at = int(os.path.getmtime(path))
     except (OSError, IOError, ValueError):
@@ -1949,7 +1976,7 @@ def emit(sid, agent, repo_key, kind, text, to=None, extra=None):
 def read_events(after=0):
     out = []
     try:
-        with open(EVENTS, "r") as fh:
+        with open(EVENTS, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 try:
                     rec = json.loads(line)
@@ -1972,7 +1999,7 @@ def rotate_events():
     # discards everything appended in between.
     with Mutex("events"):
         try:
-            with open(EVENTS, "r") as fh:
+            with open(EVENTS, "r", encoding="utf-8", errors="replace") as fh:
                 lines = fh.readlines()
         except OSError:
             return
@@ -3037,11 +3064,23 @@ def port_pid(port):
         if IS_WIN:
             out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
                                  capture_output=True, text=True, timeout=8)
+            # Recognise a listening socket by its shape, not by the word
+            # "LISTENING". That column is translated on a Windows whose display
+            # language is not English, and matching the English word there
+            # returns None for every port — which this plugin reads as "the
+            # service is down", for every declared service, silently. What no
+            # display language changes is the foreign address: a listening
+            # socket is the one with the wildcard `0.0.0.0:0` or `[::]:0` in
+            # that column, and a connected one never has it.
             for line in out.stdout.splitlines():
                 cols = line.split()
-                if len(cols) >= 5 and cols[3] == "LISTENING" \
-                        and cols[1].endswith(":%d" % port):
-                    return int(cols[4])
+                if len(cols) >= 5 and cols[0].upper() == "TCP" \
+                        and cols[1].endswith(":%d" % port) \
+                        and cols[2].endswith(":0"):
+                    try:
+                        return int(cols[-1])
+                    except ValueError:
+                        continue
             return None
         out = subprocess.run(["lsof", "-ti", "tcp:%d" % port, "-sTCP:LISTEN"],
                              capture_output=True, text=True, timeout=8)
@@ -3121,27 +3160,87 @@ def serving(repo_key, res_cfg):
     return None, "unknown"
 
 
-def stop_service(repo_key, res_cfg):
-    import signal
+def win_kill(pid, extra=()):
+    """Terminate a process on Windows. Returns what was tried and what it said,
+    for the caller to report if the process is still there afterwards.
+
+    `taskkill` cannot be believed in either direction on a machine with endpoint
+    protection in the way. Measured on Windows 10 with corporate EDR: it exits 1
+    with "ERROR: Not found" for a pid `Get-Process` confirms and `netstat` shows
+    LISTENING, and exits 1 with that same line for an ordinary child it does
+    kill. So its exit code decides nothing here — the liveness probe after it
+    does. It is still run first, because it is the one of the two that takes a
+    whole process tree, and it costs about a tenth of what PowerShell start-up
+    does.
+
+    `Stop-Process -Force` is the escalation, and it earned the place: it was the
+    only thing on that machine that terminated a service created with
+    DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP, which is how `start_service`
+    creates every service on Windows. That it is second and not first is the
+    whole trade — the cheap one usually works, and when it does not, this runs.
+
+    The pids are tried in order, so a caller that knows both the listener and
+    the shell it was spawned from can hand over both."""
     import subprocess
+    tried = []
+    for target in [pid] + [p for p in extra if p and p != pid]:
+        if not pid_alive(target):
+            continue   # the shell usually exits with the service it was waiting on
+        for argv in (["taskkill", "/F", "/T", "/PID", str(target)],
+                     ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                      "Stop-Process -Id %d -Force" % int(target)]):
+            try:
+                out = subprocess.run(argv, capture_output=True, text=True,
+                                     encoding="utf-8", errors="replace",
+                                     timeout=20)
+            except Exception as exc:
+                tried.append("%s on %s: %s" % (argv[0], target, exc))
+                continue
+            if out.returncode:
+                said = " ".join(((out.stderr or "") + " "
+                                 + (out.stdout or "")).split())[:120]
+                tried.append("%s on %s exited %d%s"
+                             % (argv[0], target, out.returncode,
+                                (": %s" % said) if said else ""))
+            for _ in range(20):
+                if not pid_alive(target):
+                    break
+                time.sleep(0.25)
+            if not pid_alive(target):
+                break
+    return tried
+
+
+def stop_service(repo_key, res_cfg):
+    """Stop whatever serves this resource. (ok, why) — `why` is the diagnosis
+    when it would not stop, and "" when it did.
+
+    The Windows branch used to be one `taskkill` with no wait, no escalation and
+    no reading of what it returned, the whole thing inside `except Exception:
+    pass`. The port re-check at the end still caught the failure, so what the
+    user was told stayed honest — but every word of *why* was thrown away at the
+    point it was known."""
+    import signal
     name, port = res_cfg["name"], res_cfg.get("port")
     rec = read_json(serve_path(repo_key, name)) or {}
     pid = rec.get("pid")
+    spawned = rec.get("spawned")
     if not pid or not pid_alive(pid):
         # The record can outlive the process — another worktree's session may
         # have replaced the service since. Whatever is on the port now is what
         # has to go, not what we last wrote down.
         pid = port_pid(port) if port else None
+        spawned = None
     if not pid:
         try:
             os.unlink(serve_path(repo_key, name))
         except OSError:
             pass
-        return True  # nothing is running: the goal state is already reached
+        return True, ""  # nothing is running: the goal state is already reached
+    tried = []
     try:
         if IS_WIN:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                           capture_output=True, timeout=15)
+            tried = win_kill(pid, extra=(spawned,))
         else:
             try:
                 os.killpg(os.getpgid(pid), signal.SIGTERM)
@@ -3156,8 +3255,11 @@ def stop_service(repo_key, res_cfg):
                     os.killpg(os.getpgid(pid), signal.SIGKILL)
                 except Exception:
                     os.kill(pid, signal.SIGKILL)
-    except Exception:
-        pass  # it may have exited between the probe and the signal
+    except Exception as exc:
+        # It may have exited between the probe and the signal, which is not a
+        # failure — the port check below is what decides that. Kept anyway, so a
+        # permission error stops being indistinguishable from a clean exit.
+        tried.append("%s: %s" % (type(exc).__name__, exc))
     try:
         os.unlink(serve_path(repo_key, name))
     except OSError:
@@ -3165,10 +3267,14 @@ def stop_service(repo_key, res_cfg):
     if port:
         for _ in range(20):
             if port_pid(port) is None:
-                return True
+                return True, ""
             time.sleep(0.25)
-        return False
-    return not pid_alive(pid)
+        held = port_pid(port)
+        why = ["pid %s still holds the port" % held] if held else []
+        return False, "; ".join(why + tried)
+    if pid_alive(pid):
+        return False, "; ".join(["pid %s is still running" % pid] + tried)
+    return True, ""
 
 
 def wait_ready(res_cfg, root, timeout=60):
@@ -3220,13 +3326,41 @@ def start_service(me, res_cfg):
                                 stdin=subprocess.DEVNULL, **kwargs)
     except Exception as exc:
         return False, "could not start: %s" % exc
-    write_json(serve_path(me.get("repo_key"), name), {
-        "resource": name, "repo": me.get("repo_key"), "root": root,
-        "cwd": cwd, "by": me.get("agent"), "pid": proc.pid,
-        "port": res_cfg.get("port"), "started": now(), "log": log,
-    })
+    port = res_cfg.get("port")
+    rec = {"resource": name, "repo": me.get("repo_key"), "root": root,
+           "cwd": cwd, "by": me.get("agent"), "pid": proc.pid,
+           "spawned": proc.pid, "port": port, "started": now(), "log": log}
+    # Written before the wait, not after: `wait_ready` can take a minute, and a
+    # session that runs `serve` during it has to find the record.
+    write_json(serve_path(me.get("repo_key"), name), rec)
     if not wait_ready(res_cfg, cwd):
         return False, "started but never became ready — see %s" % log
+
+    # Then correct the pid to whoever actually holds the port.
+    #
+    # `shell=True` does not promise to exec the command it was handed. macOS
+    # replaces the shell for a simple command, so proc.pid IS the service; Linux
+    # forks and keeps /bin/sh, which `same_group` was written to bridge; Windows
+    # runs `cmd /c`, and the two pids there have nothing in common that any
+    # platform call will tell us — `same_group` and `pid_cwd` both answer False
+    # and None on Windows unconditionally. So every one of the three ways
+    # `serving` recognises a service failed there, for services agent-bus had
+    # started itself: `how` came back 'unknown', which is not 'down', so
+    # `ensure_serving` stopped and restarted the service on EVERY serve and
+    # never once said "already serving your worktree". Measured on Windows 10:
+    # recorded pid 9904, listening pid 31416.
+    #
+    # The port answers the question that no process API here will. Nothing was
+    # listening on it a moment ago — `ensure_serving` cleared it or refused to
+    # continue — and this command is what has run since, so whoever holds it now
+    # is ours. That inference needs no platform support at all, and it makes the
+    # pid we record the same pid every later check compares against. `spawned`
+    # keeps what we launched, because that is the handle to kill the tree by.
+    if port:
+        listener = port_pid(port)
+        if listener and listener != proc.pid:
+            rec["pid"] = listener
+            write_json(serve_path(me.get("repo_key"), name), rec)
     return True, log
 
 
@@ -3240,10 +3374,12 @@ def ensure_serving(me, res_cfg, sessions=None):
             os.path.realpath(root) == os.path.realpath(me.get("root") or ""):
         return True, "already serving your worktree"
     if how != "down":
-        if not stop_service(repo_key, res_cfg):
-            return False, ("something is on %s that agent-bus could not stop; "
+        stopped, why = stop_service(repo_key, res_cfg)
+        if not stopped:
+            return False, ("something is on %s that agent-bus could not stop%s; "
                            "stop it yourself and retry"
-                           % (res_cfg.get("port") or res_cfg["name"]))
+                           % (res_cfg.get("port") or res_cfg["name"],
+                              " (%s)" % why if why else ""))
     ok, detail = start_service(me, res_cfg)
     if not ok:
         return False, detail
@@ -6061,7 +6197,8 @@ def hook_record_write(payload):
     if not path:
         return
     try:
-        with open(os.path.join(WRITES, "%s.log" % sid), "a") as fh:
+        with open(os.path.join(WRITES, "%s.log" % sid), "a",
+                  encoding="utf-8") as fh:
             fh.write("%d %s\n" % (now(), path))
     except OSError:
         pass
@@ -6106,6 +6243,13 @@ def cli_status(_args):
         # repository the caller is standing in.
         root, repo_key, label, _ = git_facts(os.getcwd())
         me = {"sid": "", "repo_key": repo_key, "root": root, "repo_label": label}
+    for other, why in unwired_copies():
+        print("!  %s is the copy Claude Code loads, and it %s.\n"
+              "   Until you re-run the installer no hook in it fires, so\n"
+              "   sessions are not registering and this roster is a guess:\n"
+              "     %s install\n"
+              % (short_path(other), why,
+                 os.path.join(other, "bin", "agentbus")))
     print("agent-bus — %d live session%s" % (len(sessions), "" if len(sessions) == 1 else "s"))
     for s in sessions:
         mark = "*" if s["sid"] == me.get("sid") else " "
@@ -7987,7 +8131,7 @@ def git_probe(root, args, env=None, timeout=20):
     try:
         out = subprocess.run(("git",) + tuple(args), cwd=root or None,
                              capture_output=True, text=True, timeout=timeout,
-                             env=env)
+                             env=env, encoding="utf-8", errors="replace")
     except Exception as exc:
         return 1, "", str(exc)
     return out.returncode, out.stdout, (out.stderr or "").strip()
@@ -8728,9 +8872,10 @@ def cli_integrate(args):
     argv = worker_argv(prompt, model=model, budget=budget)
     said, code = "", 1
     try:
-        with open(log, "w") as fh:
+        with open(log, "w", encoding="utf-8") as fh:
             proc = subprocess.Popen(argv, cwd=tree, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True,
+                                    encoding="utf-8", errors="replace",
                                     env=worker_env(root))
             for line in proc.stdout:
                 fh.write(line)
@@ -9874,7 +10019,7 @@ def lit(word):
 
 def read_text(path, limit=200000):
     try:
-        with open(path, "r") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             return fh.read(limit)
     except (OSError, UnicodeDecodeError):
         return ""
@@ -10246,16 +10391,39 @@ def hooks_look_wrong(root):
     """Why a copy's wiring cannot work here, or "" when it looks fine."""
     path = os.path.join(root, "hooks", "hooks.json")
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             text = fh.read()
     except OSError:
-        return "no hooks.json at all"
+        return "has no hooks.json at all"
     if "__PYTHON__" in text:
-        return "still has the __PYTHON__ placeholder — never installed"
+        return "still has the __PYTHON__ placeholder — it was never installed"
     if IS_WIN and "ab-hook" in text:
-        return ("wired to the shell fast path, which needs bash and a real "
+        return ("is wired to the shell fast path, which needs bash and a real "
                 "python3 on PATH")
     return ""
+
+
+def unwired_copies():
+    """[(root, why)] for every copy Claude Code loads that cannot work here.
+    Empty on almost every machine, and cheap to ask on the rest.
+
+    `claude plugin update` writes a new cache directory holding the committed
+    hooks.json, and the installer is what turns that into something this host
+    can run. Until it is re-run — on Windows, where the committed wiring names a
+    shell entry point that is not there — every hook in the new copy dies. No
+    session registers, no write is recorded, no guard fires, and the first thing
+    anybody sees is a roster that has quietly gone empty. `doctor` and `install`
+    have reported this since the fault was found; neither of them is what a
+    confused agent runs, and `status` is."""
+    out = []
+    try:
+        for other in loaded_copies():
+            why = hooks_look_wrong(other)
+            if why:
+                out.append((other, why))
+    except Exception:
+        pass    # a diagnosis is never worth taking `status` down with it
+    return out
 
 
 def cli_install(args):
@@ -10295,11 +10463,12 @@ def cli_install(args):
                 and not flag(args, "--python-hooks"))
     src = "hooks.posix.json" if use_bash else "hooks.python.json"
     try:
-        with open(os.path.join(root, "hooks", src)) as fh:
+        with open(os.path.join(root, "hooks", src), encoding="utf-8") as fh:
             text = fh.read()
         if not use_bash:
             text = text.replace("__PYTHON__", json.dumps(sys.executable)[1:-1])
-        with open(os.path.join(root, "hooks", "hooks.json"), "w") as fh:
+        with open(os.path.join(root, "hooks", "hooks.json"), "w",
+                  encoding="utf-8") as fh:
             fh.write(text)
     except OSError as exc:
         print("  ! could not write hooks/hooks.json: %s" % exc)
@@ -10312,7 +10481,8 @@ def cli_install(args):
     # while the hooks that actually run are the committed POSIX ones.
     for other in others:
         try:
-            with open(os.path.join(other, "hooks", "hooks.json"), "w") as fh:
+            with open(os.path.join(other, "hooks", "hooks.json"), "w",
+                      encoding="utf-8") as fh:
                 fh.write(text)
             print("  + also wired: %s" % short_path(other))
         except OSError as exc:
@@ -10330,9 +10500,19 @@ def cli_install(args):
         os.makedirs(bindir, exist_ok=True)
         engine = os.path.join(root, "bin", "agentbus")
         if IS_WIN:
-            with open(os.path.join(bindir, "agentbus.cmd"), "w") as fh:
+            # `newline=""` on both, and it is not a detail. Text mode on Windows
+            # rewrites every "\n" as "\r\n", so the .cmd — which already spells
+            # its line ends out — was written with "\r\r\n", and the Git Bash
+            # shim next to it came out CRLF, which is a shell script whose first
+            # line is `#!/bin/sh\r`. That is the same breakage `.gitattributes`
+            # exists to prevent in the checkout, arriving through the one door
+            # `git add --renormalize` cannot reach, because this file is
+            # generated rather than checked out.
+            with open(os.path.join(bindir, "agentbus.cmd"), "w",
+                      encoding="utf-8", newline="") as fh:
                 fh.write('@echo off\r\n"%s" "%s" %%*\r\n' % (sys.executable, engine))
-            with open(os.path.join(bindir, "agentbus"), "w") as fh:  # Git Bash
+            with open(os.path.join(bindir, "agentbus"), "w",
+                      encoding="utf-8", newline="") as fh:  # Git Bash
                 fh.write('#!/bin/sh\nexec "%s" "%s" "$@"\n'
                          % (sys.executable.replace("\\", "/"), engine.replace("\\", "/")))
         else:
@@ -10413,7 +10593,7 @@ def cli_doctor(_args):
     print("bus dir      : %s" % BUS)
     print("live sessions: %d" % len(sessions))
     print("events       : %d" % read_int(SEQFILE, 0))
-    print("guard tokens : %s" % (open(TOKENFILE).read().strip()[:200]
+    print("guard tokens : %s" % (read_text(TOKENFILE).strip()[:200]
                                  if os.path.exists(TOKENFILE) else "-"))
     _, me = resolve_party()     # read-only: the name this caller answers to
     print("this session : %s" % (me.get("agent") if me else "NOT REGISTERED"))
