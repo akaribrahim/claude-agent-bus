@@ -26,10 +26,19 @@ unset AGENTBUS_HOME AGENTBUS_SESSION AGENTBUS_OFF CLAUDE_CODE_SESSION_ID
 export CLAUDE_PID=$$   # every fixture session claims this pid, so none look dead
 export GIT_TERMINAL_PROMPT=0
 
-command -v python3 > /dev/null 2>&1 || {
-  echo "tests: no python3 on PATH" >&2
+# Run it, rather than asking whether it exists. Windows ships a stub called
+# python3 in WindowsApps that prints "Python not found" and exits 0, so
+# `command -v` finds it, this gate is satisfied, and every test below then runs
+# against something that is not Python. Measured in Git Bash on 2026-08-12: the
+# suite produced not one line of output and hung, instead of dying with a reason.
+if ! command -v python3 > /dev/null 2>&1 ||
+   [ "$(python3 -c 'print(6*7)' 2>/dev/null)" != 42 ]; then
+  echo "tests: no working python3 on PATH" >&2
+  if command -v python3 > /dev/null 2>&1; then
+    echo "  $(command -v python3) answers, but not as Python — a Store stub?" >&2
+  fi
   exit 1
-}
+fi
 
 TMPROOT=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/agentbus-tests.XXXXXX")" && pwd -P)
 cleanup() {

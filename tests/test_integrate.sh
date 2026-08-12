@@ -27,6 +27,18 @@
 
 . "$AB_ROOT/tests/lib.sh"
 
+# The same gate `test_landing.sh` has had since 2.12.1, and for the same reason:
+# `integrate` decides what is worth merging with `git merge-tree --write-tree`,
+# which arrived in git 2.38. An older one refuses every pair, so the worker is
+# handed nothing, exits without acting, and every assertion below fails for a
+# cause that has nothing to do with this repository. Measured under WSL's git
+# 2.34.1 on 2026-08-12: 38 failures of 82, all of them this — the landing view
+# skipped cleanly beside it and this file did not, which is the whole argument
+# for the gate being here too.
+if ! git merge-tree --write-tree --name-only HEAD HEAD > /dev/null 2>&1; then
+  skip_test "git $(git --version | awk '{print $3}') has no \`merge-tree --write-tree\` (needs 2.38)"
+fi
+
 REPO=$(make_repo intrepo)
 printf 'shared\n' > "$REPO/shared.py"
 printf 'one\n' > "$REPO/one.py"

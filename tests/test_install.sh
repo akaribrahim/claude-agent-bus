@@ -23,9 +23,26 @@ mkdir -p "$FAKE_HOME"
 # A PATH with no agentbus on it, which is what a marketplace install leaves.
 BARE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
+# A copy of the plugin to install FROM, never the checkout this suite is running
+# out of. `cli_install` derives its target from its own `__file__`, so pointing
+# it at $AB_ROOT rewrites the developer's own hooks/hooks.json and deletes their
+# bytecode cache — invisible on a host where the wiring it writes back is the
+# committed one, and on Windows a checkout left holding the Python variant with
+# `git status` reporting a modification nobody made. Reported from Windows 10 on
+# 2026-08-12, where the suite then failed the assertion below against a file it
+# had changed itself.
+#
+# At the blessed path, because that is where a reader is told to put it and the
+# happy branch deserves exercising; the wrong-place branch has its own case
+# further down.
+SELF="$FAKE_HOME/.claude/skills/agent-bus"
+mkdir -p "$SELF/.claude-plugin"
+cp -R "$AB_ROOT/bin" "$AB_ROOT/hooks" "$SELF/"
+cp "$AB_ROOT/.claude-plugin/plugin.json" "$SELF/.claude-plugin/"
+
 run_installer() {   # <args…> → its output
   env HOME="$FAKE_HOME" PATH="$BARE_PATH" AGENTBUS_HOME="$AGENTBUS_HOME" \
-    python3 "$AB_ROOT/bin/agentbus" install "$@" 2>&1
+    python3 "$SELF/bin/agentbus" install "$@" 2>&1
 }
 
 # ---- the hook wiring has to be in the repository, not generated -------------
@@ -39,8 +56,13 @@ run_installer() {   # <args…> → its output
 assert_file "$AB_ROOT/hooks/hooks.json" "the hook wiring is present in the tree"
 tracked=$(git -C "$AB_ROOT" ls-files --error-unmatch hooks/hooks.json 2>/dev/null)
 assert_equal "hooks/hooks.json" "$tracked" "and it is committed, not ignored"
-assert_equal "" "$(diff "$AB_ROOT/hooks/hooks.json" "$AB_ROOT/hooks/hooks.posix.json")" \
-  "and it is the shell entry point, which needs nothing baked into it"
+# Asked of what is committed, not of the working tree. A local install is
+# entitled to rewrite the tree's copy — that is what it is for — and on a
+# Windows checkout it does, to the Python variant. What must not drift is the
+# file a stranger clones.
+assert_equal "" "$(diff <(git -C "$AB_ROOT" show HEAD:hooks/hooks.json) \
+                        <(git -C "$AB_ROOT" show HEAD:hooks/hooks.posix.json))" \
+  "and what is committed is the shell entry point, which needs nothing baked in"
 
 # ---- the installer does the two things a plugin install cannot --------------
 
@@ -105,6 +127,14 @@ assert_not_contains "$(cat "$PLUGIN_COPY/hooks/hooks.json")" "ab-hook" \
 assert_not_contains "$(cat "$PLUGIN_COPY/hooks/hooks.json")" "__PYTHON__" \
   "with a real interpreter path, not the placeholder"
 
+# And the command it leaves on PATH must not call the clone either. That
+# directory is the one `claude plugin update` resets, so a shim into it is a
+# command that stops working because of an update it had no part in — while the
+# cache copy beside it is both loaded and versioned.
+assert_equal "$PLUGIN_COPY/bin/agentbus" \
+  "$(readlink "$FAKE_HOME/.local/bin/agentbus")" \
+  "and the command on PATH calls the loaded copy, not the clone it ran from"
+
 # doctor has to be able to see this too: reporting only the copy it is running
 # from is what made a dead install look healthy.
 cp "$AB_ROOT/hooks/hooks.python.json" "$PLUGIN_COPY/hooks/hooks.json"
@@ -125,11 +155,11 @@ assert_contains "$out" "move or re-clone" \
 # ---- doctor says whether the command can be run at all ----------------------
 
 out=$(env HOME="$FAKE_HOME" PATH="$BARE_PATH" AGENTBUS_HOME="$AGENTBUS_HOME" \
-  python3 "$AB_ROOT/bin/agentbus" doctor 2>&1)
+  python3 "$SELF/bin/agentbus" doctor 2>&1)
 assert_contains "$out" "command      : NOT on PATH" \
   "doctor reports a command that cannot be found"
 out=$(env HOME="$FAKE_HOME" PATH="$FAKE_HOME/.local/bin:$BARE_PATH" \
-  AGENTBUS_HOME="$AGENTBUS_HOME" python3 "$AB_ROOT/bin/agentbus" doctor 2>&1)
+  AGENTBUS_HOME="$AGENTBUS_HOME" python3 "$SELF/bin/agentbus" doctor 2>&1)
 assert_contains "$out" "command      : $FAKE_HOME/.local/bin/agentbus" \
   "and reports where it is when it can"
 
@@ -141,9 +171,9 @@ assert_contains "$out" "command      : $FAKE_HOME/.local/bin/agentbus" \
 # written to gets no cache — Python swallows the failed write, the engine runs
 # exactly as it would otherwise, and the saving is gone for the life of the
 # install with nothing anywhere saying so. Hence a line, and hence these two.
-rm -rf "$AB_ROOT/bin/__pycache__"
+rm -rf "$SELF/bin/__pycache__"
 out=$(env HOME="$FAKE_HOME" AGENTBUS_HOME="$AGENTBUS_HOME" \
-  python3 "$AB_ROOT/bin/agentbus" doctor 2>&1)
+  python3 "$SELF/bin/agentbus" doctor 2>&1)
 assert_contains "$out" "bytecode     : NOT cached" \
   "doctor says so when no wake has cached the engine's bytecode"
 # Woken through the entry point both fast paths use, on the one event that is
@@ -151,10 +181,10 @@ assert_contains "$out" "bytecode     : NOT cached" \
 # leave the bus exactly as it found it — the assertions below this need one live
 # session and no more.
 printf '%s' "$(payload post-bash sid=inst-cache cwd=/tmp id=nothing)" \
-  | env AGENTBUS_HOME="$AGENTBUS_HOME" python3 "$AB_ROOT/bin/hook.py" \
+  | env AGENTBUS_HOME="$AGENTBUS_HOME" python3 "$SELF/bin/hook.py" \
       wake post-bash > /dev/null 2>&1
 out=$(env HOME="$FAKE_HOME" AGENTBUS_HOME="$AGENTBUS_HOME" \
-  python3 "$AB_ROOT/bin/agentbus" doctor 2>&1)
+  python3 "$SELF/bin/agentbus" doctor 2>&1)
 assert_not_contains "$out" "NOT cached" \
   "and stops saying it once a wake has written one"
 

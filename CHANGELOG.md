@@ -2,6 +2,60 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.13.2 — 2026-08-12
+
+**A message with an em dash in it, posted from a host whose locale is not UTF-8,
+was never written at all.** Python decodes the command line with the filesystem
+encoding and `surrogateescape`, so where that encoding is ASCII every non-ASCII
+byte of an argument arrives as a lone surrogate. `json.dumps` with
+`ensure_ascii=False` carries them without complaint and the `.encode("utf-8")`
+on the next line raises — and `UnicodeEncodeError` is not an `OSError`, which
+was the only thing the write was wrapped in. So `agentbus post` died with a
+traceback, nothing reached the log, and the message one session meant to leave
+the others was simply gone. The command line is repaired where it comes in, and
+exactly: `surrogateescape` is reversible, so those bytes decode back to the text
+that was typed. The write also stopped being able to raise, because an event log
+that drops a line rather than writing a `?` in it is the failure this plugin
+exists to spare people.
+
+macOS cannot produce that input — it fixes its filesystem encoding at UTF-8
+whatever the locale says — which is why the suite that found it had to be run
+somewhere else. It was, on the first Windows run of the 2.13.0 encoding tests.
+
+**A file agent-bus adds a line to keeps the byte-order mark it had.** 2.13.1
+taught the reads to tolerate a BOM; the writes were still dropping it. These are
+files that belong to somebody else — `~/.claude/settings.json` is Claude Code's,
+`.claude/agent-bus.json` is the project's — and Windows PowerShell 5.1 reads a
+file with no mark as ANSI, so removing one is not the neutral act it looks like.
+
+**The command on PATH no longer points into the marketplace clone.** Installing
+from that clone is what the README tells a Windows reader to do, and the shim it
+left called the clone's engine — the one directory `claude plugin update` resets.
+It points at the copy Claude Code loads instead, chosen by mtime rather than by
+sorting a version out of the path, since "2.9.0" sorts above "2.13.1".
+
+And three things in the suite itself, all found by running it on Windows for the
+first time.
+
+`tests/run.sh` checked for `python3` with `command -v`. Windows ships a stub of
+that name in WindowsApps which prints "Python not found" and exits 0, so the gate
+was satisfied and every test then ran against something that was not Python —
+the suite produced no output at all and hung. It runs the interpreter now and
+checks the answer.
+
+`tests/test_integrate.sh` gets the version gate `tests/test_landing.sh` has had
+since 2.12.1. `integrate` decides what is worth merging with `merge-tree
+--write-tree`, which needs git 2.38; under WSL's 2.34.1 that is 38 failures of
+82, all one cause, next to a landing view that skipped cleanly.
+
+`tests/test_install.sh` ran the installer against the checkout the suite is in,
+so it rewrote the developer's own `hooks/hooks.json` and deleted their bytecode
+cache. Invisible where the wiring it writes back is the committed one; on a
+Windows checkout, a modification nobody made and a failing assertion about a
+file the test had changed itself. It installs from a copy now, and the assertion
+about the committed wiring asks git rather than the working tree — a local
+install is entitled to rewrite that file, which is what it is for.
+
 ## 2.13.1 — 2026-08-12
 
 **A JSON file with a byte-order mark on it is read, not refused.** PowerShell

@@ -133,6 +133,55 @@ out=$(ab sess-b status 2>&1)
 assert_contains "$out" "ölçüm-günlüğü.txt" \
   "a written path with diacritics in it survives into the handoff"
 
+# ---- a command line from a locale that cannot spell it ----------------------
+#
+# This machine cannot produce the input. macOS fixes its filesystem encoding at
+# UTF-8 whatever the locale says, so argv decodes correctly here however hard
+# `LC_ALL=C` is leaned on; Linux follows the locale, and under an ASCII one
+# every non-ASCII byte of a command line arrives as a lone surrogate.
+# `json.dumps(ensure_ascii=False)` carries those without complaint and the
+# `.encode("utf-8")` after it raises `UnicodeEncodeError` — which is not an
+# `OSError`, and `OSError` was the only thing the write was wrapped in. So
+# `agentbus post "… — …"` wrote nothing and died, and the message one session
+# meant to leave the others was gone. Found by this file's own first run, under
+# WSL, on 2026-08-12.
+#
+# Asserted against the repair rather than through the CLI, because the platform
+# that makes the input is not this one — including the third assertion, whose
+# only job is to prove the fixture is the real thing and would still raise.
+
+out=$(python3 - "$AB_ROOT/bin/agentbus" <<'PY'
+import importlib.machinery, importlib.util, json, sys
+loader = importlib.machinery.SourceFileLoader("eng", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+eng = importlib.util.module_from_spec(spec)
+loader.exec_module(eng)
+
+want = "took the name of its chat — was ölçüm · dev → prod"
+# Exactly what CPython does to argv when the filesystem encoding is ASCII.
+broken = want.encode("utf-8").decode("ascii", "surrogateescape")
+
+kept, sys.argv = sys.argv, ["agentbus", "post", broken]
+eng.repair_argv()
+got = sys.argv[2]
+sys.argv = kept
+
+print("repaired-exactly:", got == want)
+for label, text in (("repaired", got), ("unrepaired", broken)):
+    try:
+        json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
+        print("%s-encodes: yes" % label)
+    except UnicodeEncodeError:
+        print("%s-encodes: no" % label)
+PY
+)
+assert_contains "$out" "repaired-exactly: True" \
+  "a command line carrying lone surrogates is put back byte for byte"
+assert_contains "$out" "repaired-encodes: yes" \
+  "and what comes out of the repair is what the log encoder can write"
+assert_contains "$out" "unrepaired-encodes: no" \
+  "while the form that arrives is the one that used to raise past the except"
+
 # ---- a byte-order mark on a file a person edited ----------------------------
 #
 # PowerShell and Notepad both put a BOM on what they write, so on Windows any

@@ -320,10 +320,24 @@ def write_json(path, obj):
 
 
 def write_json_pretty(path, obj):
-    """For files a human reads and edits — atomically, like everything else."""
+    """For files a human reads and edits — atomically, like everything else.
+
+    Keeps a byte-order mark if the file being replaced had one. These are the
+    files that belong to somebody else: `~/.claude/settings.json` is Claude
+    Code's and `.claude/agent-bus.json` is the project's, and on Windows the
+    editor that made them puts a BOM on. Adding a line to a file is not licence
+    to change how it is encoded — and Windows PowerShell 5.1 reads a file with
+    no BOM as ANSI, so dropping one is not free either."""
+    enc = "utf-8"
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(3) == b"\xef\xbb\xbf":
+                enc = "utf-8-sig"
+    except OSError:
+        pass
     tmp = "%s.tmp.%d" % (path, os.getpid())
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
+        with open(tmp, "w", encoding=enc) as fh:
             json.dump(obj, fh, indent=2)
             fh.write("\n")
         os.replace(tmp, path)
@@ -1979,7 +1993,13 @@ def emit(sid, agent, repo_key, kind, text, to=None, extra=None):
             flags = (os.O_CREAT | os.O_WRONLY | os.O_APPEND
                      | getattr(os, "O_BINARY", 0))
             fd = os.open(EVENTS, flags, 0o600)
-            os.write(fd, line.encode("utf-8"))
+            # `errors="replace"` is the floor under this, not the fix. The fix
+            # is `repair_argv`, at the boundary where a lone surrogate gets in.
+            # But argv is not the only way text reaches here — a path off
+            # `os.listdir` can carry one too — and an event log that drops a
+            # line rather than writing a `?` in it is the failure mode this
+            # whole file exists to prevent somebody else having.
+            os.write(fd, line.encode("utf-8", "replace"))
             os.close(fd)
         except OSError:
             return 0
@@ -10524,6 +10544,26 @@ def cli_install(args):
     try:
         os.makedirs(bindir, exist_ok=True)
         engine = os.path.join(root, "bin", "agentbus")
+        # Which engine the command on PATH should call. Normally this one — but
+        # not when this one is the marketplace clone. That directory is what
+        # `claude plugin update` resets, and it is not the copy Claude Code
+        # loads; a shim pointing into it is a command that breaks on an update
+        # it had nothing to do with. And running the installer from the clone is
+        # not a mistake, it is what the README tells a Windows reader to do, so
+        # this is the ordinary path and not a corner. Point at the loaded copy
+        # instead. Raised from Windows 10 on 2026-08-12 by someone who had just
+        # done exactly that.
+        #
+        # Newest by mtime, not by sorting the version out of the path: "2.9.0"
+        # sorts above "2.13.1" and the answer would be a copy two releases old.
+        if others and os.path.join(".claude", "plugins", "marketplaces") in here:
+            try:
+                loaded = max(others, key=os.path.getmtime)
+                engine = os.path.join(loaded, "bin", "agentbus")
+                print("  + command points at %s, not at this clone"
+                      % short_path(loaded))
+            except OSError:
+                pass
         if IS_WIN:
             # `newline=""` on both, and it is not a detail. Text mode on Windows
             # rewrites every "\n" as "\r\n", so the .cmd — which already spells
@@ -10803,8 +10843,39 @@ def use_utf8():
                 pass
 
 
+def repair_argv():
+    """Undo the locale's guess at what the command line said.
+
+    Python decodes `argv` with the filesystem encoding and `surrogateescape`, so
+    on a host whose locale is not UTF-8 — and `LC_ALL=C` makes that ASCII —
+    every non-ASCII byte arrives as a lone surrogate. `json.dumps` with
+    `ensure_ascii=False` carries those through without complaint, and the
+    `.encode("utf-8")` on the next line raises `UnicodeEncodeError: surrogates
+    not allowed`. That is not an `OSError`, and `OSError` is the only thing the
+    write is wrapped in, so it went straight past and took `agentbus post` with
+    it: nothing written, and the message a session meant to leave for the others
+    simply gone. Every guard and every event carrying text from the command line
+    was in the same position.
+
+    Nothing was ever lost, which is what makes the repair exact rather than
+    lossy: `surrogateescape` is reversible, so encoding those bytes back out and
+    decoding them as UTF-8 is the text that was typed. Only arguments that
+    actually carry a surrogate are touched. Found by the 2.13.0 encoding suite
+    on its first run under WSL, 2026-08-12 — a case a UTF-8 host cannot
+    produce."""
+    fixed = []
+    for arg in sys.argv:
+        try:
+            arg.encode("utf-8")
+        except UnicodeEncodeError:
+            arg = arg.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+        fixed.append(arg)
+    sys.argv = fixed
+
+
 def main():
     use_utf8()
+    repair_argv()
     ensure_dirs()
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help", "help"):
