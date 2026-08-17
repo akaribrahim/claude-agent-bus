@@ -108,6 +108,66 @@ assert_contains "$out" "this checkout's own" "and says which are allocated"
 out=$(at "$REPO" sess-main env)
 assert_contains "$out" "export API_PORT=$DECLARED" "the main checkout exports the declared one"
 
+# ---- and to every process agent-bus starts or wraps -------------------------
+#
+# `env` answers a shell that thought to ask. The process that most needs the
+# answer never gets a shell: a mobile bundler bakes the API's base URL into the
+# bundle from a `.env` naming the original checkout's port, so giving a worktree
+# its own API changes nothing — the app calls the other tree, the screen looks
+# right, and the result belongs to somebody else's code. No guard can catch it,
+# because the request leaves a simulator and not the shell being watched.
+#
+# So the number is put where the bundler already looks: its environment, under
+# the same names `agentbus env` prints. Raised as an open gap by the session
+# that wrote the per-worktree config on 2026-08-02 and left open long enough to
+# be measured — 16 runs past the wrong-port guard with `AGENTBUS_OFF`, 30 of
+# those mentions naming the original checkout's port.
+
+ENVREPO=$(make_repo portenv)
+EDECL=$(free_port)
+python3 - "$ENVREPO/.claude/agent-bus.json" "$EDECL" "$TEST_TMP/baked.txt" <<'PY'
+import json, os, sys
+path, port, baked = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+json.dump({"resources": [
+    {"name": "api", "desc": "the dev API", "port": port, "ports": "per-worktree",
+     "start": "python3 -m http.server ${PORT} --bind 127.0.0.1",
+     "ready": "curl -sf localhost:${PORT}/",
+     "patterns": [r":%d\b" % port]},
+    # What a bundler's start line looks like once it stops naming a number: the
+    # API it points the app at is read, not written down. No port of its own —
+    # the whole question is whether it can see somebody else's.
+    {"name": "bundler", "desc": "bakes the API's address into a bundle",
+     "start": "sh -c 'printf %%s \"$AGENTBUS_PORT_API\" > \"%s\"; sleep 30'"
+              % baked,
+     "patterns": [r"\bbundler\b"]},
+    {"name": "db", "desc": "the shared database", "patterns": [r"\bpsql\b"]},
+]}, open(path, "w"), indent=2)
+PY
+commit_all "$ENVREPO"
+EWT=$(make_worktree "$ENVREPO" portenvwt)
+new_session sess-env "$EWT"
+EPORT=$(at "$EWT" sess-env port api)
+assert_not_contains "$EPORT" "$EDECL" "the fixture worktree really did get its own port"
+
+# A command under `run` sees them — and sees the ports of resources it did not
+# ask for, because `db` is what it took and the API's address is what it needs.
+got=$(at "$EWT" sess-env run db -- sh -c 'printf %s "$AGENTBUS_PORT_API"')
+assert_equal "$EPORT" "$got" \
+  "a command under \`run\` is given this checkout's ports, not just its own lock"
+
+# And a service agent-bus starts, which is the case that closes the gap: nothing
+# ran a shell here, nobody typed a number, and the bundler still knows.
+rm -f "$TEST_TMP/baked.txt"
+out=$(at "$EWT" sess-env serve bundler 2>&1)
+assert_contains "$out" "restarted from your worktree" "the bundler starts"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -s "$TEST_TMP/baked.txt" ] && break
+  sleep 0.3
+done
+assert_equal "$EPORT" "$(cat "$TEST_TMP/baked.txt" 2>/dev/null)" \
+  "and what it baked in is this worktree's API, which no .env could have told it"
+
 # ---- and the number is handed over before the first command ------------------
 #
 # `env` answers when asked, and the guard below answers when the wrong port is

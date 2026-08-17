@@ -3357,7 +3357,8 @@ def start_service(me, res_cfg):
         fh = open(log, "ab")
         proc = subprocess.Popen(res_cfg["start"], shell=True, cwd=cwd,
                                 stdout=fh, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, **kwargs)
+                                stdin=subprocess.DEVNULL,
+                                env=port_env(me), **kwargs)
     except Exception as exc:
         return False, "could not start: %s" % exc
     port = res_cfg.get("port")
@@ -9374,6 +9375,40 @@ def port_env_name(res):
                               re.sub(r"[^A-Za-z0-9]+", "_", res.get("name", "")).upper())
 
 
+def port_env(me, base=None):
+    """`os.environ` plus every declared port for THIS checkout.
+
+    The half of per-worktree ports the guard cannot reach. Giving a checkout its
+    own API port does nothing for a mobile app whose base URL is baked into the
+    bundle from a `.env` naming the original checkout's: the app still calls the
+    other tree, the screen still looks right, and the result belongs to somebody
+    else's code. The guard cannot see it, because the request leaves a simulator
+    and not the shell being watched — so it is not a guard that can close this,
+    it is the environment the bundler was started in.
+
+    Which is what this is. Every process agent-bus starts or wraps — a declared
+    service, and anything under `agentbus run` — gets the same variables
+    `agentbus env` prints, under the same names, so a start command can say
+    `--api http://localhost:$AGENTBUS_PORT_API` and mean this worktree's API
+    without knowing a number or which resources are isolated. Raised as an open
+    gap by the session that did the per-worktree config, 2026-08-02, and left
+    open long enough to be measured: 16 runs went past the wrong-port guard with
+    `AGENTBUS_OFF`, 30 of those mentions naming the original checkout's port.
+
+    Ports only. This does not carry identity: a service outlives the session
+    that started it, and stamping AGENTBUS_SESSION into it would make whatever
+    it later spawns claim to be a chat that has gone."""
+    out = dict(os.environ if base is None else base)
+    try:
+        cfg = repo_config(me.get("repo_key"), me.get("root"))
+        for res in cfg.get("resources", []):
+            if res.get("port"):
+                out[port_env_name(res)] = str(res["port"])
+    except Exception:
+        pass    # a missing config is not a reason to fail to start a service
+    return out
+
+
 def cli_port(args):
     """The port this checkout should use for a resource.
 
@@ -9411,7 +9446,12 @@ def cli_env(args):
 
     Resources that did not ask for per-worktree ports are exported too, at their
     declared value, so one line covers the whole configuration and a script does
-    not have to know which is which."""
+    not have to know which is which.
+
+    For a shell somebody is typing into. Anything agent-bus starts or wraps
+    itself — a declared service, and every command under `agentbus run` — is
+    already given these, under these names, without being asked. See
+    `port_env`."""
     me = need_me()
     cfg = repo_config(me.get("repo_key"), me.get("root"))
     rows = [r for r in cfg.get("resources", []) if r.get("port")]
@@ -9611,7 +9651,12 @@ def cli_run(args):
         # cmd is already word-split by the calling shell, so run it directly:
         # joining it back into a shell string would destroy the quoting in
         # forms like `-- bash -c 'cd x && maestro test'`.
-        rc = subprocess.call(cmd)
+        #
+        # With this checkout's ports in the environment, because the command
+        # under `run` is the one most likely to need them — a test runner, a
+        # curl, a bundler — and it is already being told which tree to use by
+        # every other means available.
+        rc = subprocess.call(cmd, env=port_env(me))
         sys.exit(rc)
     finally:
         spoken = []

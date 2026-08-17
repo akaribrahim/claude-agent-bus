@@ -2,6 +2,34 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 2.14.0 — 2026-08-17
+
+**Every service agent-bus starts, and every command it wraps, is told this
+checkout's ports.** Same names `agentbus env` prints, without being asked.
+
+This is the half of per-worktree ports the guard was never going to reach. A
+mobile bundler bakes the API's base URL into the bundle from a `.env` naming the
+original checkout's port, so giving a worktree its own API changes nothing: the
+app calls the other tree, the screen looks right, and the result belongs to
+somebody else's code. No guard can catch that, because the request leaves a
+simulator rather than a shell anything is watching. `agentbus env` answered a
+shell that thought to ask, and the process that most needed the answer never got
+a shell.
+
+So a `start` line can now read the address instead of writing it down —
+`--api http://localhost:$AGENTBUS_PORT_API` — and mean this worktree's API
+without naming a number or knowing which resources are isolated. Ports only:
+identity is deliberately not carried, because a service outlives the session
+that started it and anything it later spawned would claim to be a chat that has
+gone.
+
+Raised as an open gap by the session that wrote the first per-worktree config,
+on 2026-08-02, and left open long enough to be measured. On this machine's bus
+since: sixteen runs went past the wrong-port guard with `AGENTBUS_OFF`, thirty
+of those mentions naming the original checkout's port, the last of them fifteen
+hours before this shipped. The guard was doing its job and being paid to go
+away, which is what a block is when the thing it asks for cannot be had.
+
 ## 2.13.2 — 2026-08-12
 
 **A message with an em dash in it, posted from a host whose locale is not UTF-8,

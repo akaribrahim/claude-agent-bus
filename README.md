@@ -190,7 +190,7 @@ machine and collaborator gets the same guards.
 | `unless` | Regexes that mean this use is **not** the guarded thing. `patterns` recognise the tool; a `db` resource describing your local Postgres matches every `psql` there is, including one aimed at staging. |
 | `scope: "worktree"` | Contended only by sessions in the *same* checkout. |
 | `ports` | `"per-worktree"` gives every checkout its own port for this resource, derived from its path. The repository's original checkout keeps the declared one, so nothing changes for whoever works there. Use `${PORT}` in `start` and `ready`. |
-| `env` | The shell variable `agentbus env` exports for this resource's port. |
+| `env` | The shell variable this resource's port is exported as — by `agentbus env`, and in the environment of every service agent-bus starts and every command under `agentbus run`. Defaults to `AGENTBUS_PORT_<NAME>`. So a bundler that bakes an API address into what it builds can read `$AGENTBUS_PORT_API` in its `start` line instead of a `.env` naming one checkout's port — which is the half of per-worktree ports no guard can reach, since the request then leaves a simulator rather than a watched shell. |
 | `key` | A regex whose first group names *which one*: `"key": "--udid\\s+(\\S+)"` turns one simulator lock into one per device. A command naming no instance contends with all of them. On the command line, where there is no command to read a device off, name it yourself: `agentbus claim simulator@ABC123`. |
 | `why` / `hint` | Shown verbatim when blocking. `init-repo` leaves these empty on purpose: this is the part only you can write, and it is the part that stops an agent working around the block. |
 
