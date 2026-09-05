@@ -33,7 +33,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Edit|Write|NotebookEdit",
+        "matcher": "Bash|Edit|Write|NotebookEdit|SendMessage",
         "hooks": [
           {
             "type": "command",

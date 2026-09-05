@@ -140,6 +140,10 @@ acted() {   # <tool name>
       re='"command"[[:space:]]*:[[:space:]]*"([^"]*)"'
       [[ "$payload" =~ $re ]] && what="${BASH_REMATCH[1]}"
       ;;
+    SendMessage)
+      re='"to"[[:space:]]*:[[:space:]]*"([^"]*)"'
+      [[ "$payload" =~ $re ]] && what="messaging ${BASH_REMATCH[1]}"
+      ;;
     Edit|Write|NotebookEdit)
       for k in file_path notebook_path; do
         re="\"$k\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
@@ -364,6 +368,17 @@ case "$ev" in
         [ -n "$sid" ] || exit 0
         [ -s "$BUS/hot-for/$sid" ] || exit 0
         printf '%s' "$payload" | grep -qF -f "$BUS/hot-for/$sid" || exit 0
+        ;;
+      SendMessage)
+        # Always the engine, which is a Python start per message sent. Measured
+        # on this machine: 17 to 72 a day across every session, against the
+        # thousands of Bash calls the gates above exist for. Appending to the
+        # event log needs the sequence mutex, which builtins cannot take, and a
+        # message written without one is a message that can be lost.
+        #
+        # Subject to the same `live-count` gate as everything else, above: when
+        # you are the only session on this machine there is nobody for `watch`
+        # or the board to show it to, and the plugin costs nothing while alone.
         ;;
       *)
         exit 0

@@ -103,6 +103,12 @@ def main():
             d["tool_response"] = None
         elif shape == "missing":
             pass
+    elif kind == "sendmessage":
+        d["hook_event_name"] = "PreToolUse"
+        d["tool_name"] = "SendMessage"
+        d["tool_input"] = {"message": kv.get("text", "")}
+        if kv.get("to"):
+            d["tool_input"]["to"] = kv["to"]
     elif kind == "write":
         d["hook_event_name"] = "PostToolUse"
         d["tool_name"] = kv.get("tool", "Write")

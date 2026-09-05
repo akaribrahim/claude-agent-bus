@@ -460,6 +460,10 @@ def main():
             one = raw_command(text)
             if one is not None and all_readonly(one):
                 return 0
+        elif tool == "SendMessage":
+            # Always the engine. See `bin/ab-hook` for why this one is not gated
+            # any further: writing to the event log needs the sequence mutex.
+            pass
         elif tool in ("Edit", "Write", "NotebookEdit"):
             if not sid:
                 return 0

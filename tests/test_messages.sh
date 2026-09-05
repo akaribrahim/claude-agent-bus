@@ -163,4 +163,39 @@ assert_equal 2 "$?" "inbox refuses too"
 assert_contains "$out" "arrives in this conversation" \
   "because that is where a message from another session actually lands"
 
+# ---- and the conversation that replaced it is at least visible ---------------
+#
+# The bus stopped carrying messages; what it must not do is stop being the place
+# a person can see the machine talking. `agentbus watch` and the board were that
+# place, and a conversation leaving no trace anywhere is one nobody can review
+# afterwards. So a SendMessage is recorded on its way past — recorded, never
+# delivered a second time and never denied: a guard that can refuse a message is
+# one that can wedge two agents mid-negotiation.
+
+before=$(read_seq)
+out=$(ab_hook pre-tool "$(payload sendmessage sid=sess-a "cwd=$ONE" \
+  "to=$B" "text=the fixtures are reseeded, every id changed")")
+assert_empty "$out" "a message is never denied, delayed or answered by the guard"
+assert_equal $((before + 1)) "$(read_seq)" "and it is recorded once"
+
+seen=$(events)
+assert_contains "$seen" "msg" "under a kind of its own"
+assert_contains "$seen" "→ $B" "naming who it was sent to"
+assert_contains "$seen" "every id changed" "and what was said"
+
+# Recorded is not delivered. The recipient has it already — it arrived in their
+# conversation — and putting it in their context a second time would be exactly
+# the duplication this release exists to remove.
+assert_not_contains "$(inbox sess-b "$ONE")" "every id changed" \
+  "and is not injected into the recipient's context on top of it"
+assert_not_contains "$(inbox sess-c "$TWO")" "every id changed" \
+  "nor anybody else's"
+
+# A call with nothing to address is not a message.
+before=$(read_seq)
+ab_hook pre-tool "$(payload sendmessage sid=sess-a "cwd=$ONE" "text=hello")" \
+  > /dev/null
+assert_equal "$before" "$(read_seq)" \
+  "a call with no recipient writes nothing rather than a row nobody can read"
+
 finish

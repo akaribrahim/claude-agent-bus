@@ -157,6 +157,20 @@ fi
 # asserted of BOTH fast paths so they cannot drift apart. That is the check;
 # this file's job is the cost of the door that is already known to be shut.
 
+# ---- and a message sent while alone is not written down ---------------------
+#
+# 3.0.0 records session-to-session messages so `watch` and the board can still
+# show the machine talking. Alone there is nobody to show it to, and the whole
+# promise of this file is that the plugin costs nothing when you are the only
+# session — so the same `live-count` gate covers it, and that is a decision
+# rather than an oversight.
+
+before=$(read_seq)
+out=$(ab_hook pre-tool "$(payload sendmessage sid=sess-solo "cwd=$REPO" \
+  to=somebody "text=nobody is listening")")
+assert_empty "$out" "alone, a message says nothing back"
+assert_equal "$before" "$(read_seq)" "and is not recorded, because nobody could read it"
+
 # ---- the off switch --------------------------------------------------------
 #
 # AGENTBUS_OFF is the documented recovery when a hook misbehaves, so it has to

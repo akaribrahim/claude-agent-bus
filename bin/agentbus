@@ -4777,9 +4777,37 @@ def hook_pre_tool(payload):
         # running an `agentbus` command is still known.
         leave_party_hint(me, cmd)
         return guard_bash(me, cmd, sessions, payload.get("tool_use_id"))
+    if tool == "SendMessage":
+        return note_message(me, ti)
     if tool in ("Edit", "Write", "NotebookEdit"):
         return guard_file(me, ti.get("file_path") or ti.get("notebook_path") or "",
                           sessions)
+
+
+def note_message(me, ti):
+    """Write one session-to-session message into the log. Decides nothing.
+
+    Since 3.0.0 this plugin does not carry messages — Claude Code's `SendMessage`
+    does, and it reaches the reader's context directly. What was lost with the
+    old channel was not delivery but SIGHT of it: `agentbus watch` and the board
+    were the one place a person could see the whole machine talking, and a
+    conversation that leaves no trace anywhere is a conversation nobody can
+    review afterwards. So the call is recorded on its way past.
+
+    It is never denied and never delayed. A guard that can refuse a message is a
+    guard that can wedge two agents mid-negotiation, which is precisely what the
+    negotiation was introduced to avoid. `msg` is not in `DELIVERED_KINDS`
+    either: the recipient already has it, and putting it in anybody's context a
+    second time would be the duplicate this whole release removed.
+
+    Only outbound calls are visible, which is sufficient — every message is
+    somebody's outbound."""
+    to = ti.get("to")
+    text = ti.get("message") or ti.get("summary") or ""
+    if not isinstance(to, str) or not to:
+        return
+    emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "msg",
+         "→ %s: %s" % (to, text if isinstance(text, str) else ""))
 
 
 def remember_autoclaim(me, tool_use_id, names):
