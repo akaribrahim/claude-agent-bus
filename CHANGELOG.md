@@ -2,6 +2,110 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 3.0.0 — 2026-09-05
+
+**agent-bus no longer carries messages between sessions, because Claude Code
+does it better — and, unlike this plugin, it can wake the reader.** `SendMessage`
+reaches a session directly and it **acts** within seconds without its human.
+Measured on the machine this was built for: across 127 arrivals, fifteen landed
+on a session silent for more than 45 minutes and every one was acted on inside 36
+seconds; a session quiet for fifty minutes was running the command it had been
+sent twenty seconds after the message arrived. What it does next is its own
+judgement — that one reported to its human rather than writing back — so nothing
+here promises you a reply. It promises the reader is awake, which is the thing
+this plugin could never arrange.
+
+That is not a small thing to hand over. It is the difference between advice and
+an action. Until now every block that ended "ask whoever is holding it" was
+offering something nobody could take — on 2026-09-04 a session on this machine
+was blocked on the database at 14:38:31 and stepped past the guard with
+`AGENTBUS_OFF` at 14:38:42. Eleven seconds is how long asking was considered.
+
+So the verbs go. `post`, `note` and `inbox` deliver nothing; they print the
+`SendMessage` call that works and exit non-zero, and they are kept for one
+release only because the habit of using them is in this plugin's own rules text,
+in two READMEs, in other repositories' config hints and in several sessions'
+memory. `take`, `done`, `doing` and `handoff` go with them, and the task ledger
+underneath: one agent in six ever used it, what an agent is doing has been
+derived from its own tool calls since 2.9.0, and `handoff` was written at
+SessionEnd — the one moment a session can no longer answer for what it wrote.
+
+**What a block says instead.** It names who is holding the resource, prints the
+address `SendMessage` takes, and writes the sentence:
+
+```
+db is held by seeder/1 — a subagent of seeder. Took it 3m ago, "consuming fixtures".
+
+  agentbus wait db --timeout 600     queue for it; takes it the moment it frees
+
+Then tell them it is queued. A message wakes them, so this is an
+answer you have in a moment rather than a formality:
+  SendMessage tool → to "seeder"      ask seeder — it holds this through seeder/1
+  "I have queued for db — `agentbus status` shows me waiting.
+   Release it when your command is done and mine takes it."
+```
+
+The queue comes first on purpose: asking is not waiting. The `wait` is what ends
+with your command running; the message only makes it sooner, and you get on with
+something else meanwhile. `--steal` moved below both, and its line changed from
+"only when you know they have finished" to "when their session is gone" —
+because now you can find out.
+
+**The other half of that had been sitting unused since the beginning.** A lock
+has always recorded who is waiting for it, and nothing ever rendered that where
+the holder would look: it went into the task ledger, filtered to the waiter's own
+row. `agentbus status` now shows it on the resource, so a holder can hand
+something over without being asked at all.
+
+**The address is read, never guessed.** Claude Code keeps a session registry with
+the name its own tools answer to, and it does not always agree with the name this
+plugin uses — both follow the chat title, so both are right until a chat has no
+title, and then one falls back to the branch and the other to the directory. On
+the machine this was written for, four of five sessions matched and the fifth
+did not. Printing our own name would have sent that session's peers to an address
+that does not exist. A subagent cannot be addressed at all — `SendMessage`
+reaches sessions — so a lock one holds is announced to its session with the
+subagent named, which is the common case and not the corner: 64 of the 87
+takeovers this plugin has recorded were held by a subagent.
+
+The registry's `status` is treated as a claim with a date on it rather than a
+heartbeat. Measured while building this: a session whose entry had read `idle` for
+eight hours and forty minutes was mid-tool-loop and answered a message in
+seconds. A status older than five minutes is not reported at all.
+
+**What the bus still tells you, unasked.** Six machine facts that used to travel
+under the same name as everybody's sentences, and now have kinds of their own:
+somebody stepped past the wrong-port guard, a service moved to another checkout,
+part of the tree was declared, a session renamed itself, a resource is being
+pulled between checkouts, an integration worker joined. Plus one that was never
+delivered before and should have been: **a lock taken from under you**. It used
+to be lock churn, which nobody is shown, and the thief told the victim by hand on
+a channel that has gone.
+
+**`agentbus watch` and the board still show the machine talking.** A
+`SendMessage` is recorded on its way past — recorded, never delivered twice and
+never denied, because a guard that can refuse a message can wedge two agents
+mid-negotiation. Alone on the machine it records nothing, under the same gate as
+everything else.
+
+**`merges` and `integrate` were fed entirely by the ledger**, so they would have
+run and printed nothing. They read git instead: every branch with a checkout, or
+that a live session is on, that is ahead of the trunk. A wider net, and it says
+so — each candidate names who is standing on it, which is what you want to know
+before merging under somebody.
+
+Two things this turned up that nobody planned. `cli_inbox` had two definitions
+three thousand lines apart, the later one winning and the earlier one dead code
+being read and believed; the suite now fails on any shadowed top-level definition
+in the engine. And `tests/test_parity.sh` ran a block message's own "ask them"
+line as a shell command and then asserted the block still stood — which it would
+have whether that line worked, failed, or did nothing at all.
+
+Upgrading: nothing to migrate. State under `~/.claude/agent-bus` is
+forward-compatible, the removed event kinds simply stop being written, and a
+session still running the old build keeps its old rules until it restarts — its
+`post` will fail loudly and tell it where messages went.
+
 ## 2.14.0 — 2026-08-17
 
 **Every service agent-bus starts, and every command it wraps, is told this

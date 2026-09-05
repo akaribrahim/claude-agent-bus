@@ -1,6 +1,6 @@
 ---
 name: agent-bus
-description: Coordinate with other Claude Code sessions running on this machine — see who else is live and in which worktree, point a shared service (dev server, bundler, simulator, database) at your own checkout, and leave messages other agents receive in their own context. Use when a command was blocked, when planning work that touches a dev server / port / simulator / shared database, when another agent's work might collide with yours, or when the user mentions parallel agents or worktrees.
+description: Coordinate with other Claude Code sessions running on this machine — see who else is live and in which worktree, point a shared service (dev server, bundler, simulator, database) at your own checkout, and find the address that reaches another session when you need to ask it something. Use when a command was blocked, when planning work that touches a dev server / port / simulator / shared database, when another agent's work might collide with yours, or when the user mentions parallel agents or worktrees.
 ---
 
 # agent-bus
@@ -11,7 +11,7 @@ separate checkouts. Anything behind a single port or a single database does, and
 it collides silently: **the port hides which checkout is answering**, so a test
 can pass against someone else's code and look like proof of yours.
 
-You are already registered. Presence, locking, service ownership and message
+You are already registered. Presence, locking, service ownership and notice
 delivery run in hooks; you do not have to start anything.
 
 Your name on the bus is the name of this chat, once its human has given it one;
@@ -37,22 +37,22 @@ than one you remember, and use `agentbus whois` if you are unsure.
 
     agentbus wait <res>[,<res>] --why "..."  queue for every one in the way
     agentbus status                          who is live, what is held
-    agentbus post --to <agent> "..."         ask them
+    # then SendMessage to the holder — the block prints the address and the words
 
 One `wait` for the whole list, with one deadline — not one command each. A block
 names everything it is about, so copy the line it printed rather than the first
 resource in it.
 
 If the human asks to *see* what is going on, `agentbus board` serves a live page
-on `127.0.0.1` — agents and their subagents, locks, services and the message feed.
+on `127.0.0.1` — agents and their subagents, locks, services and the event feed.
 It is for them to look at, not for you to poll; `agentbus status` is your form of
 the same thing.
 
-You are never asked to report your own progress. What each party last did is
-derived from the tool calls the hooks already see, so do not write status lines
-for the board. `agentbus doing` and `agentbus take` are for *intent* — what you
-mean to do, which no amount of watching can work out — and one line each is
-enough.
+You are never asked to report your own progress, and there is no verb for it.
+What each party last did is derived from the tool calls the hooks already see, so
+do not write status lines for the board. Intent — what you mean to do, which no
+amount of watching can work out — is a message to whoever needs it, not a record
+here.
 
 Automatic claims last one command, so "held" usually means seconds.
 
@@ -148,62 +148,49 @@ as you are done:
     ...
     agentbus release db
 
-## Telling the others things
+## Telling another session something
 
-    agentbus post "reseeded the database — every fixture id changed"
-    agentbus post --to feature-x "handing the API back, I am done"
-    agentbus post --all "the simulator is mine for the next hour"   # every project
-    agentbus doing "backend work, short bursts on the server"   # shown in their roster
-    agentbus take "fix the review findings in api/"   # one piece of work, see below
-    agentbus merges                                  # can the finished work land together?
+**Not with this plugin.** Messages between sessions are Claude Code's own tools:
+`ListAgents` lists every live session, `SendMessage` writes to one, and it
+**wakes** the recipient — an idle session acts on a message within seconds
+without its human. Whether it writes back is its own judgement, so do not wait
+on a reply. `agentbus post` and `agentbus inbox` still exist for one release; they
+deliver nothing, print the call that works, and exit non-zero.
 
-A plain `post` reaches everybody **in your repository** and nobody outside it —
-another project's chatter never arrives, which is what keeps any of this worth
-reading. `--to <agent>` reaches that one agent wherever they are. `--all`
-reaches every live session on the machine, and is for things that are true of
-the machine rather than of your repository: one simulator two projects both
-drive, a machine-wide database being reseeded, a reboot. Use it when the reader
-in another codebase would be worse off not knowing; they are told which project
-it came from, but they still did not ask for it.
+What this plugin gives you is the part those tools cannot know, and it gives it
+to you unasked: who holds the resource you were refused, who is already waiting
+for it, and **the address that actually reaches them**. Take the address from the
+roster or from the block — do not assume the name here is the name the tool
+takes. They agree only by coincidence, and when a chat has no title they differ.
 
-Post *before* you do something that invalidates their assumptions, not after: a
-reseed, a destructive migration, taking a service for a long run, a change to
-shared config. Lock and service activity is **not** delivered to them — only what
-you write, so write the things they could not have seen. `agentbus inbox` shows
-everything said so far.
+A subagent cannot be messaged at all. `SendMessage` reaches sessions, so when
+`orches/2` is holding something, write to `orches` and say which subagent you
+mean. That is the common case: most locks on this bus are held by subagents.
 
-## Saying what you have taken
+Say something *before* you do what invalidates somebody's assumptions, not
+after — a reseed, a destructive migration, taking a service for a long run, a
+change to shared config. There is no broadcast: `SendMessage` addresses one
+session, so a reseed that changes every id is one call per session in the
+repository, and `agentbus post` with no `--to` prints exactly that list for you.
 
-Two lines per piece of work: one when you start it, one when it lands.
+## When you are blocked, ask — but queue first
 
-    agentbus take "fix the review findings in api/"          # prints t1
-    agentbus done t1 --note "all four findings closed"
+A block names who is holding the thing and prints the message to send. The order
+matters and the block states it:
 
-Do it when you start something another agent in this repository could reasonably
-start too, or wait for. They are told, the way a `post` reaches them, and it is
-what stops two chats doing the same work and stops your human carrying messages
-between you.
+    agentbus wait db --timeout 600      # queue: it takes the lock the moment it frees
+    # then SendMessage to the holder, saying you have queued
+    # then do something else while they finish
 
-If you cannot get on until somebody else's work lands, say which — once, on your
-side. It takes a task id, and `agentbus status` lists them:
+Asking is not waiting. The queue is what ends with your command running; the
+message only makes it happen sooner, and it costs you nothing to send because you
+are not sitting still waiting for the answer. If nothing comes back before your
+timeout, `agentbus claim <res> --steal` is there — for a session that has gone,
+not for one you have not asked.
 
-    agentbus take "rebase web onto main once api lands" --needs t1
-
-Nothing else is asked for, so do not try to say it. Your branch, your checkout,
-the files the task has produced since you took it, what you are holding and what
-you are queued behind are all worked out already and appear beside it. Say the
-same thing twice and you get the same id back, not a second task. `agentbus
-done` with nothing named closes your one open task and refuses to guess if you
-have more than one.
-
-Work whose session ended is shown as dropped rather than deleted — the branch is
-still there. If you are carrying it on, say so and then you can close it:
-
-    agentbus take t4        # picks up work whose chat has gone
-
-That is refused for a task belonging to an agent that is still live: nobody can
-prove they have stopped, so ask them first. Tasks are per repository, like a
-plain `post`.
+The other side of the same thing: `agentbus status` shows **who is waiting for
+what you are holding**. If somebody is queued behind you, release it as soon as
+your command is done rather than at the end of your turn.
 
 ## When the finished work has to land together
 
@@ -230,14 +217,12 @@ It spawns a separate headless session which merges the candidates in a **scratch
 worktree of its own**, resolves what conflicts, runs whatever the repository uses
 to check itself, and reports. Without `--yes` it prints the plan and the cost and
 does nothing. You may run it, but say what it will spend first and let them decide
-— and prefer `agentbus merges` plus a `post`, because a preview is free and a
+— and prefer `agentbus merges` plus a message, because a preview is free and a
 worker is not.
 
-Whatever it decides, **it does not close anybody's task**, and the engine will
-refuse you if you try to do it on its behalf. Finishing somebody's work is their
-declaration to make, so if the merge landed their branch, tell them:
-
-    agentbus post --to dizzy-mole "your branch is on main now — close t1 when you like"
+Whatever it decides, it speaks for nobody's work but its own. If the merge landed
+somebody's branch, tell them — `SendMessage`, and `agentbus merges` names who is
+on each branch.
 
 ## Editing files
 
@@ -286,7 +271,7 @@ puzzle the next agent.
 The way through, when you genuinely need a file somebody owns, is the same as
 for any other block: ask them, then take the file explicitly once they agree.
 
-    agentbus post --to <agent> "I need api/routes.py — what are you doing with it?"
+    # SendMessage to <agent>: "I need api/routes.py — what are you doing with it?"
     agentbus claim 'file:/abs/path.py' --why "agreed with <agent>"
 
 The same checkout also shares a working tree and a git index. `git checkout`,
@@ -334,22 +319,24 @@ A resource entry:
 
 A subagent you launch with the Task tool is a party of its own on the bus. It
 appears in the roster as `<your name>/1`, `/2` and so on, and everything works
-for it the way it works for you: it takes locks in its own name, it can be sent
-messages, and it receives them in its own context.
+for it the way it works for you: it takes locks in its own name, and anything
+that happens to it — a lock taken from under it — reaches its own context.
 
-    agentbus post --to <your name>/2 "skip the login flow, it is being rewritten"
+It cannot be messaged from outside, though. `SendMessage` reaches sessions, so
+another agent writes to *you* and names the subagent it means. You can reach your
+own subagents directly, because they are in your session.
 
 Two of your subagents running at once are two parties, so if both reach for the
 simulator one is refused and told which of your agents has it.
 
 **If you are the subagent**, you are told your own name at the end of your first
 batch of tool calls, because there is no other way for you to find it out — your
-shell environment is your parent's. Sign what you say with it, or it is
-attributed to the session that started you:
+shell environment is your parent's. Claim what you take with it, or the lock is
+filed under the session that started you and your sibling walks through it:
 
-    agentbus post --as <your name> "the checkout probe is mine, do not rerun it"
+    agentbus claim <res> --as <your name> --why "..."
 
-You can only speak as yourself or as one of your own subagents. You and your own
+You can only act as yourself or as one of your own subagents. You and your own
 subagents never block each other, in either direction.
 
 **Say where you are working, if you are a subagent.** Your hook payloads carry
@@ -381,24 +368,22 @@ each other. Split the files between them yourself.
 
 ## Handing over
 
-When your session ends, agent-bus writes a summary into the other sessions'
-context by itself — branch, worktree, what you wrote, what you claimed, and in
-particular **any service you started that is still running and still serving
-your tree**. You do not have to do anything for that.
+Everything you were holding is released when your session ends, and in particular
+**any service you started that is still running and still serving your tree**
+keeps serving it. You do not have to do anything for that.
 
-Do it by hand when you are about to be interrupted or compacted, or when there
-is something the state on disk cannot show:
-
-    agentbus handoff --note "auth rewrite is half done; token.py is not wired up yet"
-
-A session that only read things hands over nothing, and a session that is the
-last one on the machine hands over nothing. Both would be noise.
+What the bus cannot do for you is say what the work *was*. There is no handoff
+verb any more: it used to be written at SessionEnd, which is the one moment a
+session can no longer answer for what it wrote. So if you are about to stop while
+somebody is waiting on something you hold, or while the state on disk does not
+show where you got to, say so **while you can still speak** — a message to the
+session that needs it, before you finish.
 
 ## Escape hatch
 
 `AGENTBUS_OFF=1` in front of a command skips every check for that command. Use
-it when the bus is wrong, and say so with `agentbus post` — the other agents are
-relying on what it reports.
+it when the bus is wrong, and tell the others — they are relying on what it
+reports.
 
 It is an escape from a **lock**, where there is a real case for it: you accept
 the contention risk, or the command only looks like it touches the thing. There

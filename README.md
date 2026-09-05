@@ -57,7 +57,8 @@ agent-bus: this failure names files another live session is editing right now:
   api/service.py — repo-main#2, 5s ago
 Do not fix them. That session is mid-edit and the error is probably transient;
 re-run the command in a moment. If it persists, ask rather than edit:
-  agentbus post --to repo-main#2 "your edit to service.py breaks my build — done soon?"
+  SendMessage → to "repo-main#2"   (idle)
+  "your edit to api/service.py breaks my build — done soon?"
 Fix only files you own.
 ```
 
@@ -72,8 +73,10 @@ agent-bus: BLOCKED. repo-main has declared this part of the tree theirs.
   reason  : "backend rebuild"
   worktree: …/repo   (the same one you are in)
 
-Ask before taking it:
-  agentbus post --to repo-main "I need api/service.py — what are you doing with it?"
+Ask before taking it — a message wakes them, so this is an answer you will have
+in a moment and not a formality:
+  SendMessage → to "repo-main"   (idle)
+  "I need api/service.py — what are you doing with it?"
 
 Once they have agreed, take the file itself and the block lifts:
   agentbus claim 'file:…/api/service.py' --why "agreed with repo-main"
@@ -119,8 +122,8 @@ service, no dependencies. `agentbus doctor` reports what it found.
 
 ## Declaring what is shared
 
-Per-repository and opt-in. Without a config you still get presence, messaging,
-ownership, handoffs and the interference guard; what you do not get is locks,
+Per-repository and opt-in. Without a config you still get presence, addresses,
+declared ownership and the interference guard; what you do not get is locks,
 which is the right default for a project with nothing to contend for.
 
 ```bash
@@ -203,28 +206,19 @@ two cannot drift apart.
 agentbus status                       who is live, what is held, what serves whom
 agentbus watch [--repo]               follow every agent on this machine, live
 agentbus board [--port 8787]          the same thing as a page in your browser
-agentbus post "..."                   leave a message for the others in this repo
-agentbus post --to <agent> "..."      ...for one agent, wherever they are working
-agentbus post --all "..."             ...for every session on the machine
-agentbus inbox                        everything addressed to this repo / to you
 agentbus run <res>[,<res>] -- <cmd>   point the services at your tree, hold, run, release
 agentbus serve <res>[,<res>]          restart services so they serve YOUR worktree
 agentbus serves                       which checkout each service is answering for
 agentbus own "<glob>" [--why ".."] [--strict]   declare part of the tree yours
 agentbus own --list | disown "<glob>" | disown --all
-agentbus handoff [--note ".."]        summarise what you did, for the others
 agentbus claim <res>[,<res>] [--why ".."] [--steal] [--as <you>]
 agentbus wait <res>[,<res>] [--timeout 90]      queue for a held resource
 agentbus release <res>[,<res>] | --all
-agentbus take "<what>" [--needs <task>]         say what you have started
-agentbus take <task>                  pick up work whose session has gone
-agentbus done [<task>] [--note ".."]  say it has landed
-agentbus merges                       what the finished work would do if it landed
-                                      together, and what would conflict. Reads only
+agentbus merges                       what the branches in flight would do if they
+                                      landed together, and what would conflict
 agentbus integrate --yes [--only a,b] [--budget 2.00] [--keep]
-                                      spawn a headless session to land it, in a
+                                      spawn a headless session to land them, in a
                                       scratch worktree. Spends model calls
-agentbus doing "..."                  one line others see in their roster
 agentbus init-repo [--dry-run|--force|--local]
 agentbus here [<path>]                record which worktree you are working in
 agentbus port <res>                   the port this checkout should use
@@ -239,11 +233,46 @@ properties to know rather than discover: **`*` crosses directory separators**
 directory and everything under it), and **quote the glob** or your shell expands
 it before agentbus sees it.
 
+## Talking to another session
+
+agent-bus used to carry messages between sessions. It does not any more: Claude
+Code ships `ListAgents` and `SendMessage`, which reach a session directly and
+**wake it** — an idle session acts on one within seconds, without its human,
+though whether it writes back is its own judgement. This plugin never could do
+that, and the difference is not a detail. It is what turns
+"ask whoever is holding the database" from advice into an action.
+
+What agent-bus contributes is the part the tool cannot know: who holds what, who
+is already waiting, and the address that actually reaches them. So every block
+prints the call to make, addressed and with the sentence written:
+
+```
+db is held by seeder/1 — a subagent of seeder. Took it 3m ago, "consuming fixtures".
+
+  agentbus wait db --timeout 600     queue for it; takes it the moment it frees
+
+Then tell them it is queued. A message wakes them, so this is an
+answer you have in a moment rather than a formality:
+  SendMessage tool → to "seeder"      ask seeder — it holds this through seeder/1
+  "I have queued for db — `agentbus status` shows me waiting.
+   Release it when your command is done and mine takes it."
+```
+
+Two things in there are the whole design. **The queue comes first**, because
+asking is not waiting: you join the queue, say so, and get on with something
+else while they finish. And **the address is read, never guessed** — from
+Claude Code's own session registry, because the name this plugin knows a session
+by and the name that tool answers to agree only by coincidence. A subagent
+cannot be addressed at all, so a lock one holds is announced to its session with
+the subagent named.
+
+`agentbus post` and `agentbus inbox` still exist for one release. They deliver
+nothing, print the call that works, and exit non-zero.
+
 ## Watching it
 
-`agentbus status` is a snapshot and `agentbus inbox` is what was addressed to
-you. Neither answers the question somebody with four terminals open actually
-has, which is *what is going on right now*.
+`agentbus status` is a snapshot. It does not answer the question somebody with
+four terminals open actually has, which is *what is going on right now*.
 
 ```bash
 agentbus watch          # a live line per event, in the terminal
@@ -266,9 +295,9 @@ told apart by its tail: `…/.claude/worktrees/fix-timeouts` identifies it where
 there to select and copy, and it is on the heading's tooltip untruncated.
 
 A band is as tall as what is in it. One quiet agent is a strip; five agents wrap
-onto as many lines as they need at full size, and an agent with a sentence about
-what it is doing is given twice the width of one that has said nothing. Nothing
-is squeezed to fit a row.
+onto as many lines as they need at full size, and an agent with subagents under
+it is given twice the width of one standing alone. Nothing is squeezed to fit a
+row.
 
 Each agent is drawn as a figure whose shape, eyes, crest, lean and colour are its
 **name**, hashed — so the same agent is the same figure on every reload, in every
@@ -281,15 +310,15 @@ on rather than watched. Click one for every field of it, as text you can select.
 
 Under each agent, indented and on ground of its own, is **its subagents as a
 tree**. A subagent is a party in its own right here — it holds locks under its own
-id, it contends with its siblings, it can `take` work — so its row says what kind
-of agent it is, how long it has been running, what it is holding, what it
-declared, and **the checkout it is working in when that is not its parent's**,
+id and it contends with its siblings — so its row says what kind of agent it is,
+how long it has been running, what it is holding, and **the checkout it is
+working in when that is not its parent's**,
 which is what `agentbus here --as <name>` is for. The row is shorter than a
 session's and is not padded to look equal: unread messages, commits ahead and
 files written are counted per session, so they are the parent's facts and are not
 repeated on the child as though they were its own.
 
-And under what each agent *said* it was doing is **what it last actually did** —
+Under each agent is **what it last actually did** —
 `editing api/routes.py, 4s ago`, `ran alembic upgrade, 12s ago`. Nothing is asked
 of the agents for this: the hooks already see every tool call, so the shell fast
 path records the last one per party and the page draws it. It costs a `printf` on
@@ -329,47 +358,29 @@ strip it is drawn on keeps room above the heads for it. It is also said in words
 on both of them, because a line between two figures is no use to somebody who
 cannot see it.
 
-None of that can show *intent*. Two chats fixing review findings in one
-repository look identical from outside, and which of them is blocked on the
-other is nowhere on the machine. So the agents write it themselves, in two lines
-per piece of work:
+There used to be a ledger here — `agentbus take` and `agentbus done`, two lines
+an agent typed per piece of work — on the argument that nothing else can show
+*intent*. It is gone in 3.0.0, and the reason is worth stating rather than
+quietly dropping: one agent in six ever used it. What an agent is doing has been
+derived from its own tool calls since 2.9.0 without anybody typing anything, and
+a second place to say the same thing is a place that is empty exactly when it
+matters. Intent between two agents is now a message, which is a thing Claude
+Code does properly and this plugin never could.
 
-```bash
-agentbus take "fix the review findings in api/"          # → t1
-agentbus take "rebase web onto main once api lands" --needs t1
-agentbus done t1 --note "all four findings closed"
-```
-
-Each task appears **on the agent that took it**, beside what the bus watched that
-agent do rather than instead of it, so a chat that has declared nothing still
-shows everything above. Only the sentence and the reference are typed: the branch,
-the checkout, the files the task has produced since it was taken, what its owner
-is holding and — from a lock's own queue — what it is queued behind are all
-derived, because a ledger with six fields to fill in is one nobody fills in when
-it matters. It also says what the work was **built on that has already landed**,
-which `--needs` alone stops mentioning the moment the thing lands, and who the
-work was **carried from** if it changed hands. Taking and finishing reach the
-other sessions in the repository the way a `post` does, which is the point:
-nobody has to carry messages between chats by hand.
-
-Work whose chat has gone reads as **dropped** and is shown rather than deleted —
-a lock that grants nothing can be deleted because the resource frees itself, and
-work cannot, because the branch is still there. It is drawn standing on the
-ground it was taken in, with its branch and its checkout named, and `agentbus
-take <task>` picks it up; a checkout whose last agent has left keeps its strip
-with nobody on it, because that is where the work somebody has to pick up is
-actually sitting. Ids are per repository. The header counts what is open, blocked
-and dropped.
+What was worth keeping from it is on the lock instead. A resource in use shows
+**who is waiting for it**, so the holder can hand it over without being asked —
+that queue existed all along, and until 3.0.0 nothing rendered it anywhere its
+holder would look.
 
 The feed draws a line where you last looked away. That mark lives in your
 browser, not on the bus.
 
 ## Landing it
 
-Two chats say they are done. Whether their work can go on the trunk together used
-to be answerable only by merging and seeing — which means checking out a branch
-somebody is working in and rewriting their files mid-tool-call. Git can answer it
-exactly instead, and for nothing:
+Several chats have branches in flight. Whether their work can go on the trunk
+together used to be answerable only by merging and seeing — which means checking
+out a branch somebody is working in and rewriting their files mid-tool-call. Git
+can answer it exactly instead, and for nothing:
 
 ```bash
 agentbus merges
@@ -378,10 +389,9 @@ agentbus merges
 ```
 agent-bus: 2 branches ready to land on main
   feat-api                 +3 commits, 7 files   ~/work/api-wt (2 uncommitted)
-      t1   fix the review findings in api/ — dizzy-mole, "all four closed"
+      dizzy-mole on it right now
       merges into main cleanly
   feat-web                 +1 commit, 4 files    ~/work/web-wt
-      t3   rebase web onto main — quiet-fox
       merges into main cleanly
 
 Between them:
@@ -467,11 +477,11 @@ moves.
 | Hook | Job |
 |---|---|
 | `SessionStart` | Register; inject the roster, held resources, running services, declared ownership, and anything unread. |
-| `UserPromptSubmit` | Heartbeat; deliver new messages between turns. |
-| `PreToolUse` | Take the resources a Bash command needs, or deny it — because someone holds them, or because the service is serving another checkout. Block an `Edit`/`Write` to a file another session has declared theirs, or is editing right now in the same checkout. |
+| `UserPromptSubmit` | Heartbeat; deliver anything that changed under this session between turns. |
+| `PreToolUse` | Take the resources a Bash command needs, or deny it — because someone holds them, or because the service is serving another checkout. Block an `Edit`/`Write` to a file another session has declared theirs, or is editing right now in the same checkout. Record a `SendMessage` on its way past, deciding nothing. |
 | `PostToolUse` | Give a finished command's claim straight back; record what was written. |
-| `PostToolBatch` | Deliver messages; release what a *failed* command took, since `PostToolUse` does not fire for those; and if something in the batch failed and named a file somebody else is mid-edit in, say so. |
-| `SessionEnd` | Write the handoff, release everything, deregister. |
+| `PostToolBatch` | Deliver notices; release what a *failed* command took, since `PostToolUse` does not fire for those; and if something in the batch failed and named a file somebody else is mid-edit in, say so. |
+| `SessionEnd` | Release everything, deregister. |
 
 **Subagents are parties of their own.** A subagent launched with the Task tool
 runs inside its parent's process and its hooks carry the parent's session id, so
@@ -479,8 +489,11 @@ without help two of them running in parallel share one identity — a lock one
 holds reads as "already yours" to the other, and both drive the simulator. What
 tells them apart is `agent_id`, which Claude Code puts on every hook a subagent
 causes and on none the session itself causes. Each registers on `SubagentStart`
-as `parent/1`, takes locks in its own name, can be addressed with
-`agentbus post --to parent/1`, and gives everything back on `SubagentStop`. A
+as `parent/1`, takes locks in its own name, and gives everything back on
+`SubagentStop`. It cannot be messaged from outside — `SendMessage` reaches
+sessions — so a block held by one addresses its session and names the subagent,
+which is the common case rather than the corner: 64 of the 87 takeovers this
+plugin has recorded were held by a subagent. A
 parent and its own subagent never block each other, in either direction —
 anything else deadlocks a parent against the agent it is waiting for.
 
@@ -549,16 +562,28 @@ what it is about to spend and stops unless you add `--yes`.
 
 - **One machine.** Everything is coordinated through a directory in your home
   folder. Two developers on two laptops know nothing about each other.
-- **Nothing is pushed into an idle session.** A message reaches another agent at
-  its next turn, not the moment you send it. If it is mid-run, it hears when
-  that run ends.
-- **One chat cannot make another chat act.** Hooks fire on a session's own
-  activity, so there is no way to inject a turn into an idle interactive session,
-  and "coordinate between yourselves and both get to main" is therefore not
-  something this can be made to do. What it does instead is remove the reason you
-  were asking: `agentbus merges` answers the question for free, and `agentbus
-  integrate` starts a session of its own — which can be driven, because agent-bus
-  created it.
+- **This plugin cannot push anything into an idle session, and no longer tries.**
+  Its own notices — a lock taken from under you, a service moved to another
+  checkout — still reach another agent at its next turn rather than the moment
+  they happen. Messages do not go through it at all: Claude Code's `SendMessage`
+  carries those, it reaches the session directly, and it wakes it. Both of the
+  limits this section used to state under this heading were about a channel that
+  is gone.
+- **One chat CAN now make another chat act, and that changes what a block is.**
+  Until 3.0.0 "ask the holder" was advice nobody could take: a posted note waited
+  for the reader's next turn, which for an idle session is whenever its human
+  comes back. On this machine, on 2026-09-04, a session was blocked on the
+  database at 14:38:31 and stepped past the guard with `AGENTBUS_OFF` at
+  14:38:42. Eleven seconds is how long asking was considered. A message wakes the
+  recipient and it acts without its human, so a block now ends in a negotiation:
+  queue for the resource, tell the holder you have, and get on with something
+  else. Never wait on the reply — the queue is what ends with your command
+  running. What this plugin contributes is the part the tool cannot know —
+  who holds what, who is waiting, and the address that actually reaches them.
+- **What it will not do is send for you.** There is no CLI that puts a message in
+  another session's conversation, so every block prints the call for the agent to
+  make rather than making it. That is a boundary worth keeping: a coordination
+  layer that can speak as you is one that can say something you would not.
 - **`integrate` is a rail, not a sandbox.** A worker cannot push to a configured
   remote and cannot close anybody's task, both enforced rather than requested. A
   determined `git push <literal-url>` would still get out; the rails are against

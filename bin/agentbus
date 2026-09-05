@@ -2807,8 +2807,8 @@ def ownership_text(me, path, owner, dec, same_tree):
         ]
     lines += [
         "",
-        "Ask before taking it — a message wakes them, so this is an answer you "
-        "will have in a moment and not a formality:",
+        "Ask before taking it — a message wakes them, so this is worth doing "
+        "and not a formality:",
         say_to(owner, about="I need %s — what are you doing with it?" % rel),
         "",
         "Once they have agreed, take the file itself and the block lifts:",
@@ -4328,10 +4328,10 @@ RULES = (
     # roster prints addresses and this says what to do with them.
     "\n\nTalking to another session is the SendMessage tool, not this plugin. "
     "The roster above prints each session's address, and a message wakes it: an "
-    "idle session answers within seconds, without its human. So when a block "
-    "names who holds something, asking is a real option rather than a "
-    "formality — queue with `agentbus wait <res>`, tell them you are queued, and "
-    "get on with something else while they finish. Asking is never waiting. "
+    "idle session acts on one within seconds, without its human. Whether it "
+    "writes back is its own judgement, so never wait on a reply — queue with "
+    "`agentbus wait <res>`, tell them you are queued, and get on with something "
+    "else while they finish. The queue is what ends with your command running. "
     "A subagent cannot be addressed from outside its own session, so when a "
     "subagent holds the lock, message its session and name the subagent."
     "\n\nOne rule that is not enforced by a block: if a build or test failure "
@@ -6094,8 +6094,10 @@ def render_block(plan):
         # without a queue entry asks somebody to do something you have not
         # arranged to receive, and waiting for a reply before queueing turns a
         # three-second block into a round trip.
-        "Then tell them it is queued. A message wakes them, so this is an",
-        "answer you have in a moment rather than a formality:",
+        "Then tell them it is queued. A message wakes them — an idle session",
+        "acts on one within seconds, without its human — so this is worth doing",
+        "and not a formality. Your queue place is what ends with your command",
+        "running; the message only makes it sooner:",
         _exit_line(plan, "ask"),
         _exit_say(plan, "ask"),
         "",
@@ -10525,6 +10527,45 @@ def cli_doctor(_args):
                                  if os.path.exists(TOKENFILE) else "-"))
     _, me = resolve_party()     # read-only: the name this caller answers to
     print("this session : %s" % (me.get("agent") if me else "NOT REGISTERED"))
+
+    # Claude Code's own session registry, which is where every address in every
+    # block message comes from. Four things can go wrong with it and none of
+    # them is visible anywhere else: it can move, this session can be absent
+    # from it, the two names for this session can disagree, and its shape can
+    # change under a Claude Code upgrade. The last is the reason for the
+    # unrecognised-value line — this plugin reads somebody else's undocumented
+    # file, and the honest way to depend on one is to say out loud when it stops
+    # looking like what was measured.
+    reg = cc_sessions(force=True)
+    alive = [r for r in reg.values() if r["alive"]]
+    dead = len(reg) - len(alive)
+    print("addresses    : %s" % CC_SESSIONS)
+    if not reg:
+        print("  NOT READABLE — every block will say `run ListAgents` instead of "
+              "naming somebody")
+    else:
+        print("  %d live%s, versions %s"
+              % (len(alive), ", %d stale" % dead if dead else "",
+                 ", ".join(sorted({r["version"] for r in alive if r["version"]})
+                           ) or "unknown"))
+        odd = sorted({r["status"] for r in alive
+                      if r["status"] and r["status"] not in CC_STATUSES})
+        kinds = sorted({r["kind"] for r in alive
+                        if r["kind"] and r["kind"] != "interactive"})
+        if odd or kinds:
+            print("  values this build has not seen before: %s"
+                  % ", ".join(odd + kinds))
+    if me:
+        addr, _status = address_of(me.get("sid"), me.get("pid"))
+        if not addr:
+            print("  THIS SESSION HAS NO ADDRESS — the others cannot be told how "
+                  "to reach you")
+        elif addr != me.get("agent"):
+            print("  you are `%s` here and `%s` to SendMessage — the roster "
+                  "prints the second, which is the one that works"
+                  % (me.get("agent"), addr))
+        else:
+            print("  you are `%s` to both" % addr)
     root, repo_key, label, _ = git_facts(os.getcwd())
     shared = os.path.join(root, ".claude", "agent-bus.json")
     local = os.path.join(REPOS, "%s.json" % repo_key)

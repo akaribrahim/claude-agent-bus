@@ -187,6 +187,32 @@ codebase that outlives the plan.
     `pid`, the socket path or `bridgeSessionId` (md5/sha1/sha256/sha512/blake2 all checked).
     Observable and cacheable; never derivable.
 
+### Measured while building it, 2026-09-05
+
+11. **A genuinely idle session wakes and runs a peer's command without its
+    human — and that is not the same as replying.** M5's gate zero, run twice on
+    the live machine. The first subject looked ideal in the registry (`idle`,
+    eight hours and forty minutes old) and answered in seconds — then said so
+    itself: it had been mid-task the whole time and the run measured the easy
+    case. That correction is finding 12. The second subject had been quiet for
+    fifty minutes. The message arrived at 18:55:32; it was running `agentbus
+    status` at 18:55:52, twenty seconds later, with no human involved; at
+    18:56:26 it wrote a summary **addressed to its human** rather than a reply to
+    the sender, and stopped.
+    So the half M5 depends on is confirmed: a woken session executes a peer's
+    `agentbus` line by itself, which is what "release it when your command is
+    done" requires. The half that is not guaranteed is the answer coming back.
+    The design already survives that — the waiter's `wait` takes the lock the
+    moment it frees, whether or not anybody says so — but no wording anywhere
+    should promise a reply.
+12. **The registry's `status` is not a heartbeat.** It is written when a session
+    changes state, so `idle` with a timestamp eight hours old told us nothing
+    about a session that was working continuously. Every roster line and every
+    block that says "(idle)" was therefore about to state something it could not
+    know. Fixed in the same pass: a status older than `IDLE_SECS` is not reported
+    at all, and the bus's own heartbeat — derived from hooks actually firing —
+    is what the roster falls back to.
+
 ## Decision Log
 
 D1–D5 were taken by İbrahim on 2026-09-05 before work began. D6 was taken the same day and
