@@ -637,10 +637,24 @@ assert_contains "$out" "$A" "\`agentbus status\` runs and shows the other sessio
 guard b1-3 sess-b "$WT" "$PSQL"
 assert_equal deny "$VERDICT" "reading the roster does not lift the block, and does not claim to"
 
-take_exit b1-4 sess-b "$WT" "$(plan_exit ask)" > /dev/null
-assert_contains "$(ab sess-a inbox)" "..." "\`agentbus post --to\` reaches the holder"
+# The `ask` exit is not a shell command any more and must never be run as one.
+# Until 3.0.0 this file did exactly that — `take_exit … "$(plan_exit ask)"` — and
+# then asserted the block still stood, which it would have whether the line ran,
+# failed, or did nothing at all. A test that executes garbage and passes is this
+# repository's own signature defect, and it was sitting in the file whose header
+# warns about it.
+plan_kind() {   # <exit id> → that exit's kind
+  printf '%s\n' "$PLAN_EXITS" \
+    | awk -F'\t' -v id="$1" '$1 == id {print $2; f = 1} END {if (!f) print "none"}'
+}
+assert_equal tell "$(plan_kind ask)" \
+  "asking is a tool call now, and the Plan says so rather than the prose"
+assert_contains "$(plan_exit ask)" "SendMessage" \
+  "the exit names the tool that carries it"
+assert_not_contains "$(plan_exit ask)" "agentbus" \
+  "and offers no shell command, because there is none that would work"
 guard b1-5 sess-b "$WT" "$PSQL"
-assert_equal deny "$VERDICT" "and asking them does not lift it either"
+assert_equal deny "$VERDICT" "and the block is exactly where it was"
 
 # The bypass. Advertised as `AGENTBUS_OFF=1 <your command>`, the one exit that
 # carries a placeholder — the reader substitutes the command they were refused,
@@ -1034,7 +1048,7 @@ assert_contains "$out" "seeding the database" "and what they said they were doin
 assert_contains "$out" 'agentbus wait db --why' "and offers the wait the block offers"
 assert_contains "$out" "agentbus claim db --steal" "and the steal"
 assert_contains "$out" "agentbus status" "and the first of the two that only tell you more"
-assert_contains "$out" "agentbus post --to $A" "and the second, aimed at the holder"
+assert_contains "$out" "SendMessage" "and the second, aimed at the holder"
 assert_not_contains "$out" "AGENTBUS_OFF" \
   "and no bypass, because nothing in the CLI reads that variable"
 assert_equal "db" "$(lock_keys)" "a refused claim takes nothing"

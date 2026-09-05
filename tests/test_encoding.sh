@@ -59,10 +59,14 @@ new_session sess-b "$REPO"
 
 # ---- written in UTF-8, read in the other locale ------------------------------
 #
-# The reported direction. One session posts, another reads, and on that machine
-# the reader was the one whose locale was not UTF-8.
+# The reported direction. One session writes an event, another reads it, and on
+# that machine the reader was the one whose locale was not UTF-8.
+#
+# `own --why` rather than the `post` this was written against: the verb went
+# away in 3.0.0 and the property did not. What is being tested is the write, and
+# every event still goes through the same one.
 
-ab sess-a post "$MARK" > /dev/null
+ab sess-a own "one/**" --why "$MARK" > /dev/null
 out=$(ab_c sess-b status 2>&1)
 assert_contains "$out" "$MARK" \
   "an event written as UTF-8 comes back whole in a locale that is not"
@@ -70,7 +74,7 @@ assert_not_contains "$out" "â€”" "and not as the mojibake it used to"
 
 # ---- written in the other locale, read in UTF-8 ------------------------------
 
-ab_c sess-b post "$MARK" > /dev/null
+ab_c sess-b own "two/**" --why "$MARK" > /dev/null
 out=$(ab sess-a status 2>&1)
 assert_equal 2 "$(printf '%s\n' "$out" | grep -c -- "$MARK")" \
   "and the same text posted from that locale is readable from this one"
@@ -99,7 +103,8 @@ with open(sys.argv[1], "a", encoding="utf-8") as fh:
 PY
 
 before=$(wc -l < "$AGENTBUS_HOME/events.jsonl" | tr -d " ")
-ab_c sess-b post "$MARK — the line the rotation must keep" > /dev/null
+ab_c sess-b own "three/**" --why "$MARK — the line the rotation must keep" \
+  > /dev/null
 
 out=$(hook_c prompt-submit "$(payload session sid=sess-a "cwd=$REPO")" 2>&1)
 rc=$?
@@ -142,8 +147,8 @@ assert_contains "$out" "ölçüm-günlüğü.txt" \
 # `json.dumps(ensure_ascii=False)` carries those without complaint and the
 # `.encode("utf-8")` after it raises `UnicodeEncodeError` — which is not an
 # `OSError`, and `OSError` was the only thing the write was wrapped in. So
-# `agentbus post "… — …"` wrote nothing and died, and the message one session
-# meant to leave the others was gone. Found by this file's own first run, under
+# the command wrote nothing and died, and what one session meant to tell the
+# others was gone. Found by this file's own first run, under
 # WSL, on 2026-08-12.
 #
 # Asserted against the repair rather than through the CLI, because the platform
@@ -161,7 +166,7 @@ want = "took the name of its chat — was ölçüm · dev → prod"
 # Exactly what CPython does to argv when the filesystem encoding is ASCII.
 broken = want.encode("utf-8").decode("ascii", "surrogateescape")
 
-kept, sys.argv = sys.argv, ["agentbus", "post", broken]
+kept, sys.argv = sys.argv, ["agentbus", "own", broken]
 eng.repair_argv()
 got = sys.argv[2]
 sys.argv = kept
@@ -219,7 +224,7 @@ assert_not_contains "$out" "No shared resources declared" \
 
 # The same on the write side: what this reads back it must not have BOM'd itself,
 # or every file it owns grows one more mark per pass.
-ab sess-c post "$MARK" > /dev/null
+ab sess-c claim bomdb --why "$MARK" > /dev/null
 assert_not_contains "$(head3 "$AGENTBUS_HOME/events.jsonl")" "ef bb bf" \
   "and nothing this plugin writes gets a mark of its own"
 

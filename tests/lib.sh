@@ -337,6 +337,33 @@ for line in fh:
         print(rec.get('text', ''))"
 }
 
+# Everything the bus has RECORDED, whoever it was for. `agentbus inbox` used to
+# answer this and is a redirect now; a test still has to be able to ask "was
+# this announced at all" without consuming somebody's cursor, which is what the
+# delivery hooks do.
+events() {   # → "<agent>\t<kind>\t<text>" for every event so far
+  python3 -c "
+import json
+try:
+    fh = open('$AGENTBUS_HOME/events.jsonl')
+except OSError:
+    raise SystemExit
+for line in fh:
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        continue
+    print('%s\t%s\t%s' % (rec.get('agent', ''), rec.get('kind', ''),
+                          rec.get('text', '')))"
+}
+
+# And what a session is actually SHOWN on its next turn — the other half, and
+# the one that matters: an event nobody is told about is a row in a file.
+told() {   # <sid> <cwd> → the text injected into that session's context
+  json_field "$(ab_hook prompt-submit \
+    "$(payload session "sid=$1" "cwd=$2")")" hookSpecificOutput additionalContext
+}
+
 read_seq() {
   local n=0
   [ -r "$AGENTBUS_HOME/events.seq" ] && read -r n < "$AGENTBUS_HOME/events.seq"

@@ -23,6 +23,7 @@ commit_all "$REPO"
 new_session sess-a "$REPO"
 new_session sess-b "$REPO"
 A=$(ab sess-a name)
+cc_session sess-a "$A" busy    # so the note can print an address that works
 assert_equal 2 "$(cat "$AGENTBUS_HOME/live-count")" "two sessions in one checkout"
 
 wrote() {   # <session id> <absolute path>
@@ -61,7 +62,8 @@ assert_contains "$note" "editing right now" "the failure produces a note"
 assert_contains "$note" "api/service.py" "the note names the file"
 assert_contains "$note" "$A" "the note names the session that owns it"
 assert_contains "$note" "Do not fix them" "the note says what to do instead"
-assert_contains "$note" "agentbus post --to $A" "the note offers the way to ask"
+assert_contains "$note" "SendMessage" "the note offers the way to ask"
+assert_contains "$note" "\"$A\"" "addressed to the session that is editing"
 assert_contains "$note" "service.py breaks my build" \
   "the suggested message names the file"
 

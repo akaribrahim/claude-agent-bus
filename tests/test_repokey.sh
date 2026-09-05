@@ -133,13 +133,13 @@ inbox() {   # <sid> <cwd> → the text injected into that session's context
 inbox sess-root "$REPO" > /dev/null      # start both cursors at the end
 inbox sess-sub "$SUB" > /dev/null
 
-ab sess-sub post "the fixtures are reseeded" > /dev/null
+ab sess-sub own "fixtures/**" --why "the fixtures are reseeded" > /dev/null
 assert_contains "$(inbox sess-root "$REPO")" "the fixtures are reseeded" \
-  "a plain post from a subdirectory reaches a session at the root"
+  "an event from a subdirectory reaches a session at the root"
 
-ab sess-root post "the migration is running" > /dev/null
+ab sess-root own "alembic/**" --why "the migration is running" > /dev/null
 assert_contains "$(inbox sess-sub "$SUB")" "the migration is running" \
-  "and a plain post from the root reaches the session in the subdirectory"
+  "and an event from the root reaches the session in the subdirectory"
 
 # ---- and what a wrong fix would cost: worktrees -----------------------------
 #

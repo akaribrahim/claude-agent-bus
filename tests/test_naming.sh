@@ -96,9 +96,15 @@ bulk 20
 prompt sess-a
 assert_equal "agentbus" "$(ab sess-a name)" \
   "the session takes the name of its chat at the next turn"
-assert_contains "$(ab sess-other inbox)" "took the name of its chat" \
+# Recorded and delivered are two properties, and the verb that used to answer
+# both at once has gone. They are worth asserting separately: a rename that is
+# logged and not delivered leaves every peer holding an address that no longer
+# resolves, which is the failure the address book exists to prevent.
+seen=$(events)
+assert_contains "$seen" "took the name of its chat" "the rename is recorded"
+assert_contains "$seen" "was namerepo-main" "naming what it was"
+assert_contains "$(told sess-other "$REPO")" "took the name of its chat" \
   "and the others are told, so an address they hold still resolves"
-assert_contains "$(ab sess-other inbox)" "was namerepo-main" "naming what it was"
 
 # Idempotent: the same title must not rename it again every turn.
 before=$(read_seq)

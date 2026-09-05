@@ -33,7 +33,7 @@ A=$(ab sess-a name)
 ab_hook subagent-start "$(payload subagent-start sid=sess-a "cwd=$REPO" \
   agent_id=sub-1 agent_type=general-purpose)" > /dev/null
 ab sess-a doing "wiring the board" > /dev/null
-ab sess-a post "something worth reading" > /dev/null
+ab sess-a own "src/**" --why "something worth reading" > /dev/null
 ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" "cmd=psql -c 'select 1'" id=bd-1)" > /dev/null
 
 # ---- the snapshot carries what the page draws -------------------------------

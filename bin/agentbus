@@ -1183,9 +1183,9 @@ def resolve_party(payload=None, cmd=""):
 
     There is no `as_name` parameter, though the plan drafted one. `--as` is
     clause (b) of the first order and it is deliberately applied by the verb:
-    it means different things to different verbs — `agentbus post --as X` signs
-    a message without adopting X's cursor or lock ownership, `agentbus claim
-    --as X` adopts the identity outright — and `acting` exits 1 on a name that
+    it means different things to different verbs — `agentbus here --as X` says
+    where X is working without adopting its locks, `agentbus claim --as X`
+    adopts the identity outright — and `acting` exits 1 on a name that
     is not one of this session's own subagents, which in a universal resolver
     would make `agentbus status --as <stale>` exit non-zero. It could not be
     passed in even if that were wanted: validating the name needs
@@ -1526,7 +1526,7 @@ def cc_strangers(sessions):
             if r["alive"] and r["sid"] not in known]
 
 
-def say_to(session, party="", lead="  "):
+def say_to(session, party="", lead="  ", about=""):
     """The line that tells a reader how to reach somebody, ready to print.
 
     `party` is the agent that acted, which is not always the session: a lock
@@ -1543,14 +1543,20 @@ def say_to(session, party="", lead="  "):
     addr, status = address_of(sid, pid)
     named = party or owner
     if not addr:
-        return ("%s(no address for %s — run the ListAgents tool to find it)"
+        line = ("%s(no address for %s — run the ListAgents tool to find it)"
                 % (lead, named or "that session"))
+        return line + ('\n%s  "%s"' % (lead, about) if about else "")
     line = '%sSendMessage → to "%s"' % (lead, addr)
     if status:
         line += "   (%s)" % status
     if party and owner and party != owner:
         line += "\n%s  — it is holding this through its subagent %s; say so" % (
             lead, party)
+    # The sentence, not just the address. Composing it here is the difference
+    # between advice a reader has to act on and advice they have to write first,
+    # and the whole reason asking is worth doing is that it is now cheap.
+    if about:
+        line += '\n%s  "%s"' % (lead, about)
     return line
 
 
@@ -2045,10 +2051,17 @@ def name_hint_once(me):
     """Told to a subagent once: the name everybody else sees it by.
 
     A subagent has no way to find this out for itself. Its Bash environment is
-    its parent's, so `agentbus post` is attributed to the parent — and the
-    agents on this machine had noticed, and were writing "(agent /2)" into the
-    body of every message by hand to compensate. Giving them the name is the
-    honest fix: the tool should do that, not the agent."""
+    its parent's, so anything it does through the CLI is attributed to the
+    parent — and the agents on this machine had noticed, and were writing
+    "(agent /2)" into the body of every message by hand to compensate. Giving
+    them the name is the honest fix: the tool should do that, not the agent.
+
+    The name is also the reason a subagent cannot simply be messaged. It is a
+    party on this bus and not a session anywhere else, so `SendMessage` cannot
+    reach it: another session addresses the session that started it, and says
+    which subagent it means. That is worth telling it once, because a subagent
+    that expects to be written to directly waits for something that cannot
+    arrive."""
     aid = me.get("agent_id")
     if not aid:
         return ""
@@ -2058,9 +2071,13 @@ def name_hint_once(me):
     rec["told"] = now()
     write_json(agent_path(me.get("sid"), aid), rec)
     return ("agent-bus: on this machine you are `%s` — that is the name the "
-            "other agents see, and the name to reach you at. Sign what you say "
-            "with it, or it is attributed to the session that started you:\n"
-            "  agentbus post --as %s \"...\"" % (rec["name"], rec["name"]))
+            "other agents see you under. Claim what you take with it, or the "
+            "lock is filed under the session that started you and your sibling "
+            "walks through it:\n"
+            "  agentbus claim <res> --as %s --why \"...\"\n"
+            "Nobody can message you directly: SendMessage reaches sessions, so "
+            "another agent writes to the session you belong to and names you."
+            % (rec["name"], rec["name"]))
 
 
 def _follow_agent_cwd(rec, cwd, trusted=True):
@@ -2248,7 +2265,10 @@ def rotate_events():
 # looking at. Telling only the party that already decided to step over it is
 # telling the one person the news is not for. Bounded per party and per port by
 # `astray_again`, or a run of one mistake would be the noise 2.3.0 removed.
-DELIVERED_KINDS = {"note", "serve", "handoff", "task", "wrong-port"}
+DELIVERED_KINDS = {"serve", "wrong-port", "steal", "churn", "rename",
+                   "own", "disown", "worker", "waiting",
+                   # Both leave with the ledger they belong to.
+                   "handoff", "task"}
 
 
 def interesting_to(rec, me):
@@ -2257,15 +2277,16 @@ def interesting_to(rec, me):
     to the whole machine. Work in another project otherwise stays out of the way
     entirely, which is what makes the rest of this readable.
 
-    The machine-wide case is narrow on purpose. Presence is already machine-wide
-    — `agentbus status` lists every live session, whatever project it is in —
-    while messages were repository-wide, so an agent could see somebody it had
-    no way to talk to. That gap is only worth crossing for things that are true
-    of the machine rather than of a repository: one simulator that two projects
-    both drive, a database being reseeded, a reboot, or this plugin itself being
-    replaced under everybody. `--all` is how that is said, and the reader is told
-    which project it came from, because a sentence from a codebase you are not in
-    is noise without it."""
+    There used to be a third case, and 3.0.0 removed the only thing that could
+    produce it. `agentbus post --all` reached every session on the machine, for
+    the things that are true of the machine rather than of a repository — one
+    simulator two projects drive, a database being reseeded. Nothing emits a
+    machine-scoped event any more: every remaining producer is a fact about one
+    repository. The reader for that case is not gone, though, and it is not
+    served by silence — a session about to reseed still has to tell the other
+    projects, and it now does so by listing them (`ListAgents`) and writing to
+    each. `agentbus post` prints exactly that list rather than pretending the
+    reach it used to have still exists."""
     # Not `sid`: a subagent shares its parent's, and a message from one to the
     # other would be filtered out as the reader's own.
     if rec.get("sid") == me.get("sid") and rec.get("agent") == me.get("agent"):
@@ -2280,8 +2301,6 @@ def interesting_to(rec, me):
         return False
     if rec.get("kind") not in DELIVERED_KINDS:
         return False
-    if rec.get("scope") == "machine":
-        return True
     return rec.get("repo") == me.get("repo_key")
 
 
@@ -2336,14 +2355,10 @@ def deliver(me, advance=True):
     lines = []
     for r in shown:
         who = r.get("agent", "?")
+        # Kept, and it means more than it used to rather than less: what is
+        # addressed now is a fact about the reader — a lock taken from under it,
+        # a queue it is holding up — and not a sentence somebody chose to send.
         direct = " → you" if r.get("to") else ""
-        # A machine-wide message is the one kind that can arrive from a codebase
-        # the reader is not in, so it has to say which — "the simulator is mine
-        # for an hour" means nothing until you know who else is on the machine
-        # saying it. Only when it really is another project: the sender's own
-        # repository already knows where it is.
-        if r.get("scope") == "machine" and r.get("repo") != me.get("repo_key"):
-            direct += " (in %s)" % (r.get("from_repo") or "another project")
         text = r.get("text", "")
         if "\n" in text:
             # A handoff is inherently several lines; folding it into the
@@ -2353,8 +2368,8 @@ def deliver(me, advance=True):
             lines.append("  - %s%s, %s:\n%s" % (who, direct, ago(r.get("ts")), body))
         else:
             lines.append("  - %s%s, %s: %s" % (who, direct, ago(r.get("ts")), text))
-    head = "agent-bus — %d new message%s from other sessions:" % (
-        len(mine), "" if len(mine) == 1 else "s")
+    head = ("agent-bus — %d thing%s changed under you while you were working:"
+            % (len(mine), "" if len(mine) == 1 else "s"))
     if len(mine) > len(shown):
         head += " (showing the last %d)" % len(shown)
     return head + "\n" + "\n".join(lines)
@@ -2451,10 +2466,19 @@ def do_claim(me, res, why="", mode="soft", steal=False, sessions=None,
             # to everyone who asks.
             return False, lock, holder, "could not write the lock file"
     if holder:
-        emit(me.get("sid"), me.get("agent"), repo_key, "lock",
+        # A takeover is not lock churn and is not delivered as such: it is the
+        # one lock event somebody needs to be told about, because the party that
+        # had it is about to run a command believing it still does. Addressed
+        # with the LOCK's agent rather than the session's — a lock a subagent
+        # took is held by that subagent, and telling its parent leaves the party
+        # that actually lost it uninformed. Until now the thief told the victim
+        # by hand, on a channel that no longer exists.
+        emit(me.get("sid"), me.get("agent"), repo_key,
+             "steal" if steal else "lock",
              "took '%s' from %s (%s)%s" % (plain_name(res), holder.get("agent"),
                                            "forced" if steal else reason,
-                                           (' — ' + why) if why else ""))
+                                           (' — ' + why) if why else ""),
+             to=(lock or {}).get("agent") or holder.get("agent"))
     elif mode == "hard" or why:
         emit(me.get("sid"), me.get("agent"), repo_key, "lock",
              "took '%s'%s" % (plain_name(res), (' — ' + why) if why else ""))
@@ -3017,9 +3041,9 @@ def ownership_text(me, path, owner, dec, same_tree):
         ]
     lines += [
         "",
-        "Ask before taking it:",
-        '  agentbus post --to %s "I need %s — what are you doing with it?"'
-        % (owner.get("agent"), rel),
+        "Ask before taking it — a message wakes them, so this is an answer you "
+        "will have in a moment and not a formality:",
+        say_to(owner, about="I need %s — what are you doing with it?" % rel),
         "",
         "Once they have agreed, take the file itself and the block lifts:",
         "  agentbus claim 'file:%s' --why \"agreed with %s\""
@@ -3059,11 +3083,10 @@ def ownership_verdict(me, path, sessions):
         "agent-bus: %s has declared '%s' theirs on %s%s. You are in a different "
         "worktree, so this edit is allowed and nothing is being overwritten — "
         "but you are both changing %s, and that lands at merge time. Worth a "
-        "word first if it is more than a line:\n"
-        '  agentbus post --to %s "I am also editing %s"'
+        "word first if it is more than a line:\n%s"
         % (s.get("agent"), dec.get("glob"), s.get("branch") or "-",
            (' — "%s"' % dec["why"]) if dec.get("why") else "",
-           rel, s.get("agent"), rel))
+           rel, say_to(s, about="I am also editing %s" % rel)))
 
 
 # ---------------------------------------------------------------- handoff ----
@@ -3263,7 +3286,7 @@ def note_churn(me, res, moves):
         short = short_path(m.get("root") or "")
         if short not in roots:
             roots.append(short)
-    emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "note",
+    emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "churn",
          "'%s' has changed checkouts %d times in the last %d minutes, between "
          "%s (%s). Between one handover and the next, a run reports on whichever "
          "tree happened to hold it — which is what this whole thing exists to "
@@ -4610,7 +4633,7 @@ def register(payload):
     if not known:
         rec.pop("pinned", None)     # a fresh chat has not said where it is yet
     # Kept rather than re-derived, because it is an address: the other sessions
-    # hold it, `agentbus post --to` resolves it, and a name that changes because
+    # hold it, every block message prints it, and a name that changes because
     # nobody typed for three hours breaks every address in flight. Re-derived
     # only when it is empty or somebody else has taken it in the meantime —
     # which, for a chat that has been away, is the one thing that can happen.
@@ -4703,8 +4726,8 @@ def transcript_title(path, tail=65536):
 
 
 def name_from_title(title, taken, limit=24):
-    """A bus name from a chat title: typeable, unique, and short enough to be
-    used as an address in `agentbus post --to <name>`.
+    """A bus name from a chat title: typeable, unique, and short enough to sit
+    in a roster line beside the address SendMessage takes.
 
     Accents are folded rather than deleted. A chat named in Turkish — or any
     language with a diacritic — would otherwise come out as the consonants that
@@ -4756,7 +4779,7 @@ def rename_session(rec, new_name, sessions=None, why="renamed"):
             a["name"] = "%s/%s" % (new_name, tail[1])
             a["parent"] = new_name
             write_json(agent_path(rec["sid"], a.get("agent_id")), a)
-    emit(rec["sid"], new_name, rec.get("repo_key"), "note",
+    emit(rec["sid"], new_name, rec.get("repo_key"), "rename",
          "%s — was %s" % (why, old))
     return True
 
@@ -5124,8 +5147,8 @@ def interference_note(me, tool_response, sessions):
         "Do not fix them. That session is mid-edit and the error is probably "
         "transient;",
         "re-run the command in a moment. If it persists, ask rather than edit:",
-        '  agentbus post --to %s "your edit to %s breaks my build — done soon?"'
-        % (who, base),
+        say_to(next((s for s in sessions if s.get("agent") == who), {}), who,
+               about="your edit to %s breaks my build — done soon?" % base),
         "Fix only files you own.",
     ]
     return "\n".join(lines)
@@ -5483,6 +5506,11 @@ def _exit(eid, kind, cmd, when):
                   should: it is not the same command any more
         bypass    steps over the decision instead of resolving it, and says so
                   on the bus
+        tell      not a command at all: a tool call, because since 3.0.0 the way
+                  to reach another session is Claude Code's `SendMessage` and
+                  this plugin cannot send one for you. Rendered so that nobody
+                  pastes it into a shell, and never run by anything — including
+                  the test that runs every other exit to prove it is reachable
 
     They are not interchangeable, and flattening them is how `agentbus status`
     came to be printed beside `agentbus wait` with nothing to tell them apart.
@@ -5541,6 +5569,28 @@ def _exit_line(plan, eid, indent="  ", width=36, mark=""):
     if not e:
         return ""
     return "%s%-*s  %s%s" % (indent, width, e["cmd"], mark, e["when"])
+
+
+def _tell_exit(session, party=""):
+    """The `ask them` exit, as the tool call it now is.
+
+    Built from the address book rather than from a name this plugin chose, and
+    addressed to the SESSION even when a subagent is the one holding the lock:
+    `SendMessage` reaches sessions, and 64 of the 87 takeovers this plugin has
+    recorded were between parties inside one. Telling the reader to write to
+    `seeder/1` would be telling them to write to nobody."""
+    addr, status = address_of(session.get("sid"), session.get("pid"))
+    owner = session.get("agent") or ""
+    if not addr:
+        # No invented address. `ListAgents` is a tool the reader has and this
+        # plugin does not, and it knows names the registry cannot see.
+        return _exit("ask", "tell", "ListAgents, then SendMessage",
+                     "find their address, then ask them")
+    if party and owner and party != owner:
+        when = "ask %s — it holds this through %s" % (owner, party)
+    else:
+        when = "ask them" + (" (%s)" % status if status else "")
+    return _exit("ask", "tell", 'SendMessage tool → to "%s"' % addr, when)
 
 
 def _exit_name(res, lock):
@@ -5647,8 +5697,7 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
         # not have to read past `agentbus status` to find the one that works.
         exits.append(wait)
     exits.append(_exit("status", "ask", "agentbus status", "what is going on"))
-    exits.append(_exit("ask", "ask", 'agentbus post --to %s "..."' % who,
-                       "ask them"))
+    exits.append(_tell_exit(holder, who))
     if cmd:
         # Only when there is a command to put it in front of. A Plan built from
         # a name rather than a command — which is what the five command-line
@@ -6255,8 +6304,8 @@ def render_refusal(plan, note=""):
     of anything. What the two do share is the part that kept being wrong — the
     runnable lines underneath. Those come out of `plan["exits"]` here as well,
     so a verb cannot advertise a command the tool would refuse any more than a
-    block can, which before this milestone is exactly what `agentbus serve`
-    did: it composed an `agentbus post --to <holder>` line of its own."""
+    block can, which before that milestone is exactly what `agentbus serve`
+    did: it composed a line of its own telling the reader to post."""
     b = plan.get("blocker") or {}
     if plan.get("reason") != "lock-held":
         return render_block(plan)
@@ -6352,11 +6401,13 @@ def guard_file(me, path, sessions):
         if holder:
             deny("agent-bus: BLOCKED. %s has explicitly claimed this file:\n\n"
                  "  file  : %s\n  since : %s\n  reason: %s\n\n"
-                 "Ask before taking it:\n  agentbus post --to %s \"...\"\n"
+                 "Ask before taking it:\n%s\n"
                  "  agentbus claim 'file:%s' --steal --why \"they agreed\""
                  % (holder.get("agent"), short_path(path),
                     held_for(mine.get("acquired_at")), mine.get("why") or "-",
-                    holder.get("agent"), path))
+                    say_to(holder,
+                           about="I need %s — are you done with it?"
+                                 % short_path(path)), path))
             return
     # Declared ownership comes before the reactive check: it is the whole point
     # of declaring one that the block does not wait for somebody to write the
@@ -6400,7 +6451,7 @@ def guard_file(me, path, sessions):
             "  worktree: %s   (the same one you are in)" % short_path(s.get("root", "")),
             "",
             "Split the work or take turns:",
-            '  agentbus post --to %s "I need this file for <reason>"' % s.get("agent"),
+            say_to(s, about="I need this file for <reason>"),
             "  agentbus status",
             "",
             "Once they have agreed, take it and the block lifts for you and",
@@ -6712,9 +6763,9 @@ def cli_wait(args):
                 break
             if not announced:
                 enqueue(me, key)
-                emit(me["sid"], me["agent"], me["repo_key"], "note",
+                emit(me["sid"], me["agent"], me["repo_key"], "waiting",
                      "waiting for '%s'%s" % (name, (' — ' + why) if why else ""),
-                     to=holder.get("agent"))
+                     to=(lock or {}).get("agent") or holder.get("agent"))
                 announced = True
                 print("'%s' is held by %s; queued." % (name, holder.get("agent")),
                       file=sys.stderr)
@@ -6788,47 +6839,119 @@ def acting(me, args):
     return view
 
 
+def whom(name, sessions=None):
+    """(session, party) for a name somebody typed, in either name space.
+
+    A reader who has been told to message `orches` should not have to know
+    whether that is what this plugin calls the session, what Claude Code calls
+    it, or the name of a subagent inside it. All three resolve, because all
+    three are names a block message might have printed at some point."""
+    if not name:
+        return None, ""
+    sessions = load_sessions() if sessions is None else sessions
+    for s in sessions:
+        if s.get("agent") == name:
+            return s, ""
+    for s in sessions:
+        for a in load_agents(s.get("sid")):
+            if a.get("name") == name:
+                return s, name
+    for rec in cc_sessions().values():
+        if rec["alive"] and rec["name"] == name:
+            for s in sessions:
+                if s.get("sid") == rec["sid"]:
+                    return s, ""
+            # Live, addressable, and not on this bus. There is no session record
+            # to return, but there is an address, which is all the caller wants.
+            return {"sid": rec["sid"], "pid": rec["pid"], "agent": rec["name"]}, ""
+    return None, ""
+
+
+# `post` and `inbox` do not deliver anything any more, and do not pretend to.
+#
+# They could simply have been deleted. They are kept for one release because the
+# habit of using them is not only in agents' heads: it is in this plugin's own
+# rules text, in two READMEs, in the `hint` field of other repositories'
+# .claude/agent-bus.json files, and in several sessions' memory. A verb that
+# vanishes teaches a reader nothing; one that answers with the call that does
+# work teaches them once, and the non-zero exit is what stops an agent believing
+# a message went somewhere.
+
+MOVED = "agent-bus no longer carries messages — Claude Code does."
+
+
 def cli_post(args):
     me = need_me()
     pos = positional(args)
     text = " ".join(pos).strip()
-    if not text:
-        print('usage: agentbus post [--to <agent> | --all] [--as <you>] "message"',
-              file=sys.stderr)
-        sys.exit(1)
-    sender = speak_as(me, opt(args, "--as"))
-    if not sender:
-        print("agent-bus: '%s' is not you or one of your subagents. "
-              "`agentbus whois` lists who is who." % opt(args, "--as"),
-              file=sys.stderr)
-        sys.exit(1)
     to = opt(args, "--to")
     everywhere = flag(args, "--all")
-    if to and everywhere:
-        print("agent-bus: --to names one agent and --all means every session on "
-              "the machine. Pick one.", file=sys.stderr)
-        sys.exit(1)
-    extra = None
-    if everywhere:
-        # Carried on the event because the reader needs it: `repo` is a digest,
-        # and the label is the only part of it a person recognises.
-        extra = {"scope": "machine",
-                 "from_repo": me.get("repo_label") or short_path(me.get("root"))}
-    emit(me["sid"], sender, me["repo_key"], "note", text, to=to, extra=extra)
+    sessions = load_sessions()
+    print(MOVED, file=sys.stderr)
+    print(file=sys.stderr)
+
     if to:
-        print("posted to %s" % to)
-        return
+        target, party = whom(to, sessions)
+        if not target:
+            print("Nothing live is called %r. `ListAgents` lists every session "
+                  "on this machine, and its names are the addresses." % to,
+                  file=sys.stderr)
+            sys.exit(2)
+        print("Send it yourself — the tool wakes them, which this never did:",
+              file=sys.stderr)
+        print(file=sys.stderr)
+        print(say_to(target, party), file=sys.stderr)
+        if text:
+            print(file=sys.stderr)
+            print("  message: %s" % (text if len(text) < 300
+                                     else text[:297] + "..."), file=sys.stderr)
+        sys.exit(2)
+
+    # The broadcast, which is the one shape SendMessage does not have. Said
+    # plainly rather than papered over: a reseed that invalidates every id in the
+    # database is exactly the case this plugin exists for, and it is now several
+    # calls instead of one.
+    peers = [s for s in sessions if s.get("sid") != me.get("sid")]
     if not everywhere:
-        print("posted to everyone on this repo")
-        return
-    # Say how many, and how many are elsewhere. A machine-wide message is the
-    # loud option and the sender should be able to see whether it was warranted:
-    # `--all` into a machine where everybody is already in your repository is
-    # just `post` with extra reach nobody used.
-    sessions = [s for s in load_sessions() if s.get("sid") != me.get("sid")]
-    away = len([s for s in sessions if s.get("repo_key") != me.get("repo_key")])
-    print("posted to every session on this machine — %d other%s, %d in another "
-          "project" % (len(sessions), "" if len(sessions) == 1 else "s", away))
+        peers = [s for s in peers if s.get("repo_key") == me.get("repo_key")]
+    scope = "on this machine" if everywhere else "on this repo"
+    if not peers:
+        print("Nothing to tell: no other session is %s." % scope, file=sys.stderr)
+        sys.exit(2)
+    print("It addresses one session at a time, and %d %s %s:"
+          % (len(peers), "session is" if len(peers) == 1 else "sessions are",
+             scope), file=sys.stderr)
+    print(file=sys.stderr)
+    for s in peers:
+        print(say_to(s), file=sys.stderr)
+    print(file=sys.stderr)
+    if len(peers) > 1:
+        print("That is %d calls rather than one — the broadcast is the shape "
+              "SendMessage does not have." % len(peers), file=sys.stderr)
+    print("`ListAgents` also lists sessions this bus cannot see.",
+          file=sys.stderr)
+    sys.exit(2)
+
+
+def cli_inbox(_args):
+    me = need_me()
+    print("agent-bus has no inbox: a message from another session arrives in "
+          "this conversation, not here.", file=sys.stderr)
+    print(file=sys.stderr)
+    # Not empty-handed, because the bus does still tell you things — it just
+    # tells you them unasked, and only when they are facts about the machine
+    # rather than sentences somebody wrote.
+    shown = [r for r in read_events(after=0)
+             if interesting_to(r, me)][-8:]
+    if shown:
+        print("What it does still record for you:", file=sys.stderr)
+        for r in shown:
+            print("  %-16s %-9s %s" % (r.get("agent"), ago(r.get("ts")),
+                                       r.get("text")), file=sys.stderr)
+    else:
+        print("Nothing has happened to you that the bus would have told you "
+              "about.", file=sys.stderr)
+    sys.exit(2)
 
 
 def watch_line(r, width=None):
@@ -9116,7 +9239,7 @@ def cli_integrate(args):
 
     # Announced, because the worker is about to appear in the roster and the other
     # agents should know why a session they have never seen is holding things.
-    emit(me.get("sid"), me.get("agent"), me.get("repo_key", ""), "note",
+    emit(me.get("sid"), me.get("agent"), me.get("repo_key", ""), "worker",
          "started an integration worker on %s: merging %s in a scratch "
          "worktree. It will not push and it will not close anybody's task."
          % (view["trunk"], ", ".join(branches)))
@@ -9176,8 +9299,8 @@ def cli_integrate(args):
                  git_out(tree, "log", "--oneline",
                          "%s..HEAD" % view["trunk"]).replace("\n", "; ")))
         print("Nothing was pushed and no task was closed — closing work is its "
-              "author's to declare. `agentbus post --to <agent>` if you want "
-              "them to.")
+              "author's to declare. Message them with SendMessage if you want "
+              "them to; `agentbus status` names who they are.")
         if flag(args, "--keep"):
             print("Kept: %s" % tree)
             return
@@ -9687,19 +9810,6 @@ def cli_env(args):
                                   ("   # %s%s" % (r["name"], own))))
 
 
-def cli_inbox(_args):
-    me = need_me()
-    seen = 0
-    for r in read_events(after=0):
-        if not interesting_to(r, me):
-            continue
-        seen += 1
-        print("%-16s %-9s %s%s" % (r.get("agent"), ago(r.get("ts")),
-                                   "→you " if r.get("to") else "", r.get("text")))
-    if not seen:
-        print("(nothing yet)")
-
-
 def find_resource(me, name):
     cfg = repo_config(me.get("repo_key"), me.get("root"))
     return next((r for r in cfg.get("resources", []) if r["name"] == name), None)
@@ -9757,9 +9867,9 @@ def cli_serve(args):
                 print("agent-bus: could not take '%s': %s"
                       % (planned["name"], reason), file=sys.stderr)
                 sys.exit(1)
-            # The line under this used to be an `agentbus post --to <holder>` this
-            # function wrote out for itself — the only advice on the command surface
-            # that was still composed by hand rather than taken from the Plan.
+            # The line under this used to be advice this function wrote out for
+            # itself — the only line on the command surface still composed by
+            # hand rather than taken from the Plan.
             print(render_refusal(
                 _lock_block(me, "", planned, lock, holder, plan["resources"]),
                 " — ask before moving it out from under them."), file=sys.stderr)
@@ -9901,7 +10011,7 @@ def cli_name(args):
     old = me.get("agent")
     me["agent"] = re.sub(r"[^A-Za-z0-9_.#-]", "-", pos[0])[:24]
     write_json(os.path.join(SESSIONS, "%s.json" % me["sid"]), me)
-    emit(me["sid"], me["agent"], me["repo_key"], "note",
+    emit(me["sid"], me["agent"], me["repo_key"], "rename",
          "renamed from %s to %s" % (old, me["agent"]))
     print(me["agent"])
 
@@ -9967,9 +10077,9 @@ def cli_take(args):
                 print("agent-bus: no task '%s' in this repository. `agentbus "
                       "status` lists them, and `--needs` only takes a task id — "
                       "if the agent you are waiting for has not said what they "
-                      "are doing, ask them to:\n"
-                      "  agentbus post --to <agent> \"take what you are on so I "
-                      "can see when it lands\"" % ref, file=sys.stderr)
+                      "are doing, ask them to — SendMessage reaches them, and "
+                      "`agentbus status` names who is live." % ref,
+                      file=sys.stderr)
                 sys.exit(1)
             needs = [other["id"]]
         # Running the same line twice is not two pieces of work. An agent that
@@ -10028,7 +10138,7 @@ def take_over(me, tid):
         if holder is not None and t.get("sid") != me.get("sid"):
             print("agent-bus: '%s' is %s's and they are still live. Ask them "
                   "before you carry it:\n"
-                  "  agentbus post --to %s \"are you still on %s? I can take it\"\n"
+                  "  SendMessage to %s — are they still on %s?\n"
                   "Nothing is taken off an agent that can still speak for itself."
                   % (tid, t.get("agent"), t.get("agent"), tid), file=sys.stderr)
             sys.exit(1)
@@ -10228,7 +10338,7 @@ def cli_own(args):
         print("\nSessions in this checkout are now blocked from editing these; "
               "in another\nworktree they are warned instead%s."
               % (" — except --strict, which blocks there too" if strict else ""))
-        emit(me["sid"], me["agent"], me["repo_key"], "note",
+        emit(me["sid"], me["agent"], me["repo_key"], "own",
              "owns %s%s%s" % (", ".join(added), " [strict]" if strict else "",
                               (' — ' + why) if why else ""))
     else:
@@ -10258,7 +10368,7 @@ def cli_disown(args):
     save_owns(me["sid"], keep)
     refresh_derived()
     print("released %s" % ", ".join(dropped))
-    emit(me["sid"], me["agent"], me["repo_key"], "note",
+    emit(me["sid"], me["agent"], me["repo_key"], "disown",
          "no longer owns %s" % ", ".join(dropped))
 
 
@@ -11018,8 +11128,9 @@ HOOKS = {
 USAGE = """agentbus — coordination between parallel Claude Code sessions
 
   status                       who is live, what is held, what serves whom
-  post [--to <agent>] [--as <you>] "..."   leave a message for the others
-  inbox                        everything addressed to this repo / to you
+  post | inbox                 moved. Messages between sessions are Claude
+                               Code's SendMessage tool now; both verbs print
+                               the call that works and refuse to send.
   watch [--repo] [-n 20]       follow every agent on this machine, live
   board [--port 8787]          the same thing as a page, in your browser
   here [<path>] [--as <you>]   record which worktree you are working in
@@ -11117,7 +11228,7 @@ def repair_argv():
     `ensure_ascii=False` carries those through without complaint, and the
     `.encode("utf-8")` on the next line raises `UnicodeEncodeError: surrogates
     not allowed`. That is not an `OSError`, and `OSError` is the only thing the
-    write is wrapped in, so it went straight past and took `agentbus post` with
+    write is wrapped in, so it went straight past and took the event log with
     it: nothing written, and the message a session meant to leave for the others
     simply gone. Every guard and every event carrying text from the command line
     was in the same position.

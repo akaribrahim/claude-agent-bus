@@ -28,7 +28,9 @@ set_config "$REPO" <<'JSON'
      "why": "One simulator. Two runs at once interleave taps and both fail.",
      "patterns": ["\\bmaestro\\b", "\\bsimctl\\b"]},
     {"name": "db", "desc": "the shared development database",
-     "patterns": ["\\bpsql\\b"]}
+     "patterns": ["\\bpsql\\b"]},
+    {"name": "probe", "desc": "the checkout probe",
+     "patterns": ["\\bprobe\\b"]}
   ]
 }
 JSON
@@ -220,38 +222,57 @@ assert_equal 2 "$(locks_held)" "so it is genuinely held"
 out=$(sub_cmd sub-aaa "agentbus claim db" t-a5)
 assert_deny "$out" "and the other subagent cannot take it"
 
-# ---- messages reach a subagent in its own context ---------------------------
+# ---- a notice reaches the subagent it is about, in its own context ----------
+#
+# Nothing is addressed by hand any more — 3.0.0 moved that to Claude Code's own
+# SendMessage, which reaches sessions and not the parties inside them. What is
+# still addressed, and has to be, is the notice that somebody took a lock away:
+# the party that lost it is about to run a command believing it still holds it,
+# and the party is a subagent in 74 of the 87 takeovers this plugin has
+# recorded. So the machinery under it is the same machinery, and this is where
+# it is tested.
+#
+# sub-bbb holds `db`, from the claim above. Its SIBLING takes it, which is a
+# takeover between two parties of one session — the case that used to be
+# filtered out as the reader's own event, because a subagent shares its parent's
+# session id.
+# On `probe` rather than `db`, so that what this section proves about delivery
+# cannot quietly change the lock every later section is about.
+sub_ab sub-bbb t-b8 "agentbus claim probe" claim probe --as "$P/2" \
+  --why "consuming fixtures" > /dev/null
+sub_ab sub-aaa t-a7 "agentbus claim probe --steal" claim probe --as "$P/1" \
+  --steal --why "reboot first" > /dev/null
+out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" "cmd=ls" id=t-p9)")
+assert_not_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
+  "took 'probe'" "a notice for one party is not shown to the session it belongs to"
+
+out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
+  "agent_id=sub-bbb" agent_type=general-purpose "cmd=ls" id=t-b7)")
+ctx=$(json_field "$out" hookSpecificOutput additionalContext)
+assert_contains "$ctx" "took 'probe'" \
+  "and does reach the party that actually lost the lock"
+assert_contains "$ctx" "you" "marked as addressed to it"
 
 # The sibling reads FIRST, deliberately. Each party has its own cursor, and the
 # way to prove that is to have somebody else take a turn in between: with one
-# cursor per session, whoever read first would advance it past the message and
-# the agent it was addressed to would never see it at all.
-ab sess-other post --to "$P/1" "the simulator is wedged, reboot it first" > /dev/null
+# cursor per session, whoever read first would advance it past the notice and
+# the agent it was for would never see it at all.
+ab sess-other claim probe --steal --why "the simulator is wedged" > /dev/null
 out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
   "agent_id=sub-bbb" agent_type=general-purpose "cmd=ls" id=t-b6)")
 assert_not_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
-  "simulator is wedged" "a message for one subagent is not shown to its sibling"
+  "simulator is wedged" "a notice for one subagent is not shown to its sibling"
 
 out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
   "agent_id=sub-aaa" agent_type=general-purpose "cmd=ls" id=t-a6)")
-ctx=$(json_field "$out" hookSpecificOutput additionalContext)
-assert_contains "$ctx" "simulator is wedged" \
-  "and still reaches the one it was for, after the sibling has had a turn"
-assert_contains "$ctx" "you" "marked as addressed to it"
-
-# A parent can talk to its own subagent, which sharing a session id used to make
-# impossible: the message was filtered out as the reader's own.
-ab sess-p post --to "$P/2" "skip the login flow, it is being rewritten" > /dev/null
-ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" "cmd=ls" id=t-p9)" > /dev/null
-out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
-  "agent_id=sub-bbb" agent_type=general-purpose "cmd=ls" id=t-b7)")
 assert_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
-  "skip the login flow" "a parent can address its own subagent"
+  "simulator is wedged" \
+  "and still reaches the one it was for, after the sibling has had a turn"
 
 # ---- a subagent is told its own name, once ---------------------------------
 #
 # It has no way to find this out for itself: its Bash environment is its
-# parent's, so `agentbus post` is attributed to the parent. The agents on this
+# parent's, so anything it runs is attributed to the parent. The agents on this
 # machine had noticed and were writing "(agent /2)" into the body of every
 # message by hand. The tool should do that, not the agent.
 
@@ -260,7 +281,10 @@ out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
   "agent_id=sub-ccc" agent_type=general-purpose "cmd=ls" id=t-c1)")
 ctx=$(json_field "$out" hookSpecificOutput additionalContext)
 assert_contains "$ctx" "you are \`$P/3\`" "a subagent is told the name others see"
-assert_contains "$ctx" "agentbus post --as $P/3" "and how to sign with it"
+assert_contains "$ctx" "agentbus claim <res> --as $P/3" \
+  "and how to file what it takes under that name"
+assert_contains "$ctx" "SendMessage reaches sessions" \
+  "and that nobody can write to it directly"
 
 out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" \
   "agent_id=sub-ccc" agent_type=general-purpose "cmd=ls" id=t-c2)")
@@ -271,18 +295,19 @@ out=$(ab_hook post-batch "$(payload batch sid=sess-p "cwd=$REPO" "cmd=ls" id=t-p
 assert_not_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
   "on this machine you are" "the session itself is never told this"
 
-# ---- and can sign with it ---------------------------------------------------
+# ---- and can act under it ---------------------------------------------------
 
-ab sess-p post --as "$P/3" "the checkout probe is mine, do not rerun it" > /dev/null
-out=$(ab sess-other inbox)
-assert_contains "$out" "$P/3" "a message signed as a subagent is attributed to it"
-assert_contains "$out" "checkout probe" "with what it said"
+ab sess-p claim probe --as "$P/3" --steal --why "the checkout probe is mine" \
+  > /dev/null
+out=$(ab sess-other status)
+assert_contains "$out" "$P/3" "what a subagent takes is attributed to it"
+assert_contains "$out" "checkout probe" "with the reason it gave"
 
-out=$(ab sess-p post --as "someone-elses-agent" "not me" 2>&1)
+out=$(ab sess-p claim probe --as "someone-elses-agent" --steal --why "not me" 2>&1)
 assert_contains "$out" "not you or one of your subagents" \
-  "and nobody can speak as an agent that is not theirs"
-out=$(ab sess-other inbox)
-assert_not_contains "$out" "not me" "so the message is not sent at all"
+  "and nobody can act as an agent that is not theirs"
+out=$(ab sess-other status)
+assert_not_contains "$out" "not me" "so nothing is recorded under that name"
 
 # ---- a session recovered mid-flight still owns its locks by name ------------
 #

@@ -25,6 +25,7 @@ new_session sess-a "$REPO"     # the owner
 new_session sess-b "$REPO"     # same checkout as the owner
 new_session sess-c "$WT2"      # a different checkout of the same repo
 A=$(ab sess-a name)
+cc_session sess-a "$A" idle    # the block can only print an address it can read
 assert_equal 3 "$(cat "$AGENTBUS_HOME/live-count")" "three sessions"
 
 edit() {   # <session id> <cwd> <absolute path> → the hook's stdout
@@ -71,7 +72,9 @@ assert_contains "$r" "$A" "the denial names the owner"
 assert_contains "$r" "api/**" "and the glob they claimed"
 assert_contains "$r" "backend rebuild" "and their reason"
 assert_contains "$r" "branch main" "and their branch"
-assert_contains "$r" "agentbus post --to $A" "and offers asking them"
+assert_contains "$r" "SendMessage" "and offers asking them"
+assert_contains "$r" "what are you doing with it" \
+  "with the sentence already written, because the point is that asking is cheap"
 assert_contains "$r" "agentbus claim 'file:" "and offers taking it once agreed"
 
 out=$(edit sess-b "$REPO" "$REPO/api/inner/deep.py")

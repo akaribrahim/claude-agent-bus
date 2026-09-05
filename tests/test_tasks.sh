@@ -227,7 +227,7 @@ ab sess-a take "hold the api open" > /dev/null           # t7
 out=$(ab sess-b take t7 2>&1) && rc=0 || rc=$?
 assert_equal 1 "${rc:-0}" "a live agent's task cannot be taken off it"
 assert_contains "$out" "still live" "because nobody can prove they have stopped"
-assert_contains "$out" "agentbus post --to $A" "so the refusal says who to ask"
+assert_contains "$out" "SendMessage to $A" "so the refusal says who to ask"
 
 # ---- ids are per repository, and so is everything else ----------------------
 #

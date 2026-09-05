@@ -1,46 +1,65 @@
 #!/usr/bin/env bash
-# Who a message reaches — the three scopes, and the line between them.
+# Who a notice reaches, and who it does not.
 #
-# There are exactly three, and until this file existed none of them was tested
-# directly. That is not a hypothetical gap: an agent updating this plugin posted
-# three times to tell every session on the machine that the engine underneath
-# them had changed, read "posted to everyone on this repo" as the broadcast it
-# is not, and reached nobody at all. Every other session was in a different
-# project. Nothing was wrong with the code and nothing failed; the message was
-# simply delivered to the one session that already knew.
+# Until 3.0.0 this file tested three message scopes — one agent, one repository,
+# the whole machine — because `agentbus post` had all three and none of them was
+# tested. The verb is gone: messages between sessions are Claude Code's own
+# SendMessage now, which wakes the reader, which the bus never could.
 #
-#   plain      everybody in the sender's repository, and nobody else. The
-#              default, and the reason the bus is readable at all: another
-#              project's chatter never arrives.
-#   --to       one named agent, wherever they are. Crosses repositories,
-#              because you had to know the name to type it.
-#   --all      every live session on the machine. For things that are true of
-#              the MACHINE and not of a repository — one simulator two projects
-#              both drive, a database being reseeded, this plugin being replaced
-#              under everybody.
+# What the bus still delivers is narrower and it is not messages. It is the small
+# set of facts that silently invalidate what a session is in the middle of doing:
+# somebody took a lock away from it, somebody declared part of the tree theirs,
+# a service moved to another checkout, a name changed under the address its peers
+# are holding. Nobody writes those sentences; the state does.
 #
-# The asymmetry `--all` closes: presence was already machine-wide (`agentbus
-# status` lists every session in every project) while messages were repository-
-# wide, so an agent could see somebody it had no way to speak to.
+# Two scopes survive, and the line between them is still worth a file of its own:
 #
-# Delivered messages are asserted through `additionalContext` on the hook that
+#   addressed   the one party the fact is about — and a party is not a session,
+#               because a lock taken by a subagent is held by that subagent
+#   repository  everybody in the sender's repository, and nobody else
+#
+# Delivered notices are asserted through `additionalContext` on the hook that
 # injects them, not by reading the event file: what matters is what reaches a
 # session's context, and the event being written is not that.
 
 . "$AB_ROOT/tests/lib.sh"
 
-# Two SEPARATE repositories, not two worktrees of one. Worktrees of a repository
-# share a repo key, so they could not tell the plain and machine scopes apart —
-# every assertion below would pass with the scope check deleted.
+# Two SEPARATE repositories, not two worktrees of one. Worktrees share a repo
+# key, so they could not tell "this repository" from "this machine" — every
+# assertion below would pass with the scope check deleted.
 ONE=$(make_repo msgone)
+set_config "$ONE" <<'JSON'
+{
+  "resources": [
+    {"name": "db", "desc": "the shared development database",
+     "patterns": ["\\bpsql\\b", "\\balembic\\b"]}
+  ]
+}
+JSON
+commit_all "$ONE"
 TWO=$(make_repo msgtwo)
+set_config "$TWO" <<'JSON'
+{
+  "resources": [
+    {"name": "db", "desc": "that project's own database",
+     "patterns": ["\\bpsql\\b"]}
+  ]
+}
+JSON
+commit_all "$TWO"
 
-new_session sess-a "$ONE"     # sender
-new_session sess-b "$ONE"     # same repository as the sender
+new_session sess-a "$ONE"
+new_session sess-b "$ONE"
 new_session sess-c "$TWO"     # another project entirely
 A=$(ab sess-a name)
 B=$(ab sess-b name)
 C=$(ab sess-c name)
+
+# All three are in Claude Code's registry, because the redirect's whole job is
+# to print an address that works and there is no address without one.
+cc_session sess-a "$A"
+cc_session sess-b "$B" busy
+cc_session sess-c "$C"
 
 # What a session is shown on its next turn, and only what it has not seen: the
 # cursor advances, so each call answers "since last time".
@@ -49,63 +68,99 @@ inbox() {   # <sid> <cwd> → the text injected into that session's context
     "$(payload session "sid=$1" "cwd=$2")")" hookSpecificOutput additionalContext
 }
 
-# Drain anything the fixtures themselves emitted, so each case below reads only
-# its own message.
 inbox sess-a "$ONE" > /dev/null
 inbox sess-b "$ONE" > /dev/null
 inbox sess-c "$TWO" > /dev/null
 
-# ---- plain: the sender's repository, and no further -------------------------
+# ---- the repository, and no further -----------------------------------------
 
-out=$(ab sess-a post "the fixtures are reseeded")
-assert_contains "$out" "everyone on this repo" \
-  "a plain post says the scope it actually has"
+ab sess-a own "migrations/**" --why "rewriting every one of them" > /dev/null
 
-assert_contains "$(inbox sess-b "$ONE")" "the fixtures are reseeded" \
-  "plain: a session in the same repository is told"
-assert_not_contains "$(inbox sess-c "$TWO")" "the fixtures are reseeded" \
-  "plain: a session in another project is NOT — this is the line --all crosses"
-assert_not_contains "$(inbox sess-a "$ONE")" "the fixtures are reseeded" \
-  "plain: and the sender is not told its own news"
+assert_contains "$(inbox sess-b "$ONE")" "migrations/**" \
+  "a session in the same repository is told what somebody claimed"
+assert_not_contains "$(inbox sess-c "$TWO")" "migrations/**" \
+  "a session in another project is not — that is the line"
+assert_not_contains "$(inbox sess-a "$ONE")" "migrations/**" \
+  "and nobody is told their own news"
 
-# ---- --to: one agent, wherever they are -------------------------------------
+# ---- addressed: the party it is about, and only that party ------------------
 
-out=$(ab sess-a post --to "$C" "your branch broke the shared migration")
-assert_contains "$out" "posted to $C" "a directed post names its one reader"
+ab sess-b claim db --why "loading fixtures" > /dev/null
+inbox sess-a "$ONE" > /dev/null
+inbox sess-b "$ONE" > /dev/null
 
-assert_contains "$(inbox sess-c "$TWO")" "your branch broke the shared migration" \
-  "--to: reaches an agent in another project, because you had to know the name"
-assert_not_contains "$(inbox sess-b "$ONE")" "your branch broke the shared migration" \
-  "--to: and nobody else, not even in the sender's own repository"
-
-# ---- --all: every session on the machine ------------------------------------
-
-out=$(ab sess-a post --all "the simulator is mine for the next hour")
-assert_contains "$out" "every session on this machine" \
-  "--all says so, rather than repeating the repo-scoped wording"
-assert_contains "$out" "2 others" "and counts who will see it"
-assert_contains "$out" "1 in another project" \
-  "and how many of those are somewhere the plain form could not have reached"
+ab sess-a claim db --steal --why "the migration cannot wait" > /dev/null
 
 b=$(inbox sess-b "$ONE")
-c=$(inbox sess-c "$TWO")
-assert_contains "$b" "the simulator is mine" "--all: the sender's own repository is told"
-assert_contains "$c" "the simulator is mine" "--all: and so is another project"
-assert_not_contains "$(inbox sess-a "$ONE")" "the simulator is mine" \
-  "--all: the sender still does not hear itself"
+assert_contains "$b" "took 'db'" \
+  "the party whose lock was taken is told, because it is about to act on a lie"
+assert_contains "$b" "→ you" "and told that it is about them"
+assert_not_contains "$(inbox sess-c "$TWO")" "took 'db'" \
+  "a takeover in one repository is not another project's business"
 
-# The reader in another project has no idea who this is without it: a sentence
-# from a codebase you are not in is noise until it says which codebase.
-assert_contains "$c" "(in $(session_field sess-a repo_label))" \
-  "--all: a reader elsewhere is told which project it came from, by name"
-assert_not_contains "$b" "(in " \
-  "--all: and a reader in the sender's own repository is not — it already knows"
+# A lock nobody took from is not news: the ordinary claim above was not
+# delivered to anybody, or every scoped run would cost two injections.
+assert_not_contains "$b" "loading fixtures" \
+  "an ordinary claim is not delivered — that is lock churn, not a fact about you"
 
-# ---- the two flags mean different things ------------------------------------
+# ---- what the reader is told this is ----------------------------------------
 
-out=$(ab sess-a post --to "$C" --all "which is it" 2>&1)
-assert_contains "$out" "Pick one" "--to and --all together are refused rather than guessed at"
-assert_not_contains "$(inbox sess-c "$TWO")" "which is it" \
-  "and nothing is sent while the sender decides"
+ab sess-a own "docs/**" > /dev/null
+out=$(inbox sess-b "$ONE")
+assert_contains "$out" "changed under you while you were working" \
+  "the heading says what these are: not messages, but things that moved"
+assert_not_contains "$out" "new message" \
+  "and does not go on calling them messages"
+
+# ---- read once -------------------------------------------------------------
+
+assert_not_contains "$(inbox sess-b "$ONE")" "docs/**" \
+  "what a session has been shown once is not shown again"
+
+# ---- and the verb that used to do all this ----------------------------------
+#
+# `post` is kept for one release precisely so that an agent still carrying the
+# habit is told where messages went, rather than meeting an unknown command.
+# What it must never do again is look like it delivered something.
+
+before=$(read_seq)
+out=$(ab sess-a post "the fixtures are reseeded" 2>&1)
+rc=$?
+assert_equal 2 "$rc" "post refuses, rather than half-working"
+assert_equal "$before" "$(read_seq)" "and writes nothing to the log at all"
+assert_contains "$out" "no longer carries messages" "it says so"
+assert_contains "$out" "SendMessage" "and names what does carry them"
+assert_not_contains "$(inbox sess-b "$ONE")" "fixtures are reseeded" \
+  "so nobody is told, which is the whole point of refusing loudly"
+
+# The broadcast is the one shape SendMessage does not have, and the redirect says
+# so with the addresses rather than pretending otherwise: this is the reseed
+# case, which is exactly what the bus is for and exactly what it can no longer
+# announce in one call.
+assert_contains "$out" "one session at a time" \
+  "the redirect admits a broadcast is now several calls"
+assert_contains "$out" "$B" "and lists who would have heard it"
+assert_not_contains "$out" "$C" \
+  "scoped like the post it replaces: another project is not in the list"
+
+out=$(ab sess-a post --all "the simulator is mine for an hour" 2>&1)
+assert_contains "$out" "$C" "--all still means the machine, and lists it too"
+
+out=$(ab sess-a post --to "$C" "your branch broke the shared migration" 2>&1)
+assert_contains "$out" "SendMessage" "a directed post prints the call to make"
+assert_contains "$out" "$C" "addressed to the name that was asked for"
+assert_contains "$out" "your branch broke" \
+  "carrying the text, so it can be pasted rather than retyped"
+
+out=$(ab sess-a post --to "nobody-by-that-name" "hello" 2>&1)
+assert_contains "$out" "ListAgents" \
+  "and a name nothing answers to is sent to the tool that knows every name"
+
+# ---- inbox, which is now a question with a different answer ------------------
+
+out=$(ab sess-a inbox 2>&1)
+assert_equal 2 "$?" "inbox refuses too"
+assert_contains "$out" "arrives in this conversation" \
+  "because that is where a message from another session actually lands"
 
 finish

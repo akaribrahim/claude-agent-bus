@@ -308,8 +308,41 @@ def check_exits_are_planned():
     ok(what)
 
 
+def check_no_shadowed_definitions():
+    """No name in the engine is defined twice at the top level.
+
+    A second `def` of the same name is not a syntax error and not a warning: the
+    later one silently wins, and the earlier one becomes code that is read,
+    reviewed and believed while never running. It happened during 3.0.0 —
+    `cli_inbox` was rewritten in place and the original, three thousand lines
+    further down, went on answering — and the only reason it was caught is that
+    a test asserted the new behaviour rather than the new source.
+
+    Every failure this project has shipped has this shape: something that looks
+    like it works. So the gate is here rather than in a reviewer's attention."""
+    import ast as _ast
+    path = os.path.join(ROOT, "bin", "agentbus")
+    with open(path, encoding="utf-8") as fh:
+        tree = _ast.parse(fh.read(), path)
+    seen, dupes = {}, []
+    for node in tree.body:
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                             _ast.ClassDef)):
+            if node.name in seen:
+                dupes.append("%s (lines %d and %d)"
+                             % (node.name, seen[node.name], node.lineno))
+            seen[node.name] = node.lineno
+    if dupes:
+        return bad("no definition in bin/agentbus is shadowed by a later one",
+                   "the later definition wins and the earlier is dead:\n  "
+                   + "\n  ".join(dupes))
+    ok("no definition in bin/agentbus is shadowed by a later one (%d checked)"
+       % len(seen))
+
+
 def main():
     check_engine_compiles()
+    check_no_shadowed_definitions()
     check_fastpath_parses()
     check_hook_wiring()
     check_no_stray_output()

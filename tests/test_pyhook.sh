@@ -94,12 +94,12 @@ same "an edit onto a fresh write: both deny" pre-tool \
 same "an edit elsewhere: both allow" pre-tool \
   "$(payload file sid=sess-b "cwd=$REPO" "path=$REPO/untouched.py" tool=Edit)"
 
-# ---- messages are delivered ------------------------------------------------
+# ---- what the bus still has to say is delivered -----------------------------
 
-ab sess-a post "the python path should carry this" > /dev/null
+ab sess-a own "src/**" --why "the python path should carry this" > /dev/null
 out=$(ab_pyhook post-batch "$(payload batch sid=sess-b "cwd=$WT2" "cmd=ls" id=py-7)")
 assert_contains "$(json_field "$out" hookSpecificOutput additionalContext)" \
-  "should carry this" "a message reaches the other session through hook.py"
+  "should carry this" "a notice reaches the other session through hook.py"
 
 out=$(ab_pyhook post-batch "$(payload batch sid=sess-b "cwd=$WT2" "cmd=ls" id=py-8)")
 assert_empty "$out" "and is not delivered twice"

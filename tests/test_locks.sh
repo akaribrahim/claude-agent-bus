@@ -319,7 +319,7 @@ assert_allow "$out" "and taking that offer really does get past"
 assert_equal 1 "$(locks_held)" "without claiming anything on the way"
 
 # It is an override, not a hole: the others can see it was taken, and what of.
-trace=$(ab sess-a inbox)$(lock_lines)$(ab sess-a status)
+trace=$(events)$(lock_lines)$(ab sess-a status)
 assert_contains "$trace" "ran past the guard" \
   "and stepping over a guard leaves a trace on the bus"
 assert_contains "$trace" "'db'" "which names the resource that was stepped over"

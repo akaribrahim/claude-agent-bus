@@ -190,8 +190,8 @@ out=$(ab sess-b serve web 2>&1)
 assert_contains "$out" "restarted from your worktree" "the second session takes it"
 assert_equal wt2 "$(fetch)" "the port now answers with the second worktree's file"
 
-out=$(ab sess-a inbox)
-assert_contains "$out" "'web' now serves" "the handover is announced on the bus"
+assert_contains "$(told sess-a "$REPO")" "'web' now serves" \
+  "the handover is announced to the session that was serving it"
 
 out=$(ab_hook pre-tool "$(payload bash "sid=sess-a" "cwd=$REPO" "cmd=$CMD" id=sv-2)")
 assert_deny "$out" "now it is the first session that is refused"
@@ -219,9 +219,9 @@ assert_equal wt1 "$(fetch)" "and left it serving the worktree it moved it to"
 # of them worked it out an hour later by reading `lsof`. The lock they needed
 # existed the whole time. What they had no way to see was that they needed it.
 
-churn() { ab sess-b inbox | grep -c "has changed checkouts" | tr -d ' '; }
+churn() { events | grep -c "has changed checkouts" | tr -d ' '; }
 assert_equal 1 "$(churn)" "the third handover between two trees is announced"
-out=$(ab sess-b inbox)
+out=$(events)
 assert_contains "$out" "agentbus claim web" "with the thing to do about it"
 assert_contains "$out" "servwt2" "naming the checkouts it is being pulled between"
 
@@ -261,7 +261,7 @@ assert_equal "feat/inner" "$(session_field sess-move branch)" "branch and all"
 # is where somebody looking for it will look.
 assert_contains "$(ab sess-a status)" "$INNER" \
   "and the roster shows where it is now"
-assert_not_contains "$(ab sess-a inbox)" "moved to" \
+assert_not_contains "$(events)" "moved to" \
   "without announcing every move to everyone"
 
 # A subagent's tool call carries its own cwd and an agent_id. That cwd is the
