@@ -23,6 +23,7 @@ FILTER="${1:-}"
 # Whatever the caller's shell was attached to must not leak into the fixtures:
 # an inherited session id would make the engine report on a real live session.
 unset AGENTBUS_HOME AGENTBUS_SESSION AGENTBUS_OFF CLAUDE_CODE_SESSION_ID
+unset AGENTBUS_CC_SESSIONS CLAUDE_CONFIG_DIR
 export CLAUDE_PID=$$   # every fixture session claims this pid, so none look dead
 export GIT_TERMINAL_PROMPT=0
 
@@ -116,10 +117,18 @@ run_file() {   # <path>
   log="$dir/output.log"
   mkdir -p "$dir/bus"
 
+  # AGENTBUS_CC_SESSIONS is Claude Code's own session registry, which the engine
+  # reads to find the address a block message should print. Pointed at an empty
+  # directory of this test's own, for the same reason AGENTBUS_HOME is: without
+  # it every roster assertion in this suite would depend on which chats happen to
+  # be open on the machine running it, and would pass or fail accordingly.
+  mkdir -p "$dir/cc-sessions"
   case "$file" in
     *.py) (cd "$AB_ROOT" && TEST_TMP="$dir" AGENTBUS_HOME="$dir/bus" \
+             AGENTBUS_CC_SESSIONS="$dir/cc-sessions" \
              TEST_NAME="$name" python3 "$file") > "$log" 2>&1 ;;
     *)    (cd "$AB_ROOT" && TEST_TMP="$dir" AGENTBUS_HOME="$dir/bus" \
+             AGENTBUS_CC_SESSIONS="$dir/cc-sessions" \
              TEST_NAME="$name" bash "$file") > "$log" 2>&1 ;;
   esac
   rc=$?

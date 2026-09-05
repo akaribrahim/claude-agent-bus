@@ -1366,6 +1366,194 @@ def require_record(rec, who):
     return rec
 
 
+# ------------------------------------------------- claude code's registry ----
+#
+# WHY THIS IS HERE. Messaging between sessions is Claude Code's own now: the
+# `SendMessage` tool reaches a session by the name `ListAgents` prints, and wakes
+# it. That gives this plugin a job it did not have before — when it blocks a
+# command, it must hand the reader an address that tool accepts.
+#
+# It cannot make one up. The bus names sessions itself, and the two naming
+# systems agree only by coincidence: both follow the chat title, so both are
+# right until a chat has no title, and then the bus falls back to the branch
+# while Claude Code falls back to directory-and-counter. Measured here on
+# 2026-09-05 — four of five live sessions matched, and the fifth was
+# `checkout-rewrite` on the bus and `product-86` to Claude Code.
+# Printing our own name would have sent that session's peers to an address that
+# does not exist.
+#
+# So the address is read, never derived. Claude Code keeps one JSON file per live
+# session at `~/.claude/sessions/<pid>.json` carrying `sessionId` — byte
+# identical to our `sid` — and `pid`, which is ours too: two independent join
+# keys onto records we already write.
+#
+# Everything here is defensive past the point of taste, deliberately. This is
+# somebody else's file format, it is not documented, and it can change under us
+# in any release. A missing field, a wrong type, a file half-written as we read
+# it: each yields "no address, run ListAgents" rather than an exception, because
+# a coordination layer that raises inside a hook is worse than one that admits it
+# does not know.
+
+CC_SESSIONS = (os.environ.get("AGENTBUS_CC_SESSIONS")
+               or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR")
+                               or os.path.join(HOME, ".claude"), "sessions"))
+
+# Statuses seen on 2026-09-05. Anything else is printed verbatim rather than
+# translated: a value this build has not met is not one it should interpret.
+CC_STATUSES = ("busy", "idle", "shell", "running", "offline")
+
+# Read at most this often. One block message asks for the same three or four
+# addresses, and `watch` asks every second for hours, so neither a permanent
+# cache nor no cache at all is right.
+CC_TTL = 2
+_CC_CACHE = {"at": 0.0, "by_sid": None}
+
+
+def cc_sessions(force=False):
+    """Claude Code's live sessions, keyed by session id.
+
+    `{sid: {"sid","pid","name","status","cwd","socket","kind","version","alive"}}`.
+    Never raises: a file that cannot be read or parsed is simply not in the
+    answer, and a directory that is not there yields an empty one."""
+    if (not force and _CC_CACHE["by_sid"] is not None
+            and time.time() - _CC_CACHE["at"] < CC_TTL):
+        return _CC_CACHE["by_sid"]
+    out = {}
+    try:
+        names = os.listdir(CC_SESSIONS)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        rec = read_json(os.path.join(CC_SESSIONS, name))
+        if not isinstance(rec, dict):
+            continue
+        sid = rec.get("sessionId")
+        if not isinstance(sid, str) or not sid:
+            continue
+
+        def text(key):
+            val = rec.get(key)
+            return val if isinstance(val, str) else ""
+
+        pid = rec.get("pid") if isinstance(rec.get("pid"), int) else 0
+        out[sid] = {
+            "sid": sid, "pid": pid, "name": text("name"),
+            "status": text("status"), "cwd": text("cwd"),
+            "socket": text("messagingSocketPath"), "kind": text("kind"),
+            "version": text("version"),
+            # A registry file outlives the process it describes. An address for a
+            # session that has gone is worse than no address at all: the reader
+            # writes the message, believes it was delivered, and waits.
+            "alive": bool(pid) and pid_alive(pid),
+        }
+    _CC_CACHE["by_sid"] = out
+    _CC_CACHE["at"] = time.time()
+    return out
+
+
+def cc_for(sid, pid=0):
+    """The registry entry for one of our sessions, joined on id and then on pid.
+
+    Only a live one. The pid fallback exists because the two records are written
+    by different processes at different moments, and a session that was renamed
+    or resumed can carry an id we have not caught up with — but its pid is the
+    pid we recorded when we first saw it."""
+    if not sid and not pid:
+        return None
+    reg = cc_sessions()
+    rec = reg.get(sid or "")
+    if rec:
+        return rec if rec["alive"] else None
+    if pid:
+        # Exactly one, or none. A pid is unique among live processes, so two live
+        # entries claiming it means the registry is telling us something we do
+        # not understand — and picking whichever came first out of a directory
+        # listing would be inventing an identity rather than reading one.
+        hits = [o for o in reg.values() if o["pid"] == pid and o["alive"]]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
+def cc_twins(name):
+    """How many live sessions answer to this name. Two is not rare — one listing
+    on 2026-08-22 had `ibrahim1` twice — and a name that reaches two sessions
+    reaches neither on purpose."""
+    if not name:
+        return 0
+    return sum(1 for r in cc_sessions().values()
+               if r["alive"] and r["name"] == name)
+
+
+def address_of(sid, pid=0):
+    """(address, status) for a session, where `address` is what `SendMessage`
+    takes, or (None, "") when there is nothing honest to print.
+
+    The name is the address, because that is the form Claude Code documents, the
+    form `ListAgents` prints, and the form a human reading a roster recognises.
+    The socket path is a fallback and only that: it is accepted — six sends on
+    this machine, all delivered — but it is not a documented interface, and an
+    address nobody can recognise is worth less than one they can. It earns its
+    place in exactly one case, which is the case the name cannot serve: two live
+    sessions answering to one name."""
+    rec = cc_for(sid, pid)
+    if not rec:
+        return None, ""
+    if rec["name"] and cc_twins(rec["name"]) < 2:
+        return rec["name"], rec["status"]
+    if rec["socket"]:
+        return "uds:" + rec["socket"], rec["status"]
+    # A name two sessions answer to, and no socket to tell them apart. Printing
+    # it anyway would be the worst of the three outcomes: the reader would send
+    # to whichever one the tool picks and believe they had reached the other.
+    return None, rec["status"]
+
+
+def cc_strangers(sessions):
+    """Live Claude Code sessions with no record on this bus.
+
+    They exist — two on 2026-09-05, dropped by the heartbeat while their
+    processes were alive — and they can be messaged. A roster that omits them
+    tells the reader the machine is emptier than it is.
+
+    Not the whole world either: the registry holds interactive sessions, and
+    `ListAgents` also lists Remote Control peers that have no file here at all.
+    Which is why the roster line says `ListAgents` knows more."""
+    known = {s.get("sid") for s in sessions}
+    return [r for r in cc_sessions().values()
+            if r["alive"] and r["sid"] not in known]
+
+
+def say_to(session, party="", lead="  "):
+    """The line that tells a reader how to reach somebody, ready to print.
+
+    `party` is the agent that acted, which is not always the session: a lock
+    taken by a subagent is held by that subagent, and `SendMessage` reaches
+    sessions only — it cannot address another session's subagent at all. On this
+    machine 64 of the 87 blocks that named a holder named a subagent, so this is
+    the common case and not the corner. The address is therefore always the
+    session's, and when the party is one of its subagents the line says so:
+    "message orches" without "about orches/2" sends the reader to somebody who
+    does not know what they are being asked about."""
+    sid = session.get("sid") or ""
+    pid = session.get("pid") or 0
+    owner = session.get("agent") or ""
+    addr, status = address_of(sid, pid)
+    named = party or owner
+    if not addr:
+        return ("%s(no address for %s — run the ListAgents tool to find it)"
+                % (lead, named or "that session"))
+    line = '%sSendMessage → to "%s"' % (lead, addr)
+    if status:
+        line += "   (%s)" % status
+    if party and owner and party != owner:
+        line += "\n%s  — it is holding this through its subagent %s; say so" % (
+            lead, party)
+    return line
+
+
 # -------------------------------------------------------------- subagents ----
 #
 # A subagent launched with the Task tool runs inside its parent's process and
@@ -4115,10 +4303,26 @@ def roster_text(me, sessions):
         lines.append("Other sessions on this repo (%d):" % len(same))
         twins = []
         for s in same:
-            idle = "" if now() - s.get("beat", 0) < IDLE_SECS else "  [idle]"
+            addr, status = address_of(s.get("sid"), s.get("pid"))
+            # Two different idlenesses, and only one of them is worth printing.
+            # Ours means "no heartbeat lately", which is a fact about this
+            # plugin; Claude Code's `status` is the session saying what it is
+            # doing. Where we have theirs, it is strictly the better answer to
+            # the question a reader is actually asking — will this person see my
+            # message — so ours is the fallback and not the headline.
+            quiet = "" if now() - s.get("beat", 0) < IDLE_SECS else "  [idle]"
             lines.append("  - %s  %s  %s  (last seen %s)%s" % (
                 s.get("agent"), short_path(s.get("root", "")), s.get("branch") or "-",
-                ago(s.get("beat")), idle))
+                ago(s.get("beat")), "" if status else quiet))
+            if addr:
+                lines.append('      message it:  SendMessage → to "%s"%s'
+                             % (addr, "   (%s)" % status if status else ""))
+            else:
+                # Better than a name that reaches nobody. This happens for a
+                # session Claude Code has not registered, one whose process has
+                # gone, and one of two answering to the same name.
+                lines.append("      message it:  no address the tool would take"
+                             " — run ListAgents to find it")
             if s.get("doing"):
                 lines.append("      doing: %s" % s["doing"])
             if in_my_tree(me, s.get("root")):
@@ -4148,6 +4352,17 @@ def roster_text(me, sessions):
         labels = sorted({s.get("repo_label", "?") for s in other})
         lines.append("Elsewhere on this machine: %d session%s (%s)." % (
             len(other), "" if len(other) == 1 else "s", ", ".join(labels)))
+    # Sessions Claude Code knows about and this bus does not: reaped by the
+    # heartbeat while their process is alive, or never registered here at all.
+    # They can be messaged, so a roster that leaves them out says the machine is
+    # emptier than it is. Named, not counted, because a name is the address.
+    strangers = [r["name"] for r in cc_strangers(sessions) if r["name"]]
+    if strangers:
+        shown = sorted(strangers)[:6]
+        more = "" if len(strangers) <= 6 else ", +%d more" % (len(strangers) - 6)
+        lines.append("Also live on this machine, not on the bus: %s%s "
+                     "(messageable; ListAgents knows the full list)."
+                     % (", ".join(shown), more))
     return "\n".join(lines)
 
 
@@ -4325,23 +4540,28 @@ RULES = (
     "are blocked with the reason. Useful: `agentbus status`, "
     "`agentbus serve <res>` to point a service at your worktree, "
     "`agentbus run <res> -- <cmd>` to do that and run one command, "
-    "`agentbus post \"...\"` to tell the others something they cannot see, "
-    # The clause that used to justify these two — "so the others can see what is
-    # taken and what they are waiting for without being asked" — is gone. It
-    # carried no fact, and since 2.9.0 it is not even true: what each party last
-    # did is derived from the tool calls the hooks already see, and shown without
-    # anybody writing it down. Whatever moves `take` from one agent in six to
-    # more, it is not a sentence explaining why it exists.
-    "`agentbus take \"...\"` when you start a piece of work, `agentbus done` "
-    "when it lands. "
+    "`agentbus wait <res>` to queue for something somebody else is holding. "
     "If you are working in a checkout other than the one this chat opened in, "
     "run `agentbus here` from it once — otherwise the others are told you are "
     "somewhere you are not, and the guards judge you there."
+    # This paragraph is the whole of 3.0.0 in five sentences. The bus used to
+    # carry messages and could not wake anybody with one, so "ask them" was
+    # advice nobody could take: on 2026-09-04 a session was blocked on the
+    # database and stepped past the guard eleven seconds later. SendMessage
+    # wakes the recipient, which is what makes asking a real option — so the
+    # roster prints addresses and this says what to do with them.
+    "\n\nTalking to another session is the SendMessage tool, not this plugin. "
+    "The roster above prints each session's address, and a message wakes it: an "
+    "idle session answers within seconds, without its human. So when a block "
+    "names who holds something, asking is a real option rather than a "
+    "formality — queue with `agentbus wait <res>`, tell them you are queued, and "
+    "get on with something else while they finish. Asking is never waiting. "
+    "A subagent cannot be addressed from outside its own session, so when a "
+    "subagent holds the lock, message its session and name the subagent."
     "\n\nOne rule that is not enforced by a block: if a build or test failure "
     "names files you did not edit, do not fix them. Another session is probably "
     "mid-edit and the error will disappear on its own — wait and re-run. If it "
-    "persists, ask them (`agentbus post --to <agent> \"...\"`) rather than "
-    "editing. Fix only files you own."
+    "persists, message them rather than editing. Fix only files you own."
 )
 
 

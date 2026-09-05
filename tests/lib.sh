@@ -24,6 +24,18 @@ case "$AGENTBUS_HOME" in
     ;;
 esac
 
+# The same refusal for Claude Code's own session registry. The engine reads it to
+# find the address a block message prints, and a test that reads the real one
+# would assert against whichever chats happen to be open — passing on this
+# machine, failing on the next, and telling nobody which. Empty is the correct
+# fixture; a test that wants entries writes its own.
+case "${AGENTBUS_CC_SESSIONS:-}" in
+  "" | "$HOME"/.claude/sessions | "$HOME"/.claude/sessions/*)
+    echo "REFUSING TO RUN: AGENTBUS_CC_SESSIONS is unset or points at the live registry" >&2
+    exit 99
+    ;;
+esac
+
 PASSES="$TEST_TMP/.passes"
 FAILURES="$TEST_TMP/.failures"
 
@@ -207,6 +219,21 @@ payload() {   # <kind> <k=v…> → a hook payload on stdout
 }
 
 # --------------------------------------------------------------- fixtures ----
+
+# One entry in Claude Code's own session registry — the file the engine reads to
+# find the address a block message should print. Named by session id rather than
+# by pid, which is what the real one uses: the reader joins on the id, and every
+# fixture in a test run shares one pid.
+cc_session() {   # <session id> <name> [<status>] [<pid>]
+  python3 - "$AGENTBUS_CC_SESSIONS/$1.json" "$1" "$2" "${3:-idle}" "${4:-$$}" <<'PYEOF'
+import json, sys
+path, sid, name, status, pid = sys.argv[1:6]
+json.dump({"pid": int(pid), "sessionId": sid, "name": name, "status": status,
+           "kind": "interactive", "version": "2.1.261",
+           "messagingSocketPath": "/tmp/cc-socks/%s.sock" % pid},
+          open(path, "w"))
+PYEOF
+}
 
 new_session() {   # <session id> <cwd>
   ab_hook session-start "$(payload session "sid=$1" "cwd=$2")" > /dev/null
