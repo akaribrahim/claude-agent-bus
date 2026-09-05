@@ -82,4 +82,15 @@ assert_contains "$BANNER" "agentbus wait" \
 assert_contains "$BANNER" "subagent" \
   "and warn that a subagent is reached through its session"
 
+# `agentbus status` is the other place an agent looks, and it has to carry the
+# same address. A roster that names somebody without saying how to reach them is
+# a roster that gets a message sent to a name nobody answers to.
+ST=$(ab sess-mine status)
+assert_contains "$ST" "SendMessage → to \"$SAME\"" \
+  "status prints the address beside the peer it names"
+assert_contains "$ST" 'SendMessage → to "a-different-name"' \
+  "including for the session whose two names disagree"
+assert_not_contains "$ST" "SendMessage → to \"$DIFF\"" \
+  "and never the name only this plugin uses"
+
 finish

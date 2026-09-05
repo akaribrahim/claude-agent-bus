@@ -6389,9 +6389,19 @@ def cli_status(_args):
     print("agent-bus — %d live session%s" % (len(sessions), "" if len(sessions) == 1 else "s"))
     for s in sessions:
         mark = "*" if s["sid"] == me.get("sid") else " "
+        # The address under the row, for the same reason the banner carries one:
+        # this is the other place an agent looks to find out who is here, and a
+        # roster that names somebody without saying how to reach them is a
+        # roster that gets a message sent to a name nobody answers to.
+        addr, cc_status = address_of(s.get("sid"), s.get("pid"))
         print(" %s %-18s %-42s %-28s %s" % (
             mark, s.get("agent"), short_path(s.get("root", "")),
             s.get("branch") or "-", ago(s.get("beat"))))
+        if s["sid"] != me.get("sid"):
+            print("   %-18s SendMessage → to \"%s\"%s"
+                  % ("", addr, "   (%s)" % cc_status if cc_status else "")
+                  if addr else
+                  "   %-18s no address — run ListAgents to find it" % "")
         for a in load_agents(s["sid"]):
             print("   %-18s %-42s %-28s %s" % (
                 "  · " + (a.get("name") or "?"), short_path(a.get("root", "")),
