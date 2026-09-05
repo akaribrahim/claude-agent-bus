@@ -126,17 +126,22 @@ assert_contains "$(cat "$AGENTBUS_HOME/events.jsonl")" "ölçüm-kolay" \
 # ---- a path is text too ------------------------------------------------------
 #
 # The write log stores file paths, one per line, and a filesystem will hand out
-# any character at all. Same two functions, same defect, and it decides what a
-# handoff says this session touched.
+# any character at all. Same two functions, same defect, and it decides what the
+# guard can name when two sessions reach for one file.
 
+# Asserted on the log the engine writes rather than on a message that quotes it:
+# the handoff summary that used to be the visible end of this path went with the
+# ledger in 3.0.0, and the boundary the defect lives at — a JSON payload decoded
+# and written out as text — is the same one either way. The engine, not the
+# shell fast path: that one lifts the value out of the raw JSON with a regex and
+# keeps its escapes, which is its own business and not what this is about.
 FILE="$REPO/ölçüm-günlüğü.txt"
 printf 'x\n' > "$FILE"
-hook_c record-write "$(payload write sid=sess-a "cwd=$REPO" "path=$FILE")" \
+ab_engine record-write "$(payload write sid=sess-a "cwd=$REPO" "path=$FILE")" \
   > /dev/null
+assert_contains "$(cat "$AGENTBUS_HOME/writes/sess-a.log")" "ölçüm-günlüğü.txt" \
+  "a written path with diacritics survives the decode into the write log"
 end_session sess-a
-out=$(ab sess-b status 2>&1)
-assert_contains "$out" "ölçüm-günlüğü.txt" \
-  "a written path with diacritics in it survives into the handoff"
 
 # ---- a command line from a locale that cannot spell it ----------------------
 #

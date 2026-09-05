@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 
 ROOT = os.environ.get("AB_ROOT") or os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))
@@ -79,6 +80,10 @@ def load_engine():
 
 
 def write(filename, **fields):
+    # Fresh unless a case says otherwise: a status is only evidence about now
+    # while it is recent, and every fixture that does not care about that wants
+    # to be talking about a session whose state was written a moment ago.
+    fields.setdefault("statusUpdatedAt", int(time.time() * 1000))
     with open(os.path.join(REG, filename), "w") as fh:
         json.dump(fields, fh)
 

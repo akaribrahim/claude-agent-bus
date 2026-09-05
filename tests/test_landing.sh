@@ -79,26 +79,28 @@ def cand(branch):
     return [c for c in v['candidates'] if c['branch'] == branch][0]
 def pair(a, b):
     return [p for p in v['pairs'] if p['a'] == a and p['b'] == b][0]
-def why(tid):
-    return [s for s in v['skipped'] if s['id'] == tid][0]['why']
+def why(branch):
+    return [s for s in v['skipped'] if s['branch'] == branch][0]['why']
 print($1)"
 }
 
-# ---- nothing is finished, so nothing is ready --------------------------------
+# ---- a branch that is ahead of the trunk is a candidate ----------------------
 #
-# A view that reported a candidate here would be reporting a branch on which
-# nobody has declared anything done, which is every branch anybody is working on.
+# Until 3.0.0 a candidate was a branch carrying a task somebody had closed with
+# `agentbus done`. That ledger is gone — it was a second place for an agent to
+# say what it was doing, and one agent in six ever used it — so what is left is
+# what git already knows and nobody has to remember to declare: every branch
+# with a checkout of its own, or that a live session says it is on, that has
+# commits the trunk does not.
+#
+# That is a wider net than "somebody said they were finished", and it is honest
+# about being one: a branch appears here while its author is still working. So
+# the view reports who is on it and whether their checkout is dirty, and the
+# reader decides. The alternative is a page that is empty exactly when the work
+# is not.
 
-ab sess-api take "rewrite the api loader" > /dev/null
-assert_equal 0 "$(view 'len(v["candidates"])')" \
-  "work that is merely open is not a landing candidate"
-assert_contains "$(ab sess-api merges)" "nothing is ready to land on main" \
-  "and the verb says so plainly rather than printing an empty table"
-
-# ---- finished work, on a branch that is ahead --------------------------------
-
-ab sess-api done --note "loader rewritten" > /dev/null
-assert_equal 1 "$(view 'len(v["candidates"])')" "a finished task makes its branch a candidate"
+assert_equal 2 "$(view 'len(v["candidates"])')" \
+  "both branches that are ahead of the trunk are candidates"
 assert_equal main "$(view 'v["trunk"]')" \
   "counted against the branch the repository itself calls default"
 assert_equal 1 "$(view 'cand("feat-api")["ahead"]')" \
@@ -110,27 +112,18 @@ assert_contains "$(view 'json.dumps(cand("feat-api")["files"])')" "api.py" \
   "named as the repository sees them"
 assert_equal clean "$(view 'cand("feat-api")["onto"]')" \
   "and whether it merges into the trunk cleanly"
-assert_equal t1 "$(view 'cand("feat-api")["tasks"][0]["id"]')" \
-  "the task that declared it finished is named"
-assert_equal "loader rewritten" "$(view 'cand("feat-api")["tasks"][0]["note"]')" \
-  "with the note its author left"
-assert_equal "$A" "$(view 'cand("feat-api")["tasks"][0]["agent"]')" "and who they are"
 
-# The candidate is a BRANCH, not a task: two finished tasks on one branch land
-# together whether anybody meant them to or not, so a view organised by task
-# would offer a choice that does not exist.
-ab sess-api take "tidy the api tests" > /dev/null
-ab sess-api done t2 > /dev/null
-assert_equal 1 "$(view 'len(v["candidates"])')" \
-  "two finished tasks on one branch are one candidate, because one merge lands both"
-assert_equal 2 "$(view 'len(cand("feat-api")["tasks"])')" "and both are named under it"
+# Who is standing on it, which is the question the ledger answered badly. A
+# branch nobody is on can be landed without interrupting anybody, and that is
+# worth seeing before a merge rather than after it.
+assert_equal "$A" "$(view '" ".join(cand("feat-api")["who"])')" \
+  "the session working on that branch is named"
+assert_contains "$(ab sess-api merges)" "on it right now" \
+  "and the verb says so, because merging under somebody is the thing to avoid"
 
 # ---- two branches, and what actually conflicts -------------------------------
 
-ab sess-web take "restyle the web templates" > /dev/null
-ab sess-web done --note "templates done" > /dev/null
-assert_equal 2 "$(view 'len(v["candidates"])')" "the other chat's finished branch joins it"
-assert_equal 1 "$(view 'len(v["pairs"])')" "and the pair is compared"
+assert_equal 1 "$(view 'len(v["pairs"])')" "the pair is compared"
 assert_equal conflict "$(view 'pair("feat-api", "feat-web")["state"]')" \
   "two branches that changed one line both ways are reported as conflicting"
 assert_equal shared.py "$(view '" ".join(pair("feat-api", "feat-web")["conflicts"])')" \
@@ -145,7 +138,6 @@ assert_contains "$text" "feat-api and feat-web CONFLICT in shared.py" \
   "and says which two would fight, and over what"
 assert_contains "$text" "merges into main cleanly" \
   "while still saying each one is fine against the trunk on its own"
-assert_contains "$text" "restyle the web templates" "with the sentence its author wrote"
 
 # A pair that touches the same file and merges anyway is a different answer from a
 # pair that conflicts, and collapsing the two is what the write-log clash on the
@@ -182,49 +174,34 @@ assert_contains "$(ab sess-api merges)" "(2 uncommitted)" "and said out loud"
 rm -f "$WEB/scratch.py"
 git -C "$WEB" checkout -q -- web.py
 
-# ---- finished, but not ready -------------------------------------------------
+# ---- in flight, but nothing to land ------------------------------------------
 #
 # Each of these is a branch somebody could otherwise be told to merge.
 
-# A finished task whose own dependency has not landed. This is the condition the
-# comment in `ledger_view` was reaching for, and the one it named — `waiting` —
-# is empty for every done task by construction, so filtering on it filters
-# nothing.
+# A branch with nothing the trunk does not already have. It has a checkout and a
+# session, so it is looked at; there is simply nothing on it.
+FOURTH=$(make_worktree "$REPO" landfourth feat-fourth)
+new_session sess-fourth "$FOURTH"
+assert_contains "$(view 'why("feat-fourth")')" "nothing on it that main does not have" \
+  "a branch with no commits of its own is not something to merge"
+assert_equal 2 "$(view 'len(v["candidates"])')" "and is not offered as one"
+assert_contains "$(ab sess-api merges)" "In flight, but nothing to land" \
+  "which the verb prints under its own heading rather than hiding"
+
+# A branch that a session claims to be on and that does not exist. A chat opened
+# in a checkout whose first commit has not been made is exactly this.
 THIRD=$(make_worktree "$REPO" landthird feat-third)
 printf 'c\n' > "$THIRD/third.py"
 commit_all "$THIRD"
 new_session sess-third "$THIRD"
-ab sess-api take "the thing the third one waits for" > /dev/null   # t4, open
-ab sess-third take "build on t4" --needs t4 > /dev/null             # t5
-ab sess-third done t5 > /dev/null
-assert_equal 2 "$(view 'len(v["candidates"])')" \
-  "a branch whose finished task is still waiting on unfinished work is held back"
-assert_contains "$(view 'why("t5")')" "t4 to land" \
-  "and the reason names what it is waiting for"
-assert_contains "$(ab sess-api merges)" "Finished, but not ready" \
-  "which the verb prints under its own heading rather than hiding"
-ab sess-api done t4 > /dev/null
 assert_equal 3 "$(view 'len(v["candidates"])')" \
-  "and it becomes a candidate the moment that lands"
-
-# A finished task on a branch with nothing the trunk does not already have.
-FOURTH=$(make_worktree "$REPO" landfourth feat-fourth)
-new_session sess-fourth "$FOURTH"
-ab sess-fourth take "read the docs" > /dev/null
-ab sess-fourth done > /dev/null
-assert_contains "$(view 'why("t6")')" "nothing on it that main does not have" \
-  "a branch with no commits of its own is not something to merge"
-assert_equal 3 "$(view 'len(v["candidates"])')" "and is not offered as one"
-
-# A branch that has been deleted since the work was declared finished. The task
-# stays in the ledger on purpose — it is the record that the work happened — but
-# there is no longer anything to merge.
-end_session sess-third
+  "a third branch with commits of its own joins them"
 git -C "$REPO" worktree remove --force "$THIRD" > /dev/null 2>&1
 git -C "$REPO" branch -D feat-third > /dev/null 2>&1
-assert_contains "$(view 'why("t5")')" "that branch is gone" \
-  "work whose branch has been deleted says so instead of being merged"
+assert_contains "$(view 'why("feat-third")')" "that branch is gone" \
+  "a branch deleted under a live session says so instead of being merged"
 assert_equal 2 "$(view 'len(v["candidates"])')" "and is not a candidate"
+end_session sess-third
 
 # ---- everything below happens inside one read-only window -------------------
 #
@@ -523,8 +500,8 @@ sys.exit(0 if m else 1)" \
       assert_contains "$rows" "feat-api" "drawing a row per candidate branch"
       assert_contains "$rows" "feat-web | +2" "with how far ahead of the trunk it is"
       assert_contains "$rows" "| clean |" "and whether it lands on the trunk cleanly"
-      assert_contains "$rows" "rewrite the api loader" \
-        "and the finished work that made it a candidate"
+      assert_contains "$rows" "on it right now" \
+        "and who is working on it, which is what a merge would land under"
       assert_contains "$rows" "CONFLICT in shared.py" \
         "and, between two of them, the file that would actually fight"
       assert_contains "$rows" "→ main" "under the repository and the trunk it would land on"

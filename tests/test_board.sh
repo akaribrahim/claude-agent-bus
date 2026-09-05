@@ -32,7 +32,6 @@ new_session sess-b "$WT2"
 A=$(ab sess-a name)
 ab_hook subagent-start "$(payload subagent-start sid=sess-a "cwd=$REPO" \
   agent_id=sub-1 agent_type=general-purpose)" > /dev/null
-ab sess-a doing "wiring the board" > /dev/null
 ab sess-a own "src/**" --why "something worth reading" > /dev/null
 ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" "cmd=psql -c 'select 1'" id=bd-1)" > /dev/null
 
@@ -54,8 +53,6 @@ print($1)"
 assert_equal 2 "$(state 'len(d["sessions"])')" "the snapshot has both sessions"
 assert_equal 1 "$(state 'len([s for s in d["sessions"] if s["agents"]])')" \
   "and the subagent under the one that started it"
-assert_equal "wiring the board" "$(state 'd["sessions"][0]["doing"] or d["sessions"][1]["doing"]')" \
-  "with what a session said it was doing"
 assert_equal 1 "$(state 'len(d["locks"])')" "the held resource is there"
 assert_equal db "$(state 'd["locks"][0]["resource"]')" "named"
 
@@ -432,12 +429,6 @@ assert_equal "" "$(sa "$S1" 'a["holds"]')" \
 assert_equal "$S2" "$(state '[l for l in d["locks"] if l["resource"] == "db"][0]["agent"]')" \
   "and the lock itself names the subagent, not the session it belongs to"
 
-# And the work it declared. `sid` alone cannot route this: it is the parent's sid
-# too, so the ledger has to say which party.
-ab sess-a take "migrate the ticket table" --as "$S2" > /dev/null
-assert_equal sub-2 "$(state '[t for t in d["tasks"] if "ticket table" in t["what"]][0]["agent_id"]')" \
-  "work a subagent took names the party that took it, not only its session"
-
 # ---- what it last actually did ----------------------------------------------
 #
 # Derived from the tool calls the hooks already see, rather than asked of the
@@ -733,8 +724,6 @@ sys.exit(0 if m else 1)" \
         "counting its agents and its checkouts"
       assert_contains "$(printf '%s\n' "$prjs" | tail -1)" "$(basename "$QUIET")" \
         "and the single-agent project after it, not in alphabetical order"
-      assert_contains "$chars" "wiring the board" \
-        "what an agent said it was doing, on the character that said it"
       assert_contains "$chars" "1 claim" \
         "and how many of its commands took a shared resource"
 
@@ -889,14 +878,12 @@ setTimeout(function(){
    /* The session's OWN blocks. Its printed row necessarily contains everything
       drawn under it, subagents included, so "the parent stopped claiming its
       subagent's work" can only be asked of the parent's own task list. */
-   out.own.push({name: host, tasks: Object.keys(n.c.tasks.__rows || {}).length,
-     did: n.c.did.visible() ? txt(n.c.did) : ""});
+   out.own.push({name: host, did: n.c.did.visible() ? txt(n.c.did) : ""});
   }
   if(n.className.split(" ").indexOf("kid") >= 0 && n.c)
    out.kids.push({name: n.c.nm.shownText(), under: host, text: txt(n),
      wt: n.c.wt.visible() ? n.c.wt.shownText() : "",
      did: n.c.did.visible() ? txt(n.c.did) : "",
-     tasks: Object.keys(n.c.tasks.__rows || {}).length,
      /* The FIGURES in the row, at any depth. Counting the box that holds one
         counts the box: a row whose figure was built and never appended has the
         box and no figure, and every assertion about the box would still pass. */
@@ -962,8 +949,6 @@ print($2)" "$TREE" "$1"
         "and what it last actually did, derived from its own tool calls"
       assert_contains "$(kid "$S1" 'k["did"]')" "api/basket.py" \
         "each party's own, and the sibling's is the sibling's"
-      assert_equal 1 "$(kid "$S2" 'k["tasks"]')" \
-        "and the work it declared, on its row rather than its parent's"
       # The row is SHORT, and must not be padded to look equal.
       for field in "files written" unread "+1"; do
         assert_not_contains "$(kid "$S2" 'k["text"]')" "$field" \
@@ -979,8 +964,6 @@ print($2)" "$TREE" "$1"
       sess_row=$(printf '%s\n' "$out" | grep '^AGENTS \[\] ' | grep -F "$A" || true)
       assert_contains "$sess_row" "files written" \
         "while the session's own row keeps every field it had"
-      assert_equal 0 "$(own "$A" 'k["tasks"]')" \
-        "and stops claiming the work its subagent declared"
       assert_contains "$(own "$B" 'k["did"]')" "python -m pytest" \
         "a session's own last action is on the session's row"
       # The twitch: a clock reading that moves on must not highlight anything.
@@ -1150,9 +1133,7 @@ setTimeout(function(){
    if(has(n, "info")){
     var band = n.children.filter(function(x){return has(x, "say");})[0];
     out.push({who: host, kid: kid, info: kids(n),
-      say: band ? kids(band) : null,
-      said: !!(band && band.children.filter(function(x){
-        return has(x, "doing") && x.visible();}).length)});}
+      say: band ? kids(band) : null});}
    n.children.forEach(function(c){dig(c, host, kid);});})(A, "", 0);
  console.log("BAND " + JSON.stringify(out));
 }, 0);
@@ -1167,20 +1148,16 @@ def who(n, kid=0):
     return [x for x in d if x['who'] == n and x['kid'] == kid][0]
 print($1)" "$BAND"
       }
-      assert_equal "top doing" "$(band '" ".join(who("'"$A"'")["say"])')" \
-        "the band above the ground holds the agent's name and what it said, and stops there"
-      assert_equal "True" "$(band 'who("'"$A"'")["said"]')" \
-        "with the bubble in it when there is one, which is what fills the band"
-      assert_equal "top doing" "$(band '" ".join(who("'"$B"'")["say"])')" \
-        "and the same band when the agent has said nothing, so the room is still reserved"
-      assert_equal "False" "$(band 'who("'"$B"'")["said"]')" \
-        "even though that agent's bubble is not drawn"
-      assert_equal "say did tk clash list seen" \
+      assert_equal "top" "$(band '" ".join(who("'"$A"'")["say"])')" \
+        "the band above the ground holds the agent's name, and stops there"
+      assert_equal "top" "$(band '" ".join(who("'"$B"'")["say"])')" \
+        "the same band for every agent, so the room above the line is reserved"
+      assert_equal "say did clash list seen" \
         "$(band '" ".join(who("'"$B"'")["info"])')" \
         "everything the bus derived comes AFTER the band, so it starts below the line"
       assert_equal "None" "$(band 'str(who("'"$S1"'", 1)["say"])')" \
         "a subagent has no band: it stands on its own ground, and its row is short on purpose"
-      assert_equal "top kwt did tk" "$(band '" ".join(who("'"$S1"'", 1)["info"])')" \
+      assert_equal "top kwt did" "$(band '" ".join(who("'"$S1"'", 1)["info"])')" \
         "so its name and its lines are one run, with nothing reserved between them"
       # The two declarations that have to agree about ONE number: the band's own
       # height, and the offset above it that makes the band's floor the figure's

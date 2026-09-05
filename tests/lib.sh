@@ -226,9 +226,11 @@ payload() {   # <kind> <k=v…> → a hook payload on stdout
 # fixture in a test run shares one pid.
 cc_session() {   # <session id> <name> [<status>] [<pid>]
   python3 - "$AGENTBUS_CC_SESSIONS/$1.json" "$1" "$2" "${3:-idle}" "${4:-$$}" <<'PYEOF'
-import json, sys
+import json, sys, time
 path, sid, name, status, pid = sys.argv[1:6]
+age = int(sys.argv[6]) if len(sys.argv) > 6 else 0
 json.dump({"pid": int(pid), "sessionId": sid, "name": name, "status": status,
+           "statusUpdatedAt": int((time.time() - age) * 1000),
            "kind": "interactive", "version": "2.1.261",
            "messagingSocketPath": "/tmp/cc-socks/%s.sock" % pid},
           open(path, "w"))

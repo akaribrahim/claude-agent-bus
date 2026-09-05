@@ -56,10 +56,6 @@ new_session sess-one "$ONE"
 new_session sess-two "$TWO"
 A=$(ab sess-one name)
 B=$(ab sess-two name)
-ab sess-one take "rewrite the loader" > /dev/null
-ab sess-one done --note "done and tested" > /dev/null
-ab sess-two take "restyle the templates" > /dev/null
-ab sess-two done > /dev/null
 
 # A third session, in the primary checkout, which is who runs this.
 new_session sess-boss "$REPO"
@@ -106,8 +102,8 @@ assert_contains "$out" "This is real money" "and says outright that this costs"
 assert_contains "$out" 'capped at $2.00' "with the ceiling it will be held to"
 assert_contains "$out" "never      push, touch another worktree, or close anybody's task" \
   "and what it will not do"
-assert_contains "$out" "rewrite the loader" \
-  "and the finished work it is about, in the words its author used"
+assert_contains "$out" "feat-one" \
+  "and the branches it is about, named"
 assert_equal "$WT_BEFORE" "$(worktrees)" \
   "a refusal creates no worktree — the plan is printed before anything exists"
 assert_equal "$SEQ_BEFORE" "$(read_seq)" "and puts nothing on the bus"
@@ -212,36 +208,25 @@ p=$(prompt_of 'p')
 assert_contains "$p" "/tmp/scratch" "the worker is told which scratch worktree it is in"
 assert_contains "$p" "detached at main" "and what it is detached at"
 assert_contains "$p" "feat-one" "and which branches to merge"
-assert_contains "$p" "rewrite the loader" "and whose work each one is"
+assert_contains "$p" "on it" "and who is working on each of them"
 assert_contains "$p" "Do not push" "and told not to push"
 assert_contains "$p" "Do not leave this directory" "nor to work in anybody else's checkout"
 assert_contains "$p" "agentbus done" \
   "nor to close the tasks, because that is their authors' declaration to make"
 assert_contains "$p" "run it" "and to run whatever this repository uses to check itself"
 
-# ---- it cannot close anybody's task, and not because it is asked not to ------
+# ---- it cannot speak for anybody's work, and not because it is asked not to --
 #
-# The engine already makes this impossible, which is worth asserting where it can
-# be seen: a candidate is made of tasks whose state is `done`, `done` refuses a
-# task that is not the caller's own, and `take` refuses one that is finished. There
-# is no sequence of verbs by which another session closes finished work.
+# The declaration a worker must not make used to be `agentbus done`, and the
+# engine refused it: a task could only be closed by the session that took it.
+# 3.0.0 removed the ledger, so there is no verb left with which one session
+# declares another's work finished — the property is now structural rather than
+# enforced, and what is left to assert is that nothing was quietly put back.
 
-ab sess-one take "still on the loader tests" > /dev/null      # t3, open
-L=$(ledger_print)
-out=$(ab sess-boss done t3 2>&1); rc=$?
-assert_equal 1 "$rc" "a third session cannot close somebody else's open task"
-assert_contains "$out" "$A" "and the refusal names whose it is"
-# A finished task is a different shape of the same answer: there is nothing left
-# to close, so it is told so and the ledger is not touched. Both halves matter,
-# because between them there is no order of verbs that reaches somebody else's
-# finished work — which is what makes "it must not close anybody's task" a
-# property of the engine rather than a line in a prompt.
-out=$(ab sess-boss done t1 2>&1)
-assert_contains "$out" "already done" "and a finished one has nothing left to close"
-out=$(ab sess-boss take t1 2>&1); rc=$?
-assert_equal 1 "$rc" "nor can it take a finished task over to close it again"
-assert_contains "$out" "is finished" "which the refusal says"
-assert_equal "$L" "$(ledger_print)" "so the ledger is byte-identical after all three"
+for verb in take done doing handoff; do
+  out=$(ab sess-boss "$verb" "anything" 2>&1); rc=$?
+  assert_equal 1 "$rc" "\`agentbus $verb\` no longer exists to speak for anybody"
+done
 
 # ---- with no CLI to spawn, it creates nothing --------------------------------
 #
