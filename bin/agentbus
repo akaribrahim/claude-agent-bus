@@ -5528,7 +5528,7 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
                        # find out: they answer in seconds. Taking it while they
                        # are still working is what this line used to make sound
                        # reasonable.
-                       "when their session is gone — otherwise ask, they answer"))
+                       "when their session is gone — otherwise ask them first"))
     return _plan(cmd, "deny", "lock-held", blocker,
                  resources if resources is not None else [res], exits)
 

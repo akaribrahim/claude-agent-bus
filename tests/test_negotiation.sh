@@ -83,6 +83,12 @@ assert_contains "$R" "when their session is gone" \
   "stealing is for a session that has gone, not for one you have not asked"
 assert_not_contains "$R" "only when you know they have finished" \
   "and does not go on implying you could know that without asking"
+# Nor does it promise the answer. Measured 2026-09-05: a session quiet for fifty
+# minutes ran the command it was sent twenty seconds after the message arrived,
+# and then reported to its human instead of writing back. The wake is what this
+# release rests on; the reply is the recipient's own judgement.
+assert_not_contains "$R" "they answer" \
+  "and does not promise a reply, which is not ours to promise"
 
 # ---- and what the holder sees, unasked --------------------------------------
 
