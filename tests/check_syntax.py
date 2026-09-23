@@ -274,17 +274,17 @@ def check_exits_are_planned():
     made by somebody adding one more helpful line to a message — so a grep in a
     review would not catch it and a rename would not slip past this.
 
-    The second half is about one block in particular. The serving block offers
-    no way of stepping over the decision, because "I really do mean the other
-    checkout's server" is not something anybody means: a green result belonging
-    to another worktree is the founding failure this plugin exists for. A
-    message that merely happens not to say AGENTBUS_OFF today is one exit away
-    from saying it tomorrow, so the check is on the exits."""
+    Until 3.1.0 this also refused a bypass on the serving block, on the ground
+    that "I really do mean the other checkout's server" is not something anybody
+    means. Since then every stop goes through on a second try, that one
+    included: the guards were stepped over with AGENTBUS_OFF more often than
+    they were heeded, and a second try is at least made by an agent that has
+    just read, in the stop itself, that the result will be the other checkout's."""
     import ast
     tree = ast.parse(open(os.path.join(ROOT, "bin", "agentbus")).read())
     what = "block messages are rendered from a Plan's exits, not written out"
     fns = {t.name: t for t in tree.body if isinstance(t, ast.FunctionDef)}
-    wanted = ("render_block", "serving_check", "_exit")
+    wanted = ("render_block", "_exit")
     missing = [n for n in wanted if n not in fns]
     if missing:
         # Renaming one would make this check pass by having nothing to look for.
@@ -296,13 +296,6 @@ def check_exits_are_planned():
         if "agentbus " in sub.value or "AGENTBUS_OFF" in sub.value:
             offenders.append("line %d: render_block() spells out a command — %r"
                              % (sub.lineno, sub.value.strip()[:60]))
-    for sub in ast.walk(fns["serving_check"]):
-        if not isinstance(sub, ast.Call) or getattr(sub.func, "id", "") != "_exit":
-            continue
-        kind = sub.args[1] if len(sub.args) > 1 else None
-        if isinstance(kind, ast.Constant) and kind.value == "bypass":
-            offenders.append("line %d: serving_check() offers a bypass"
-                             % sub.lineno)
     if offenders:
         return bad(what, "\n".join(offenders))
     ok(what)

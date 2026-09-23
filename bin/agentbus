@@ -98,6 +98,9 @@ DECLARED = os.path.join(BUS, "declared")
 # by the shell fast path, never by the engine, and never appended to: see
 # `last_action`.
 ACTED = os.path.join(BUS, "acted")
+# Which stops each party has already been shown, so that its second try goes
+# through. See `was_told`.
+TOLD = os.path.join(BUS, "told")
 REPOS = os.path.join(BUS, "repos")
 EVENTS = os.path.join(BUS, "events.jsonl")
 SEQFILE = os.path.join(BUS, "events.seq")
@@ -251,10 +254,10 @@ def ensure_dirs():
     become both — an existing bus already has `matched/`, so leaving the check
     where it was would mean the new directory was never created on any machine
     this plugin was already installed on."""
-    if os.path.isdir(ACTED):
+    if os.path.isdir(TOLD):
         return            # the last one created: if it exists, they all do
     for d in (BUS, SESSIONS, CURSORS, HOTFOR, WRITES, LOCKS, REPOS, AUTOCLAIM,
-              OWNS, AGENTS, HINTS, SERVES, MATCHED, DECLARED, ACTED):
+              OWNS, AGENTS, HINTS, SERVES, MATCHED, DECLARED, ACTED, TOLD):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -834,6 +837,7 @@ def refresh_derived(sessions=None):
     sweep_locks(sessions)
     sweep_autoclaims()
     sweep_hints()
+    sweep_told()
     sweep_declared()
     sweep_acted(sessions)
     sweep_serves(sessions)
@@ -2885,7 +2889,7 @@ def owners_of(path, me, sessions):
 def ownership_text(me, path, owner, dec, same_tree):
     rel = repo_relative(os.path.realpath(path), me.get("root")) or path
     lines = [
-        'agent-bus: BLOCKED. %s has declared this part of the tree theirs.'
+        'agent-bus: STOPPED ONCE. %s has declared this part of the tree theirs.'
         % owner.get("agent"),
         "",
         "  file    : %s" % rel,
@@ -2917,17 +2921,20 @@ def ownership_text(me, path, owner, dec, same_tree):
         "and not a formality:",
         say_to(owner, about="I need %s — what are you doing with it?" % rel),
         "",
-        "Once they have agreed, take the file itself and the block lifts:",
+        "If they agree, or you still need to, make the same edit again: it goes",
+        "through, and %s is told. Or take the file itself, so the stop applies"
+        % owner.get("agent"),
+        "to them instead:",
         "  agentbus claim 'file:%s' --why \"agreed with %s\""
         % (os.path.realpath(path), owner.get("agent")),
-        "",
-        "(Or the human can rerun the edit with AGENTBUS_OFF=1 in front of it.)",
     ]
     return "\n".join(lines)
 
 
 def ownership_verdict(me, path, sessions):
-    """("deny"|"note"|"", text) for an Edit/Write against declared ownership.
+    """("deny"|"note"|"", text, owner) for an Edit/Write against declared
+    ownership — `owner` being the session whose declaration it is, since a
+    second try is announced to them.
 
     Denies inside one checkout and warns across worktrees, because two sessions
     editing one path in two branches is what branches are for — denying it would
@@ -2936,19 +2943,19 @@ def ownership_verdict(me, path, sessions):
     says the cross-worktree case matters to them too."""
     owners = owners_of(path, me, sessions)
     if not owners:
-        return "", ""
+        return "", "", None
     if any(s["sid"] == me.get("sid") for s, _ in owners):
-        return "", ""   # my own declaration is not a block on me
+        return "", "", None   # my own declaration is not a block on me
     mine_root = os.path.realpath(me.get("root") or "")
     same_tree = [(s, d) for s, d in owners
                  if os.path.realpath(s.get("root") or "") == mine_root]
     if same_tree:
         s, dec = same_tree[0]
-        return "deny", ownership_text(me, path, s, dec, True)
+        return "deny", ownership_text(me, path, s, dec, True), s
     strict = [(s, d) for s, d in owners if d.get("strict")]
     if strict:
         s, dec = strict[0]
-        return "deny", ownership_text(me, path, s, dec, False)
+        return "deny", ownership_text(me, path, s, dec, False), s
     s, dec = owners[0]
     rel = repo_relative(os.path.realpath(path), me.get("root")) or path
     return "note", (
@@ -2958,7 +2965,7 @@ def ownership_verdict(me, path, sessions):
         "word first if it is more than a line:\n%s"
         % (s.get("agent"), dec.get("glob"), s.get("branch") or "-",
            (' — "%s"' % dec["why"]) if dec.get("why") else "",
-           rel, say_to(s, about="I am also editing %s" % rel)))
+           rel, say_to(s, about="I am also editing %s" % rel))), s
 
 
 # ---------------------------------------------------------------- handoff ----
@@ -4418,8 +4425,10 @@ def ownership_text_block(me, sessions):
 RULES = (
     "How this works: a command that touches a shared resource takes it for the "
     "length of that command. You hear about it only when someone else holds it, "
-    "or when the service is answering for a different checkout than yours — both "
-    "are blocked with the reason. Useful: `agentbus status`, "
+    "or when the service is answering for a different checkout than yours. Then "
+    "the command is stopped once, with the reason and who to ask. Ask them; if "
+    "you still need it, run the same command again — it goes through, and they "
+    "are told. Useful: `agentbus status`, "
     "`agentbus serve <res>` to point a service at your worktree, "
     "`agentbus run <res> -- <cmd>` to do that and run one command, "
     "`agentbus wait <res>` to queue for something somebody else is holding. "
@@ -4434,10 +4443,11 @@ RULES = (
     # roster prints addresses and this says what to do with them.
     "\n\nTalking to another session is the SendMessage tool, not this plugin. "
     "The roster above prints each session's address, and a message wakes it: an "
-    "idle session acts on one within seconds, without its human. Whether it "
-    "writes back is its own judgement, so never wait on a reply — queue with "
-    "`agentbus wait <res>`, tell them you are queued, and get on with something "
-    "else while they finish. The queue is what ends with your command running. "
+    "idle session acts on one within seconds, without its human. Ask, then get "
+    "on with something else: an answer arrives with your next tool call. If they "
+    "say go, or nothing comes back and you still need it, try the command again. "
+    "If it can wait, `agentbus wait <res>` queues you and runs nothing until it "
+    "frees. "
     "A subagent cannot be addressed from outside its own session, so when a "
     "subagent holds the lock, message its session and name the subagent."
     "\n\nOne rule that is not enforced by a block: if a build or test failure "
@@ -5243,6 +5253,8 @@ def serving_check(plan, me):
             _exit("serve", "through",
                   "agentbus serve %s" % ",".join(_named(r) for r in moving),
                   "moves %s for good, and tells the others" % what),
+            _exit("again", "bypass", "<your command>",
+                  "if what that checkout serves is what you mean to test"),
         ]
         return out
     return plan
@@ -5325,7 +5337,7 @@ def wrong_port_check(me, cfg, cmd, sessions=None):
                       "then :%d" % res.get("port", 0)),
                 _exit("port", "correct", "agentbus port %s" % res["name"],
                       "just the number"),
-                _exit("off", "bypass", "AGENTBUS_OFF=1 <your command>",
+                _exit("again", "bypass", "<your command>",
                       "if you really do mean another checkout's"),
             ])
     return None
@@ -5612,29 +5624,31 @@ def _lock_block(me, cmd, res, lock, holder, resources=None, also=()):
     # 2026-09-04 a session was blocked on the database at 14:38:31 and stepped
     # past the guard with AGENTBUS_OFF at 14:38:42. Eleven seconds is how long
     # it was considered.
+    # The question, not a notice. Since 3.1.0 the reader can go ahead on a
+    # second try, so what the holder is being asked is whether that is all
+    # right — and a holder asked that can answer it, where one told "I have
+    # queued" had nothing to say back.
     exits.append(_tell_exit(
         holder, who,
-        say=("I have queued for %s — `agentbus status` shows me waiting.\n"
-             "Release it when your command is done and mine takes it."
-             % exit_name)))
+        say=("I need %s for a few minutes — is it all right if I go ahead now,\n"
+             "or will you tell me when you are done with it?" % exit_name)))
     exits.append(_exit("status", "ask", "agentbus status", "what is going on"))
     if cmd:
-        # Only when there is a command to put it in front of. A Plan built from
-        # a name rather than a command — which is what the five command-line
-        # verbs ask for — has nothing this exit could apply to: `AGENTBUS_OFF`
-        # is read by the hooks and by nothing in the CLI, so
-        # `AGENTBUS_OFF=1 agentbus claim db` would be an exit that does not
-        # work, and an exit exists only when it would.
-        exits.append(_exit("off", "bypass", "AGENTBUS_OFF=1 <your command>",
-                           "when the command does not touch %s at all"
-                           % res["name"]))
-    exits.append(_exit("steal", "through",
-                       'agentbus claim %s --steal --why "..."' % exit_name,
-                       # Not "when you know they have finished" any more. You can
-                       # find out: they answer in seconds. Taking it while they
-                       # are still working is what this line used to make sound
-                       # reasonable.
-                       "when their session is gone — otherwise ask them first"))
+        # Only when there is a command to try again. A Plan built from a name
+        # rather than a command — which is what the command-line verbs ask for —
+        # has nothing this could apply to.
+        exits.append(_exit("again", "bypass", "<your command>",
+                           "the same line again: it goes through, and %s is told"
+                           % who))
+    else:
+        # The command-line verbs have no second try, so they keep the takeover.
+        exits.append(_exit("steal", "through",
+                           'agentbus claim %s --steal --why "..."' % exit_name,
+                           # Not "when you know they have finished" any more. You
+                           # can find out: they answer in seconds. Taking it while
+                           # they are still working is what this line used to
+                           # make sound reasonable.
+                           "when their session is gone — otherwise ask them first"))
     return _plan(cmd, "deny", "lock-held", blocker,
                  resources if resources is not None else [res], exits)
 
@@ -5970,7 +5984,7 @@ def astray_again(me, port):
     return swallowed + 2, said_at, False
 
 
-def note_astray(me, plan):
+def note_astray(me, plan, how="with AGENTBUS_OFF"):
     """A bypass of the wrong-port guard, put where the people it lands on read it.
 
     The one override this plugin answers for. `AGENTBUS_OFF` in front of a lock
@@ -5990,8 +6004,8 @@ def note_astray(me, plan):
     b = plan.get("blocker") or {}
     port = b.get("port") or 0
     n, said_at, speak = astray_again(me, port)
-    head = ("went past the wrong-port guard on :%d with AGENTBUS_OFF — %s"
-            % (port, redact(plan["cmd"].strip())[:120]))
+    head = ("went past the wrong-port guard on :%d %s — %s"
+            % (port, how, redact(plan["cmd"].strip())[:120]))
     if not speak:
         # Short, and marked. It is in the log for whoever is counting the run and
         # out of everybody's context; see `interesting_to`.
@@ -6064,8 +6078,8 @@ def render_block(plan):
         # off — one wording, two audiences.
         facts, worth = wrong_port_said(plan)
         return "\n".join([
-            'agent-bus: BLOCKED. This command is aimed at :%d, which is not '
-            'this checkout\'s.' % b["port"],
+            'agent-bus: STOPPED ONCE. This command is aimed at :%d, which is '
+            'not this checkout\'s.' % b["port"],
             "",
         ] + facts + [
             "",
@@ -6075,8 +6089,10 @@ def render_block(plan):
             _exit_line(plan, "env", width=26, mark="# "),
             _exit_line(plan, "port", width=26, mark="# "),
             "",
-            "(If you really do mean another checkout's, say so: %s.)"
-            % _exit_cmd(plan, "off"),
+            "If you really do mean another checkout's, run the same command",
+            "again. It goes through, and the other sessions in this repository",
+            "are told which port you used and whose it is:",
+            _exit_line(plan, "again", width=26, mark="# "),
         ])
 
     if reason == "service-unknown":
@@ -6089,8 +6105,8 @@ def render_block(plan):
     if reason == "service-elsewhere":
         res, started = b["resource"], b.get("started") or {}
         lines = [
-            'agent-bus: BLOCKED. "%s" (%s) is serving a different checkout, so '
-            "this command would exercise that code and report it as yours."
+            'agent-bus: STOPPED ONCE. "%s" (%s) is serving a different checkout, '
+            "so this command would exercise that code and report it as yours."
             % (res["name"], res.get("desc", "shared service")),
             "",
             "  serving   : %s" % short_path(b["serving"] or "?"),
@@ -6115,13 +6131,17 @@ def render_block(plan):
             "",
             "Or move them for good, and run your command yourself afterwards:",
             "  %s" % _exit_cmd(plan, "serve"),
+            "",
+            "If what that checkout serves is what you mean to test, run the same",
+            "command again and it goes through — knowing the result is theirs:",
+            "  %s" % _exit_cmd(plan, "again"),
         ]
         return "\n".join(lines)
 
     res, lock, holder = b["resource"], b["lock"], b["holder"]
     lines = [
-        'agent-bus: BLOCKED. "%s" (%s) is in use by another live Claude Code '
-        'session.' % (res["name"], res.get("desc", "shared resource")),
+        'agent-bus: STOPPED ONCE. "%s" (%s) is in use by another live Claude '
+        'Code session.' % (res["name"], res.get("desc", "shared resource")),
         "",
         "  holder    : %s   branch %s" % (b["who"], holder.get("branch") or "-"),
         "  worktree  : %s%s" % (short_path(holder.get("root", "")),
@@ -6184,48 +6204,42 @@ def render_block(plan):
         "Do not work around this by editing the command: a different port, a",
         "direct binary path or a subshell all reach the same service.",
         "",
-        # The way through first, and on its own. It used to be the third line of
-        # a list of three, under two that change nothing — so the shortest
-        # correct route was the one a reader found last, while the bypass was in
-        # a paragraph of its own further down. That is the whole of why the guard
-        # was overridden 85 times against 6 real blocks in 48 hours.
-        "Queue for it. One command, however many of them are in the way — it",
-        "takes each as it frees, and then your own command runs:",
-        "  %s" % _exit_cmd(plan, "wait"),
-        "",
-        # The second half of the same action, and the reason the queue is worth
-        # joining rather than polling: the holder can see a waiter now
-        # (`agentbus status` shows it on the lock) but a message is what makes
-        # it look. Queue first and then say so, in that order — a message
-        # without a queue entry asks somebody to do something you have not
-        # arranged to receive, and waiting for a reply before queueing turns a
-        # three-second block into a round trip.
-        "Then tell them it is queued. A message wakes them — an idle session",
-        "acts on one within seconds, without its human — so this is worth doing",
-        "and not a formality. Your queue place is what ends with your command",
-        "running; the message only makes it sooner:",
+        # Asking first, because since 3.1.0 nothing else stands between the
+        # reader and going ahead — and the holder is the one party that knows
+        # whether that would break what they are doing. Until a message could
+        # wake a session this was advice nobody could take: on 2026-09-04 a
+        # session was stopped on the database at 14:38:31 and stepped past the
+        # guard with AGENTBUS_OFF at 14:38:42.
+        "Ask them first. A message wakes them — an idle session acts on one",
+        "within seconds, without its human — so this is a real question, and",
+        "they are the one who knows whether you can go ahead:",
         _exit_line(plan, "ask"),
         _exit_say(plan, "ask"),
+    ]
+    if _exit_cmd(plan, "again"):
+        lines += [
+            "",
+            "If they say yes, or this command does not touch %s at all — a"
+            % res["name"],
+            "remote or staging host, a throwaway container — run the same command",
+            "again. It goes through this time, holding nothing, and they are told:",
+            _exit_line(plan, "again"),
+        ]
+    lines += [
+        "",
+        "If it can wait while you get on with something else, queue instead:",
+        "one command, however many are in the way, and it takes each as it",
+        "frees before your own command runs:",
+        "  %s" % _exit_cmd(plan, "wait"),
         "",
         "Or find out more first, which changes nothing:",
         _exit_line(plan, "status"),
     ]
     if res.get("hint"):
         lines += ["", "  " + res["hint"]]
-    lines += [
-        "",
-        "If this command does not touch %s at all — a different host, a remote"
-        % res["name"],
-        "or staging server, a throwaway container — then it is not what this",
-        "guard is for. Say so and it runs:",
-        "  %s" % _exit_cmd(plan, "off"),
-        "That is recorded on the bus, so use it when it is true and not to get",
-        "past a queue. Worth telling whoever maintains the config, too: an",
-        '"unless" pattern on the resource stops it matching next time.',
-        "",
-        "(Last resort, %s: `%s`.)" % (_exit_when(plan, "steal"),
-                                      _exit_cmd(plan, "steal")),
-    ]
+    if not _exit_cmd(plan, "again"):
+        lines += ["", "(Last resort, %s: `%s`.)" % (_exit_when(plan, "steal"),
+                                                    _exit_cmd(plan, "steal"))]
     return "\n".join(lines)
 
 
@@ -6255,6 +6269,132 @@ def render_refusal(plan, note=""):
     lines.append("")
     lines += [_exit_line(plan, e["id"]) for e in plan.get("exits", [])]
     return "\n".join(lines)
+
+
+# ------------------------------------------------------ stopped, then told ----
+#
+# A guard stops a command once. The first time, the party is told who is in the
+# way and how to reach them, and the command does not run; the same party trying
+# again on the same thing goes through, and whoever it lands on is told.
+#
+# Until 3.1.0 every guard refused outright, and the log says what that bought.
+# From 2026-08-18 to 2026-09-22 it recorded 126 commands refused on a held lock
+# and 13 on a service serving another checkout, against 212 steps over those
+# guards with `AGENTBUS_OFF`; and 25 refused on another checkout's port, against
+# 51 steps over that one. A refusal stepped past more often than it is heeded
+# is not protecting anything. What it does
+# do is interrupt, and the interruption is the part worth keeping: it is the
+# moment the agent learns who else is there and how to ask them, which since
+# 3.0.0 is a message that wakes the other session within seconds.
+#
+# Not a warning printed beside a command that runs anyway. Claude Code shows a
+# PreToolUse hook's context with the tool's result, after it has run, and "ask
+# them first" read after the fact is advice about the past.
+#
+# Keyed by what was in the way, not by the command line: an agent that was told
+# `db` is held and comes back with `2>&1 | tail` on the end has heeded the same
+# stop. A different holder, port or lock is a different stop and is told again,
+# and so is the same one after `TOLD_FOR`.
+#
+# `AGENTBUS_TOLD_FOR=0` turns the second try off, and every stop refuses as it
+# did before 3.1.0 — for a machine whose owner wants that, and for the suite,
+# whose files about what a lock decides ask what a first try sees.
+
+
+def _told_for():
+    try:
+        return max(0, int(os.environ.get("AGENTBUS_TOLD_FOR", "1800")))
+    except ValueError:
+        return 1800
+
+
+TOLD_FOR = _told_for()
+
+
+def _told_path(me, fp):
+    import hashlib
+    digest = hashlib.sha1(fp.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(TOLD, "%s__%s.json" % (party_key(me), digest))
+
+
+def was_told(me, fp):
+    """Whether this party has already been stopped by this same thing, recently
+    enough that trying again means it read the stop and still wants to go."""
+    if not fp or not TOLD_FOR:
+        return False
+    rec = read_json(_told_path(me, fp)) or {}
+    return now() - rec.get("at", 0) < TOLD_FOR
+
+
+def tell_once(me, fp):
+    if fp:
+        write_json(_told_path(me, fp), {"at": now(), "what": fp})
+
+
+def forget_told(me, fp):
+    try:
+        os.unlink(_told_path(me, fp))
+    except OSError:
+        pass
+
+
+def sweep_told():
+    cutoff = now() - TOLD_FOR
+    try:
+        names = os.listdir(TOLD)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(TOLD, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.unlink(path)
+        except OSError:
+            pass
+
+
+def stop_print(plan):
+    """What a stop was about, as a key: the thing in the way and who has it.
+
+    The lock's `acquired_at` is part of it, so a lock let go and taken again —
+    by the same holder, even — is a new stop. Two plans for commands that differ
+    only in their output redirection are the same stop."""
+    b = plan.get("blocker") or {}
+    reason = plan.get("reason")
+    if reason == "lock-held":
+        lock = b.get("lock") or {}
+        return "lock|%s|%s|%s|%s" % (b.get("held"), lock.get("sid"),
+                                     lock.get("agent_id") or "",
+                                     lock.get("acquired_at"))
+    if reason == "wrong-port":
+        return "port|%s|%s" % (b.get("port"), b.get("whose"))
+    if reason == "service-elsewhere":
+        return "serve|%s|%s" % ((b.get("resource") or {}).get("name"),
+                                b.get("serving"))
+    return ""
+
+
+def went_ahead(me, plan):
+    """The second try at a command the guard stopped once: it runs, nothing is
+    claimed for it, and whoever it lands on is told.
+
+    The holder of a lock is told directly, because the command is about to run
+    against what they believe they have to themselves. Going past the wrong-port
+    stop is announced to the repository, as `AGENTBUS_OFF` there always was. A
+    service serving another checkout has nobody to tell — the cost lands on the
+    reader's own results — so that one is only on the log."""
+    b = plan.get("blocker") or {}
+    reason = plan.get("reason")
+    cmd = redact(plan.get("cmd", "").strip())[:120]
+    if reason == "wrong-port":
+        return note_astray(me, plan, how="on a second try")
+    name = (b.get("resource") or {}).get("name", "?")
+    if reason == "lock-held":
+        return emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
+                    "went ahead on '%s' on a second try, while %s holds it — %s"
+                    % (name, b.get("who"), cmd), to=b.get("who"))
+    return emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
+                "ran past the guard on '%s' on a second try — %s" % (name, cmd))
 
 
 def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
@@ -6311,6 +6451,14 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
                 do_release(me, name, quiet=True)
             forget_autoclaim(payload_tool_use_id)
     if plan["verdict"] == "deny":
+        # The second try at the same stop goes through. Nothing was claimed on
+        # the way here — a lock stop gave back what it took, and so did a
+        # serving one — so it runs holding nothing, as `AGENTBUS_OFF` does.
+        fp = stop_print(plan)
+        if was_told(me, fp):
+            went_ahead(me, plan)
+            return
+        tell_once(me, fp)
         note_plan_block(me, plan)
         deny(render_block(plan))
     elif plan["verdict"] == "warn":
@@ -6319,6 +6467,14 @@ def guard_bash(me, cmd, sessions, payload_tool_use_id=None):
 
 def file_lock_name(path):
     return "file:%s" % path
+
+
+def edited_anyway(me, path, who, why):
+    """The second try at an edit the file guard stopped once: it is made, and
+    the party it lands on is told."""
+    rel = repo_relative(os.path.realpath(path), me.get("root")) or short_path(path)
+    emit(me.get("sid"), me.get("agent"), me.get("repo_key"), "block",
+         "edited %s on a second try — %s" % (rel, why), to=who)
 
 
 def guard_file(me, path, sessions):
@@ -6334,22 +6490,34 @@ def guard_file(me, path, sessions):
     if mine:
         holder = next((s for s in sessions if s["sid"] == mine.get("sid")), None)
         if holder:
-            deny("agent-bus: BLOCKED. %s has explicitly claimed this file:\n\n"
+            who = mine.get("agent") or holder.get("agent")
+            fp = "file-claim|%s|%s|%s" % (path, mine.get("sid"),
+                                          mine.get("acquired_at"))
+            if was_told(me, fp):
+                return edited_anyway(me, path, who, "%s has claimed it" % who)
+            tell_once(me, fp)
+            deny("agent-bus: STOPPED ONCE. %s has explicitly claimed this file:\n\n"
                  "  file  : %s\n  since : %s\n  reason: %s\n\n"
-                 "Ask before taking it:\n%s\n"
-                 "  agentbus claim 'file:%s' --steal --why \"they agreed\""
+                 "Ask before taking it — a message wakes them:\n%s\n\n"
+                 "If they agree, or you still need to, make the same edit again: "
+                 "it goes\nthrough, and %s is told."
                  % (holder.get("agent"), short_path(path),
                     held_for(mine.get("acquired_at")), mine.get("why") or "-",
                     say_to(holder,
                            about="I need %s — are you done with it?"
-                                 % short_path(path)), path))
+                                 % short_path(path)), who))
             return
     # Declared ownership comes before the reactive check: it is the whole point
     # of declaring one that the block does not wait for somebody to write the
     # file first. At most one of these speaks — two note_ctx calls would put two
     # JSON documents on stdout and corrupt the session's view of the hook.
-    verdict, text = ownership_verdict(me, path, sessions)
+    verdict, text, owner = ownership_verdict(me, path, sessions)
     if verdict == "deny":
+        fp = "file-own|%s|%s" % (path, owner.get("sid"))
+        if was_told(me, fp):
+            return edited_anyway(me, path, owner.get("agent"),
+                                 "it is in %s's declared scope" % owner.get("agent"))
+        tell_once(me, fp)
         note_block(me, short_path(path), "somebody has declared it theirs")
         deny(text)
         return
@@ -6374,11 +6542,16 @@ def guard_file(me, path, sessions):
                 same_repo.append((s, hit2))
     if same_tree:
         s, hit = same_tree[0]
+        fp = "file-edit|%s|%s" % (path, s["sid"])
+        if was_told(me, fp):
+            return edited_anyway(me, path, s.get("agent"),
+                                 "%s was editing it too" % s.get("agent"))
+        tell_once(me, fp)
         note_block(me, short_path(path), "%s is editing it" % s.get("agent"))
         deny("\n".join([
-            "agent-bus: BLOCKED. Another live session is editing this exact file in "
-            "this exact checkout — your write would be made on top of theirs, or "
-            "theirs on top of yours.",
+            "agent-bus: STOPPED ONCE. Another live session is editing this exact "
+            "file in this exact checkout — your write would be made on top of "
+            "theirs, or theirs on top of yours.",
             "",
             "  file    : %s" % short_path(path),
             "  other   : %s  (branch %s, wrote it %s)" % (
@@ -6393,7 +6566,8 @@ def guard_file(me, path, sessions):
             "applies to them instead:",
             "  agentbus claim 'file:%s' --why \"agreed with %s\"" % (path, s.get("agent")),
             "",
-            "(Or the human can rerun the edit with AGENTBUS_OFF=1 in front of it.)",
+            "If they agree, or you still need to, make the same edit again: it goes",
+            "through, and %s is told." % s.get("agent"),
         ]))
         return
     if same_repo:

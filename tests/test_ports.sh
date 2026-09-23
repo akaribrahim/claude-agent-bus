@@ -470,4 +470,23 @@ out=$(ab_hook pre-tool "$(payload bash sid=sess-w2 "cwd=$WT2" \
 assert_deny "$out" "so two worktrees still contend for it — which is the point"
 ab_hook post-bash "$(payload post-bash sid=sess-w1 "cwd=$WT1" id=pt-7)" > /dev/null
 
+# ---- since 3.1.0, a second try at the wrong port goes through ---------------
+#
+# The stop is told once. The same party trying the same port again goes through
+# without AGENTBUS_OFF, and it is announced exactly as the opt-out is, saying
+# which way it got past. The rest of this file runs every try as a first try
+# (lib.sh), so the window is given to the one call that is the second.
+
+out=$(ab_hook pre-tool "$(payload bash sid=sess-w2 "cwd=$WT2" \
+  "cmd=curl -sf localhost:$DECLARED/health" id=pt-9)")
+assert_deny "$out" "the first try at another checkout's port is stopped"
+assert_contains "$(json_field "$out" hookSpecificOutput permissionDecisionReason)" \
+  "run the same command" "and the stop says a second try goes through"
+out=$(AGENTBUS_TOLD_FOR=1800 ab_hook pre-tool "$(payload bash sid=sess-w2 "cwd=$WT2" \
+  "cmd=curl -sf localhost:$DECLARED/health" id=pt-10)")
+assert_allow "$out" "the second try goes through"
+assert_contains "$(astray "recs[-1]['text']")" \
+  "went past the wrong-port guard on :$DECLARED on a second try" \
+  "and is announced as the opt-out is, saying how it got past"
+
 finish

@@ -23,7 +23,9 @@ each undoing the other, and neither knows why.
 
 A README explaining the rules does not fix either one, because an agent has to
 remember to read the README. This does, because the decision is made in a hook:
-the command does not run, and the agent is told what is wrong and how to fix it.
+the first time, the command does not run, and the agent is told what is wrong,
+who to ask and how to fix it. If it still needs to, it runs the same command
+again — that goes through, and whoever it lands on is told.
 
 ## What it looks like
 
@@ -31,22 +33,25 @@ Not invented — copied from a run. A session in `wt2` curls a dev server that
 another session started from a different checkout:
 
 ```
-agent-bus: BLOCKED. "web" (the demo server on :8099) is serving a different
-checkout, so this command would exercise that code and report it as yours.
+agent-bus: STOPPED ONCE. "web" (the demo server on :8099) is serving a different checkout, so this command would exercise that code and report it as yours.
 
   serving   : …/repo
   you are in: …/wt2
   started by: repo-main, just now
 
-  It serves the tree it was started in, so a request to it answers with THAT
-  checkout's files.
+  It serves the tree it was started in, so a request to it answers with THAT checkout's files.
 
-Point it at your worktree — this stops the current one and starts
-yours, and tells the other sessions it moved:
+One step, and the shortest one: this points every service your
+command needs at your worktree, takes their locks, runs your
+command against your own tree and tells the other sessions:
+  agentbus run web -- <your command>
+
+Or move them for good, and run your command yourself afterwards:
   agentbus serve web
 
-Or run one command against your own tree and leave it there:
-  agentbus run web -- <your command>
+If what that checkout serves is what you mean to test, run the same
+command again and it goes through — knowing the result is theirs:
+  <your command>
 ```
 
 A session runs the build and the failure names a file somebody else is mid-edit
@@ -65,23 +70,22 @@ Fix only files you own.
 And a session tries to edit a scope somebody claimed up front:
 
 ```
-agent-bus: BLOCKED. repo-main has declared this part of the tree theirs.
+agent-bus: STOPPED ONCE. repo-main has declared this part of the tree theirs.
 
   file    : api/service.py
   owner   : repo-main   branch main
-  claimed : api/**, 1m ago
+  claimed : api/**, 0s ago
   reason  : "backend rebuild"
   worktree: …/repo   (the same one you are in)
 
-Ask before taking it — a message wakes them, so this is an answer you will have
-in a moment and not a formality:
+Ask before taking it — a message wakes them, so this is worth doing and not a formality:
   SendMessage → to "repo-main"   (idle)
-  "I need api/service.py — what are you doing with it?"
+    "I need api/service.py — what are you doing with it?"
 
-Once they have agreed, take the file itself and the block lifts:
-  agentbus claim 'file:…/api/service.py' --why "agreed with repo-main"
-
-(Or the human can rerun the edit with AGENTBUS_OFF=1 in front of it.)
+If they agree, or you still need to, make the same edit again: it goes
+through, and repo-main is told. Or take the file itself, so the stop applies
+to them instead:
+  agentbus claim 'file:…/repo/api/service.py' --why "agreed with repo-main"
 ```
 
 ## Install
@@ -575,11 +579,12 @@ what it is about to spend and stops unless you add `--yes`.
   comes back. On this machine, on 2026-09-04, a session was blocked on the
   database at 14:38:31 and stepped past the guard with `AGENTBUS_OFF` at
   14:38:42. Eleven seconds is how long asking was considered. A message wakes the
-  recipient and it acts without its human, so a block now ends in a negotiation:
-  queue for the resource, tell the holder you have, and get on with something
-  else. Never wait on the reply — the queue is what ends with your command
-  running. What this plugin contributes is the part the tool cannot know —
-  who holds what, who is waiting, and the address that actually reaches them.
+  recipient and it acts without its human, so since 3.1.0 a guard stops a
+  command once and hands the conversation to the two agents: ask the holder,
+  then go ahead on a second try — which goes through, and they are told — or
+  queue if it can wait. What this plugin contributes is the part the tool cannot
+  know — who holds what, who is waiting, and the address that actually reaches
+  them.
 - **What it will not do is send for you.** There is no CLI that puts a message in
   another session's conversation, so every block prints the call for the agent to
   make rather than making it. That is a boundary worth keeping: a coordination
@@ -592,12 +597,14 @@ what it is about to spend and stops unless you add `--yes`.
   resource nobody guards, and a pattern that stops matching fails silently.
   `agentbus doctor` reports resources that have never matched, which is the only
   way to notice.
-- **`AGENTBUS_OFF=1` really does switch everything off, and one of them answers
-  back.** Any command can step over any guard with it, and that stays — for a
-  lock it is sometimes exactly right, because a `psql` aimed at a staging box in
-  another country only looks like the one this machine shares. For the wrong-port
-  check it never is: your own port exists. So that one bypass goes into the other
-  sessions' context rather than only into the log, naming the port, whose checkout
+- **A stop is a stop, not a wall — and one of them answers back.** Since 3.1.0
+  the same agent's second try at the same thing goes through, as `AGENTBUS_OFF=1`
+  always did; `AGENTBUS_TOLD_FOR=0` in the environment puts the old refusal back
+  for a machine that wants it. For a lock that is sometimes exactly right,
+  because a `psql` aimed at a staging box in another country only looks like the
+  one this machine shares. For the wrong-port check it rarely is: your own port
+  exists. So going past that one goes into the other sessions' context rather
+  than only into the log, naming the port, whose checkout
   it serves and the command that was skipped — once per party and port, counted
   after that, so a run of one mistake costs its readers one message. What that
   buys is that nobody finds out afterwards. It does not stop anybody.

@@ -2,6 +2,38 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 3.1.0 — 2026-09-23
+
+**A guard stops a command once, and then hands the conversation to the agents.**
+The first try at a held resource, another checkout's port, a service serving
+another checkout, or a file somebody has claimed, declared or is editing is
+refused as before — with who is in the way and the address that reaches them,
+and now a sentence asking their permission rather than announcing a queue. The
+same party trying again on the same thing goes through, holding nothing, and
+whoever it lands on is told: a lock's holder directly, the repository for a
+wrong port. It is keyed by what was in the way and not by the command line, so
+coming back with `2>&1 | tail` on the end counts; a different holder, port or
+lock is stopped again, and so is the same one after thirty minutes.
+
+The refusal it replaces was stepped over more often than it was heeded. From
+2026-08-18 to 2026-09-22 the log on this machine recorded 126 commands refused
+on a held lock and 13 on a service serving another checkout, against 212 steps
+over those guards with `AGENTBUS_OFF`; and 25 refused on another checkout's
+port, against 51 steps over that one. What a stop was worth was the moment an
+agent learned who else was there, and since 3.0.0 a message wakes them within
+seconds. So a stop now says ask first, then offers the second try, and puts the
+queue after both, for a command that can wait.
+
+`AGENTBUS_OFF=1` still works and is no longer offered in a stop.
+`AGENTBUS_TOLD_FOR=0` in the environment turns the second try off, and every
+stop refuses as it did before. The takeover, `claim --steal`, is still what the
+command-line refusal offers, where there is no second try, and no longer what a
+stop offers.
+
+One reversal worth naming. The serving stop used to offer no way past at all, on
+the ground that nobody means another checkout's server. It offers the second try
+like every other stop, and says in the same breath whose result that would be.
+
 ## 3.0.2 — 2026-09-23
 
 **A key or an authorization value is masked, not only a password.** 3.0.1 knew

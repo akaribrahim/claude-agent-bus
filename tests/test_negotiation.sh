@@ -15,10 +15,11 @@
 #      AGENTBUS_OFF at 14:38:42.
 #
 # So this file asserts the two halves together: the queue is where the holder
-# reads it, and the block tells the blocked agent to queue FIRST and then say
-# so — in that order, because a message without a queue entry asks for something
-# you have not arranged to receive, and waiting for a reply before queueing
-# turns a three-second block into a round trip.
+# reads it, and the stop tells the stopped agent to ask. Until 3.1.0 it said
+# queue first and then say so, because the stop refused every time and the
+# queue was the only thing that ended with the command running. Since then a
+# second try goes through, so what the holder is asked is whether that would be
+# all right — and the one who can answer that is asked before anything else.
 
 . "$AB_ROOT/tests/lib.sh"
 
@@ -55,33 +56,35 @@ assert_contains "$R" "SendMessage tool → to \"$A\"" \
   "and an address the tool will take, read from Claude Code's own registry"
 assert_contains "$R" "(idle)" \
   "with whether anybody is at the keyboard, which decides how long to expect"
-assert_contains "$R" "I have queued for db" \
+assert_contains "$R" "is it all right if I go ahead now" \
   "and the sentence to send, because asking is only cheap if it is written"
 
-# Order is the argument. `wait` is what ends with the command running, the
-# message is what makes it end sooner, and `status` is neither — it used to sit
-# above both.
-wait_at=$(printf '%s\n' "$R" | grep -n "agentbus wait db" | head -1 | cut -d: -f1)
+# Order is the argument. Asking first, because the holder is the one who knows
+# whether going ahead would break what they are doing; then the second try,
+# which is what going ahead is; then the queue, for a command that can wait;
+# and `status` last, because it changes nothing.
 tell_at=$(printf '%s\n' "$R" | grep -n "SendMessage tool" | head -1 | cut -d: -f1)
+again_at=$(printf '%s\n' "$R" | grep -n "<your command>" | head -1 | cut -d: -f1)
+wait_at=$(printf '%s\n' "$R" | grep -n "agentbus wait db" | head -1 | cut -d: -f1)
 status_at=$(printf '%s\n' "$R" | grep -n "agentbus status" | head -1 | cut -d: -f1)
-steal_at=$(printf '%s\n' "$R" | grep -n "agentbus claim db --steal" | head -1 | cut -d: -f1)
-[ "$wait_at" -lt "$tell_at" ] \
-  && _ok "queueing is offered before asking" \
-  || _bad "queueing is offered before asking" "wait at $wait_at, tell at $tell_at"
-[ "$tell_at" -lt "$status_at" ] \
-  && _ok "and asking before merely reading the roster" \
-  || _bad "and asking before merely reading the roster" \
-          "tell at $tell_at, status at $status_at"
-[ "$status_at" -lt "$steal_at" ] \
-  && _ok "with taking it by force last of all" \
-  || _bad "with taking it by force last of all" \
-          "status at $status_at, steal at $steal_at"
+[ "$tell_at" -lt "$again_at" ] \
+  && _ok "asking is offered before going ahead" \
+  || _bad "asking is offered before going ahead" "tell at $tell_at, again at $again_at"
+[ "$again_at" -lt "$wait_at" ] \
+  && _ok "and going ahead before queueing" \
+  || _bad "and going ahead before queueing" "again at $again_at, wait at $wait_at"
+[ "$wait_at" -lt "$status_at" ] \
+  && _ok "and reading the roster last of all" \
+  || _bad "and reading the roster last of all" "wait at $wait_at, status at $status_at"
 
-# The steal line no longer suggests you can know they have finished without
-# asking. You can find out: they answer in seconds.
-assert_contains "$R" "when their session is gone" \
-  "stealing is for a session that has gone, not for one you have not asked"
-assert_not_contains "$R" "only when you know they have finished" \
+# Taking it by force is not offered to somebody who can simply go ahead. It is
+# still what the command-line refusal offers, where there is no second try — and
+# there it is for a session that has gone, not for one you have not asked.
+assert_not_contains "$R" "--steal" "a stop does not offer a takeover"
+refused=$(ab sess-b claim db --why "mine" 2>&1)
+assert_contains "$refused" "when their session is gone" \
+  "the command-line refusal keeps it, for a session that has gone"
+assert_not_contains "$refused" "only when you know they have finished" \
   "and does not go on implying you could know that without asking"
 # Nor does it promise the answer. Measured 2026-09-05: a session quiet for fifty
 # minutes ran the command it was sent twenty seconds after the message arrived,

@@ -606,16 +606,16 @@ plan_exit() {   # <exit id> → that exit's command line, verbatim
     | awk -F'\t' -v id="$1" '$1 == id {print $3; f = 1} END {if (!f) print "no-such-exit:" id}'
 }
 
-# Some blocks must not offer a way of stepping over the decision. Asserted on
-# the Plan and not only on the message, because a `bypass` that appeared in the
+# Since 3.1.0 every stop's one way past is the second try. Asserted on the Plan
+# and not only on the message, because any other `bypass` that appeared in the
 # exits would be printed by whatever renders them next.
-assert_no_bypass() {   # <what this block is about>
+assert_only_bypass_is_again() {   # <what this block is about>
   local offered
-  offered=$(printf '%s\n' "$PLAN_EXITS" | awk -F'\t' '$2 == "bypass" {print $3}')
-  if [ -n "$offered" ]; then
-    _bad "the $1 block offers no bypass" "it offers: $offered"
+  offered=$(printf '%s\n' "$PLAN_EXITS" | awk -F'\t' '$2 == "bypass" {print $1}')
+  if [ "$offered" = "again" ]; then
+    _ok "the $1 block's only way past is the second try"
   else
-    _ok "the $1 block offers no bypass"
+    _bad "the $1 block's only way past is the second try" "it offers: $offered"
   fi
 }
 
@@ -666,11 +666,16 @@ assert_equal allow "$VERDICT" "AGENTBUS_OFF=1 in front of the command gets past 
 guard b1-7 sess-b "$WT" "$PSQL"
 assert_equal deny "$VERDICT" "…which is a bypass, not a lift: the block is exactly where it was"
 
-out=$(take_exit b1-8 sess-b "$WT" "$(plan_exit steal)")
-assert_contains "$out" "claimed 'db'" "the advertised steal takes it"
-guard b1-9 sess-b "$WT" "$PSQL"
-assert_equal allow "$VERDICT" "and the block lifts"
-ab sess-b release db > /dev/null
+# The second try, which since 3.1.0 is what a stop offers where it used to
+# offer the takeover. Its line is the reader's own command again, so it is run
+# as that, with the window the engine ships with — the rest of this file runs
+# every try as a first try (lib.sh). Not a lift either: it goes through holding
+# nothing, and the holder keeps the lock.
+AGENTBUS_TOLD_FOR=1800 guard b1-8 sess-b "$WT" "$PSQL"
+assert_equal allow "$VERDICT" "the advertised second try goes through"
+assert_contains "$(ab sess-a status)" "seeding the database" \
+  "holding nothing: the lock is still the holder's"
+ab sess-a release db > /dev/null
 
 # The wait is the only exit whose whole point is that somebody else lets go
 # while it is running, so it is the only one worth the wall-clock time.
@@ -710,11 +715,9 @@ advertised same-checkout
 # so only the two that touch the lock are run again here.
 guard b2-2 sess-c "$REPO" "AGENTBUS_OFF=1 $PSQL"
 assert_equal allow "$VERDICT" "the bypass works from the same checkout"
-out=$(take_exit b2-3 sess-c "$REPO" "$(plan_exit steal)")
-assert_contains "$out" "claimed 'db'" "and so does the steal"
-guard b2-4 sess-c "$REPO" "$PSQL"
-assert_equal allow "$VERDICT" "which lifts the block"
-ab sess-c release db > /dev/null
+AGENTBUS_TOLD_FOR=1800 guard b2-3 sess-c "$REPO" "$PSQL"
+assert_equal allow "$VERDICT" "and so does the second try"
+ab sess-a release db > /dev/null
 
 # ---- 3. two subagents of one session ----------------------------------------
 #
@@ -883,11 +886,9 @@ advertised implied
 
 guard b5-2 sess-b "$WT" "AGENTBUS_OFF=1 rigrun --all"
 assert_equal allow "$VERDICT" "the bypass works for an implied resource"
-out=$(take_exit b5-3 sess-b "$WT" "$(plan_exit steal)")
-assert_contains "$out" "claimed 'bundler'" "the steal names the implied resource and takes it"
-guard b5-4 sess-b "$WT" "rigrun --all"
-assert_equal allow "$VERDICT" "and the block lifts"
-ab sess-b release bundler > /dev/null
+AGENTBUS_TOLD_FOR=1800 guard b5-3 sess-b "$WT" "rigrun --all"
+assert_equal allow "$VERDICT" "the second try goes through for an implied resource"
+ab sess-a release bundler > /dev/null
 
 # ---- 6. blocked on one instance of several ----------------------------------
 #
@@ -936,12 +937,10 @@ ab_hook pre-tool "$(payload bash sid=sess-a "cwd=$REPO" "cmd=$MAESTRO" id=b6-hol
 assert_equal "simulator@ABC123" "$(lock_keys)" "the other session has the device again"
 guard b6-4 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
 assert_equal deny "$VERDICT" "and this one is blocked on it again"
-out=$(take_exit b6-5 sess-b "$WT" "$(plan_exit steal)")
-assert_contains "$out" "claimed 'simulator@ABC123'" "the advertised steal takes that device"
-assert_equal "simulator@ABC123" "$(lock_keys)" "and there is still exactly one lock on it"
-guard b6-6 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
-assert_equal allow "$VERDICT" "so the steal lifts it too"
-ab sess-b release simulator@ABC123 > /dev/null
+AGENTBUS_TOLD_FOR=1800 guard b6-5 sess-b "$WT" "maestro --udid ABC123 test b.yaml"
+assert_equal allow "$VERDICT" "the second try goes through an instance block"
+assert_equal "simulator@ABC123" "$(lock_keys)" \
+  "and there is still exactly one lock on it, the holder's"
 
 # The name has to be one this repository declares. Without that, one mistyped
 # character is the whole defect again — a lock written under a name nothing
@@ -949,7 +948,8 @@ ab sess-b release simulator@ABC123 > /dev/null
 out=$(ab sess-b claim simulatr@ABC123 --why "..." 2>&1)
 assert_contains "$out" "no resource named 'simulatr'" \
   "a mistyped instance is refused rather than turned into a junk lock"
-assert_equal "" "$(lock_keys)" "and nothing is written for it"
+assert_equal "simulator@ABC123" "$(lock_keys)" \
+  "and nothing is written for it: the holder's device is still the only lock"
 
 guard b6-7 sess-b "$WT" "AGENTBUS_OFF=1 maestro --udid ABC123 test b.yaml"
 assert_equal allow "$VERDICT" "the bypass still steps over an instance block"
@@ -969,12 +969,12 @@ assert_equal deny "$VERDICT" "the other checkout is refused with no lock held an
 assert_contains "$REASON" "serving a different checkout" "and told why"
 advertised serving
 assert_not_contains "$REASON" "AGENTBUS_OFF" \
-  "and offers no bypass, so the exits above are the whole of its advice"
-# Asserted on the Plan as well as on the message. "I really do mean the other
-# checkout's server" is not a thing anybody means, so there must be nothing for
-# a renderer to print — a message that merely happens not to mention
-# AGENTBUS_OFF today is one exit away from mentioning it tomorrow.
-assert_no_bypass serving
+  "and does not send anybody to the opt-out"
+# Until 3.1.0 this block offered no way past at all, on the ground that "I
+# really do mean the other checkout's server" is not a thing anybody means. It
+# offers the second try now, like every stop, and says in the same breath whose
+# result that would be. The one way past is that one.
+assert_only_bypass_is_again serving
 assert_equal "" "$(lock_keys)" "the refused command claimed nothing on the way"
 
 out=$(take_exit b7-2 sess-b "$WT" "$(plan_exit serve)")
@@ -1147,7 +1147,7 @@ assert_equal deny "$VERDICT" "the other checkout is refused"
 assert_contains "$REASON" "also theirs: wares" \
   "and told that the service it was not asked about is theirs as well"
 advertised several-services
-assert_no_bypass several-services
+assert_only_bypass_is_again several-services
 
 # The two exits, both of which must lift a block about TWO services. The `run`
 # one is named after what the command is about — `tour` — because that is what

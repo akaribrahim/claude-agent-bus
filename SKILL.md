@@ -1,6 +1,6 @@
 ---
 name: agent-bus
-description: Coordinate with other Claude Code sessions running on this machine — see who else is live and in which worktree, point a shared service (dev server, bundler, simulator, database) at your own checkout, and find the address that reaches another session when you need to ask it something. Use when a command was blocked, when planning work that touches a dev server / port / simulator / shared database, when another agent's work might collide with yours, or when the user mentions parallel agents or worktrees.
+description: Coordinate with other Claude Code sessions running on this machine — see who else is live and in which worktree, point a shared service (dev server, bundler, simulator, database) at your own checkout, and find the address that reaches another session when you need to ask it something. Use when a command was stopped, when planning work that touches a dev server / port / simulator / shared database, when another agent's work might collide with yours, or when the user mentions parallel agents or worktrees.
 ---
 
 # agent-bus
@@ -31,15 +31,21 @@ than one you remember, and use `agentbus whois` if you are unsure.
   length of that command** and gives it back automatically. You hear about it
   only when something is wrong.
 
-## The two ways a command gets blocked
+## The two ways a command gets stopped
 
-**1. Someone else is using it right now.** Wait for them, or ask:
+Either way the first try is stopped, with the reason and who to ask. Ask them.
+If they say go — or nothing comes back and you still need it — run the same
+command again: the second try goes through, holding nothing, and they are told
+you did. A different holder, port or lock is a new stop, told again.
 
-    agentbus wait <res>[,<res>] --why "..."  queue for every one in the way
+**1. Someone else is using it right now.** Ask them, then decide:
+
+    # SendMessage to the holder — the stop prints the address and the words
+    <the same command>                       go ahead; they are told
+    agentbus wait <res>[,<res>] --why "..."  or queue, if it can wait
     agentbus status                          who is live, what is held
-    # then SendMessage to the holder — the block prints the address and the words
 
-One `wait` for the whole list, with one deadline — not one command each. A block
+One `wait` for the whole list, with one deadline — not one command each. A stop
 names everything it is about, so copy the line it printed rather than the first
 resource in it.
 
@@ -57,7 +63,7 @@ here.
 Automatic claims last one command, so "held" usually means seconds.
 
 **2. The service is answering for a different checkout.** This is the dangerous
-one and it is blocked even when nobody holds the lock — a session can end while
+one and it is stopped even when nobody holds the lock — a session can end while
 its detached dev server keeps serving its tree. Point it at yours:
 
     agentbus run <res> -- <cmd>              all of them at your tree, then run
@@ -65,35 +71,28 @@ its detached dev server keeps serving its tree. Point it at yours:
     agentbus serves                          which checkout each service serves
 
 `run` first, and with the resource your command is *about* rather than the one
-the block happened to name: it takes the locks, points every service that
+the stop happened to name: it takes the locks, points every service that
 resource implies at your worktree, runs your command and hands it all back. One
 command wanting a device and the three services it is only meaningful against is
 one `agentbus run`, not four steps.
 
-**Never work around a block by editing the command.** A different port, a direct
+**Never work around a stop by editing the command.** A different port, a direct
 binary path, or a subshell all reach the same service and produce the same
 silently-wrong result. That is the exact failure this exists to prevent.
 
 **Unless the command genuinely does not touch it.** A guard matches the tool,
 not the target: `psql` against a staging server in another country still looks
-like `psql`. When that is the case, say so and it runs —
+like `psql`. When that is the case, run it again and it goes through. Tell the
+human as well: an `unless` pattern on the resource stops it matching next time.
 
-    AGENTBUS_OFF=1 <your command>
+**The wrong port is the one to think twice about.** Your own port exists, so
+"I really did mean another checkout's" is rarely what anybody means — and going
+past that stop is announced to the other sessions in the repository, naming the
+port, the checkout it belongs to and the command you skipped. Ask for yours
+instead; it is one line, and it is in the stop.
 
-which is recorded on the bus, so use it when it is true and not to jump a queue.
-Tell the human as well: an `unless` pattern on the resource stops it matching
-next time.
-
-**One block it is never true of: the wrong port.** Your own port exists, so
-"I really did mean another checkout's" is not a thing anybody means — and
-stepping over that one is announced to the other sessions in the repository,
-naming the port, the checkout it belongs to and the command you skipped. Ask for
-yours instead; it is one line, and it is in the block.
-
-The three commands a block tells you to run — `agentbus wait`, `agentbus
-release`, and `agentbus claim … --steal` — are never themselves blocked. They
-exist to act on a lock somebody else is holding, so the way out of a block
-always runs.
+`agentbus wait`, `agentbus release` and `agentbus claim … --steal` are never
+themselves stopped. They exist to act on a lock somebody else is holding.
 
 If you are working in a checkout other than the one this chat opened in, say so
 once — the shell returns to the original directory between commands, so nothing
@@ -117,13 +116,13 @@ out of a README:
     agentbus port api             # just the number
 
 The original checkout keeps the port the config declares; worktrees get their
-own. Reaching for somebody else's is blocked, because a request to their port
+own. Reaching for somebody else's is stopped, because a request to their port
 answers with their code and reports it as yours — which is the failure this
 whole plugin exists to prevent, and the one thing isolation cannot prevent by
 itself.
 
-`AGENTBUS_OFF=1` still runs it, and this is the one block where taking that is
-**announced to the others** rather than only logged: the cost is not yours. The
+A second try still runs it, and so does `AGENTBUS_OFF=1`, and this is the one
+stop where going past is **announced to the others** rather than only logged: the cost is not yours. The
 checkout you reached now has your requests in its service, and anyone who reads
 what you concluded is reading another tree's results. The message names the port,
 whose checkout it is, and the one command you skipped. A run of them is announced
@@ -153,14 +152,14 @@ as you are done:
 **Not with this plugin.** Messages between sessions are Claude Code's own tools:
 `ListAgents` lists every live session, `SendMessage` writes to one, and it
 **wakes** the recipient — an idle session acts on a message within seconds
-without its human. Whether it writes back is its own judgement, so do not wait
-on a reply. `agentbus post` and `agentbus inbox` still exist for one release; they
+without its human. Whether it writes back is its own judgement, so do not sit
+idle for it: carry on, and an answer arrives with your next tool call. `agentbus post` and `agentbus inbox` still exist for one release; they
 deliver nothing, print the call that works, and exit non-zero.
 
 What this plugin gives you is the part those tools cannot know, and it gives it
-to you unasked: who holds the resource you were refused, who is already waiting
+to you unasked: who holds the resource you were stopped on, who is already waiting
 for it, and **the address that actually reaches them**. Take the address from the
-roster or from the block — do not assume the name here is the name the tool
+roster or from the stop — do not assume the name here is the name the tool
 takes. They agree only by coincidence, and when a chat has no title they differ.
 
 A subagent cannot be messaged at all. `SendMessage` reaches sessions, so when
@@ -173,20 +172,21 @@ change to shared config. There is no broadcast: `SendMessage` addresses one
 session, so a reseed that changes every id is one call per session in the
 repository, and `agentbus post` with no `--to` prints exactly that list for you.
 
-## When you are blocked, ask — but queue first
+## When you are stopped, ask first
 
-A block names who is holding the thing and prints the message to send. The order
-matters and the block states it:
+A stop names who is holding the thing and prints a sentence to send them. The
+question is whether you can go ahead now, and they are the one who knows:
 
-    agentbus wait db --timeout 600      # queue: it takes the lock the moment it frees
-    # then SendMessage to the holder, saying you have queued
-    # then do something else while they finish
+    # SendMessage to the holder — the address and the words are in the stop
+    # then get on with something else; the answer arrives with your next tool call
+    # they say go, or nothing comes back and you still need it:  run it again
+    # it can wait:  agentbus wait db --timeout 600
 
-Asking is not waiting. The queue is what ends with your command running; the
-message only makes it happen sooner, and it costs you nothing to send because you
-are not sitting still waiting for the answer. If nothing comes back before your
-timeout, `agentbus claim <res> --steal` is there — for a session that has gone,
-not for one you have not asked.
+The second try goes through, and the holder is told you did. It does not take
+their lock: it means two of you are using the thing at once, which may be exactly
+what they were avoiding — so a "yes" is worth a moment, and a "not yet" is worth
+respecting. `agentbus claim <res> --steal` is still there for a session that has
+gone.
 
 The other side of the same thing: `agentbus status` shows **who is waiting for
 what you are holding**. If somebody is queued behind you, release it as soon as
@@ -226,9 +226,10 @@ on each branch.
 
 ## Editing files
 
-Two sessions in the **same** checkout editing one file is blocked. Split the
-work, or agree who owns it and take it explicitly — the block then applies to
-them instead:
+Two sessions in the **same** checkout editing one file is stopped once: ask, and
+make the same edit again to go ahead, and they are told. Better, split the work,
+or agree who owns it and take it explicitly — the stop then applies to them
+instead:
 
     agentbus claim 'file:/abs/path.py' --why "agreed with <agent>"
 
@@ -381,9 +382,10 @@ session that needs it, before you finish.
 
 ## Escape hatch
 
-`AGENTBUS_OFF=1` in front of a command skips every check for that command. Use
-it when the bus is wrong, and tell the others — they are relying on what it
-reports.
+`AGENTBUS_OFF=1` in front of a command skips every check for that command,
+the first stop included. You rarely need it now — a second try goes through —
+but it is there for scripts and for when the bus is wrong. Tell the others:
+they are relying on what it reports.
 
 It is an escape from a **lock**, where there is a real case for it: you accept
 the contention risk, or the command only looks like it touches the thing. There

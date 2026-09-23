@@ -297,10 +297,11 @@ assert_file "$AGENTBUS_HOME/autoclaim/sweep-1.json" \
   "while the one belonging to a command still running is left alone"
 ab_hook post-bash "$(payload post-bash "sid=sess-b" "cwd=$WT2" id=sweep-1)" > /dev/null
 
-# ---- the escape hatch the block message offers actually works ---------------
+# ---- the escape hatch still works -------------------------------------------
 #
-# Every denial ends by offering `AGENTBUS_OFF=1 <command>`, and until
-# 2026-08-01 that did nothing: the assignment takes effect in the shell that
+# Every denial used to end by offering `AGENTBUS_OFF=1 <command>`; since 3.1.0 a
+# stop offers a second try instead, and the opt-out stays for scripts and for
+# the human. Until 2026-08-01 it did nothing: the assignment takes effect in the shell that
 # runs the command, and the hook has already decided by then, in another
 # process, with the session's own environment. An agent reached for a staging
 # database in another country, was queued behind a lock on the local one,
@@ -311,11 +312,11 @@ ab sess-a claim db --why "seeding" > /dev/null
 out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" "cmd=$CMD" id=off-1)")
 assert_deny "$out" "the command is refused, as it should be"
 assert_contains "$(json_field "$out" hookSpecificOutput permissionDecisionReason)" \
-  "AGENTBUS_OFF=1 <your command>" "and the message offers the way past"
+  "run the same command" "and the message offers the way past: a second try"
 
 out=$(ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
   "cmd=AGENTBUS_OFF=1 $CMD" id=off-2)")
-assert_allow "$out" "and taking that offer really does get past"
+assert_allow "$out" "and AGENTBUS_OFF in front of the command still gets past"
 assert_equal 1 "$(locks_held)" "without claiming anything on the way"
 
 # It is an override, not a hole: the others can see it was taken, and what of.

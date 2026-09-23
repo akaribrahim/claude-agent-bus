@@ -24,6 +24,13 @@ case "$AGENTBUS_HOME" in
     ;;
 esac
 
+# Every try is a first try, unless a file says otherwise. Since 3.1.0 a guard
+# stops a command once and lets the same party's second try through; the files
+# that pin what a lock, a port or an ownership declaration decides ask what that
+# first try is told, again and again, and would otherwise be testing the second.
+# `tests/test_stoponce.sh` sets it back and tests the second try itself.
+export AGENTBUS_TOLD_FOR="${AGENTBUS_TOLD_FOR:-0}"
+
 # The same refusal for Claude Code's own session registry. The engine reads it to
 # find the address a block message prints, and a test that reads the real one
 # would assert against whichever chats happen to be open — passing on this
