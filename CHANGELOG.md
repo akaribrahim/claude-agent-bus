@@ -18,6 +18,20 @@ saying so in their reason. The same key serves `run`, `claim`, `serve` and
 `release`, which subagents redirect just as habitually. Redirections, and a
 trailing `&`, are dropped from both sides of the key now.
 
+**A password on a command line no longer reaches the log, or anybody's block.**
+What the bus records about a command is the command, and that is where a password
+gets typed. By 2026-09-22 this machine's log held 127 events carrying one: a
+database password, in a URL or as `PGPASSWORD=`, in lock and block events, and a
+bearer token in 36 wrong-port announcements, which are delivered into other
+sessions' contexts. `run` without `--why` makes the command line the lock's
+reason, and a lock's reason is printed in every block it causes. So the log, and
+the reason stored in a lock, are now masked of passwords in URLs, variables
+whose names say they hold a secret, `--password`/`--token` style flags,
+`Authorization` and `Bearer` headers, and tokens recognisable by shape (`sk-`,
+`ghp_`, `xox*-`, `AKIA`, JWTs). Masked before anything is cut to length, since a
+cut can land between a password and the `@` that marks it. What is already in an
+existing log stays there.
+
 ## 3.0.0 — 2026-09-05
 
 **agent-bus no longer carries messages between sessions, because Claude Code

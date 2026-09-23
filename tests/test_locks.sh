@@ -479,6 +479,32 @@ printf '%s' "$IMPLIES_CFG" > "$REPO/.claude/agent-bus.json"
 printf '%s' "$IMPLIES_CFG" > "$WT2/.claude/agent-bus.json"
 ab sess-a doctor > /dev/null
 
+# ---- a password on the command line stays out of the log and the lock -------
+#
+# That trace is the command, and the command is where the password was typed —
+# by 2026-09-22 the log on the machine this was written on held 127 events
+# carrying one. Asserted where it lands rather than through `redact`: the log,
+# and a lock's reason read back off disk from inside the command holding it,
+# because `run` without `--why` makes the command line the reason and every
+# block that lock causes prints it to somebody else.
+
+ab sess-a claim db --why "seeding" > /dev/null
+ab_hook pre-tool "$(payload bash sid=sess-b "cwd=$WT2" \
+  "cmd=AGENTBUS_OFF=1 PGPASSWORD=hunter2 psql postgresql://app:s3cret@db/app" \
+  id=off-sec)" > /dev/null
+ab sess-a release db > /dev/null
+held=$(ab sess-b run db -- sh -c 'cat "$AGENTBUS_HOME"/locks/*.json' \
+  postgresql://app:s3cret@db/app 2>/dev/null)
+
+trace=$(events)
+assert_contains "$trace" "PGPASSWORD=***" \
+  "stepping over a guard with a password in the command is still recorded"
+assert_not_contains "$trace" "hunter2" "but the password is not"
+assert_not_contains "$trace" "s3cret" "nor one inside a URL"
+assert_contains "$held" "app:***@db" \
+  "a lock whose reason is its command line keeps it masked on disk"
+assert_not_contains "$held" "s3cret" "with nothing of the password left"
+
 # ---- a session that ends drops what it was holding --------------------------
 
 ab sess-a claim db --why "held across the end of the session" > /dev/null
