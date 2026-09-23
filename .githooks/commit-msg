@@ -1,0 +1,4 @@
+#!/bin/sh
+# The same check on the message: the private repository's name has reached this
+# public history through commit messages as well as through files.
+exec python3 "$(git rev-parse --show-toplevel)/tests/check_secrets.py" --message "$1"

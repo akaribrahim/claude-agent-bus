@@ -86,6 +86,26 @@ run_syntax() {
   line ok syntax $((SECONDS - t0)) "$n checks"
 }
 
+# The publication gate: nothing tracked may carry a secret or a string from
+# notes/never-publish.txt. This repository is public and is developed against a
+# private one, and a leak is only undone by rewriting history everybody has.
+run_secrets() {
+  local t0=$SECONDS out rc n
+  out=$(python3 "$AB_ROOT/tests/check_secrets.py" 2>&1)
+  rc=$?
+  files_run=$((files_run + 1))
+  n=$(printf '%s\n' "$out" | grep -c '^ok ')
+  assertions=$((assertions + n))
+  if [ "$rc" -ne 0 ]; then
+    files_failed=$((files_failed + 1))
+    failures=$((failures + 1))
+    line FAIL secrets $((SECONDS - t0)) ""
+    printf '%s\n' "$out" | sed 's/^/       /'
+    return
+  fi
+  line ok secrets $((SECONDS - t0)) "$n checks"
+}
+
 # Kill anything a test left listening. Only pids agent-bus itself recorded in
 # that test's own state directory — nothing else is ever signalled.
 reap_services() {   # <bus dir>
@@ -160,6 +180,7 @@ printf 'agent-bus tests — %s, bash %s\n' \
   "$(python3 -V 2>&1)" "${BASH_VERSION%%(*}"
 
 run_syntax
+run_secrets
 
 for f in "$AB_ROOT"/tests/test_*; do
   [ -f "$f" ] || continue

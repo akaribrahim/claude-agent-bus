@@ -148,6 +148,39 @@ def main():
     eq(True, "hunter2" in cmd[:120] and "@" not in cmd[:120],
        "(and cut first, it would have: the fixture does cut through it)")
 
+    # ---- the commit gate reads the same table ---------------------------------
+    #
+    # `tests/check_secrets.py` runs as the pre-commit and commit-msg hooks and
+    # in this suite. What it must catch is pinned here, through its `scan`, so a
+    # gate that quietly stopped finding anything fails by name.
+    loader = importlib.machinery.SourceFileLoader(
+        "check_secrets", os.path.join(ROOT, "tests", "check_secrets.py"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    gate = importlib.util.module_from_spec(spec)
+    loader.exec_module(gate)
+
+    # Assembled at run time: written out whole, it would be a finding in this
+    # very file the moment the gate scanned the repository.
+    real = "real" + "value1"
+    found = []
+    gate.scan(mod, None, "fixture.sh",
+              "ok\nexport PGPASS" + "WORD=" + real + " && psql\n", found)
+    eq(1, len(found), "the gate finds a real-looking value")
+    eq(True, found and found[0].startswith("fixture.sh:2: a secret (PGPASSWORD=)"),
+       "and says where it is and what it was")
+    eq(True, found and real not in found[0],
+       "without printing the value it found")
+
+    found = []
+    gate.scan(mod, None, "fixture.sh", "export PGPASSWORD=hunter2 && psql", found)
+    eq([], found, "a value listed as a fake passes")
+
+    found = []
+    gate.scan(mod, ["acme-internal"], "msg", "Fix\n\nseen in ACME-Internal/x\n",
+              found)
+    eq(["msg:3: entry 1 of notes/never-publish.txt"], found,
+       "a never-publish string is found case-blind, and not echoed")
+
     return 1 if os.path.exists(FAILURES) and os.path.getsize(FAILURES) else 0
 
 

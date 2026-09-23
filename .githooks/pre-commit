@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuse a commit that carries a secret or a string from notes/never-publish.txt.
+# The check is tests/check_secrets.py; `make hooks` points git here.
+exec python3 "$(git rev-parse --show-toplevel)/tests/check_secrets.py" --staged

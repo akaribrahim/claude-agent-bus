@@ -653,6 +653,12 @@ calls, so it is deliberately not part of `make test` — but it is the one that
 proves the thing works, and it has already caught a defect a suite of synthetic
 hook payloads could not.
 
+Before your first commit, `make hooks`. It points git at `.githooks/`, which
+refuses a commit whose files or message carry a secret — by the same table the
+bus masks its log with — or any string listed in `notes/never-publish.txt`, a
+gitignored file for the names that must never reach a public repository.
+`make test` runs the same check over every tracked file.
+
 ## Requirements
 
 Python 3.8+. Bash for the fast path, or Python-only hooks without it. macOS and
