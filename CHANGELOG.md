@@ -2,6 +2,17 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 3.0.2 — 2026-09-23
+
+**A key or an authorization value is masked, not only a password.** 3.0.1 knew
+`API_KEY=` and `Authorization:` with a colon. A message on 2026-09-20 carried a
+payment provider's sandbox merchant key, API password and authorization value
+as `*_MERCHANT_KEY=`, `*_API_PASSWORD=` and `*_AUTHORIZATION=`, and 3.0.1
+caught only the password. Any variable whose last word is `KEY`, `AUTH` or `AUTHORIZATION` is
+masked now, and for the last of those the credential after the scheme too.
+Last word only: `SSH_AUTH_SOCK=` is a path and `GIT_CONFIG_KEY_0=` a setting,
+and 3.0.1's wider reading would have masked both.
+
 ## 3.0.1 — 2026-09-23
 
 **A subagent's `agentbus wait` takes the lock in the subagent's name again, when

@@ -89,6 +89,17 @@ MASKED = [
     ("using *** now", "using ghp_abcdefghijklmnopqrstuvwxyz0123 now",
      "a GitHub token recognised by its shape"),
     ("key ***", "key AKIAABCDEFGHIJKLMNOP", "an AWS access key id"),
+    # A merchant key and an authorization value were pasted into a message on
+    # 2026-09-20, and 3.0.1 caught neither: it knew `API_KEY`, not `_KEY`, and
+    # looked for `Authorization:` with a colon.
+    ("PAYMENT_MERCHANT_KEY=*** PAYMENT_ACK=OK",
+     "PAYMENT_MERCHANT_KEY=abc123 PAYMENT_ACK=OK",
+     "a name whose last word is KEY"),
+    ("PAYMENT_AUTHORIZATION=***\nNEXT=1",
+     "PAYMENT_AUTHORIZATION=Basic dGVzdGluZy10ZXN0aW5nLXRlc3Rpbmc=\nNEXT=1",
+     "an authorization value, both its scheme and its credential"),
+    ("GET /maps?key=***&q=x", "GET /maps?key=abc123&q=x",
+     "a bare `key` query parameter"),
     ("jwt ***",
      "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w",
      "a JWT"),
@@ -97,6 +108,11 @@ MASKED = [
 LEFT_ALONE = [
     ("MAX_TOKENS=4096", "a name containing TOKENS is a count, not a token"),
     ("tokenizer=bpe", "nor is one that merely starts with token"),
+    ("monkey=1 hotkey=f5 KEYBOARD=us", "KEY inside a longer word"),
+    ("author=me AUTHOR_NAME=x", "AUTH as the start of another word"),
+    ("sorted(names, key=len)", "a Python keyword argument called key"),
+    ("GIT_CONFIG_KEY_0=safe.directory KEY_CFG=x", "KEY that is not the last word"),
+    ("SSH_AUTH_SOCK=/tmp/agent.sock", "AUTH that is not the last word"),
     ("bypass=1", "`pass` alone is not a password's name"),
     ("PWD=/tmp/x", "PWD is the working directory"),
     ("--token-file ./token", "a flag that names a file holding the secret"),

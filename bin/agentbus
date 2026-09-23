@@ -2262,6 +2262,18 @@ SECRETS = (
     (re.compile(r"(?i)(\b[a-z0-9_]*(?:password|passwd|secret|token|api_?key"
                 r"|access_?key|private_?key|credentials?)(?:_[a-z0-9_]*)?=)"
                 r"(?:\"[^\"]*\"|'[^']*'|[^\s&;|'\"]+)"), r"\1***"),
+    # A variable whose last word is KEY — `MERCHANT_KEY=`, `API_KEY=` — and a
+    # `?key=` query parameter. Upper case only for the variable: in lower case
+    # `key=` is every Python sort in a pasted snippet. Not `KEYBOARD=`, either;
+    # the word has to stand on its own.
+    (re.compile(r"((?<![A-Za-z0-9_])(?:[A-Z0-9_]*_)?KEY=|[?&]key=)"
+                r"(?:\"[^\"]*\"|'[^']*'|[^\s&;|'\"]+)"), r"\1***"),
+    # `*_AUTHORIZATION=` and `*_AUTH=`, whose value is often a scheme and a
+    # credential — two words, and the second is the one that matters. Last
+    # word again: `SSH_AUTH_SOCK=` is a path.
+    (re.compile(r"((?<![A-Za-z0-9_])(?:[A-Z0-9_]*_)?AUTH(?:ORIZATION)?=)"
+                r"(?:\"[^\"]*\"|'[^']*'|\S+(?:[ \t]+[A-Za-z0-9+/=_-]{16,})?)"),
+     r"\1***"),
     # --password VALUE, --token=VALUE.
     (re.compile(r"(?i)(--(?:password|passwd|token|secret|api-?key|access-?key)"
                 r"(?:=|\s+))(?:\"[^\"]*\"|'[^']*'|[^\s'\"]+)"), r"\1***"),
