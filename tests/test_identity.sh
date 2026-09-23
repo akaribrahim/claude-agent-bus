@@ -253,6 +253,41 @@ assert_contains "$(reason_of "$out")" "took this through a shell" \
 
 free_all sess-a
 
+# "The same command line" means the words the process is handed, and a
+# redirection is not one of them: the guard reads `2>&1` and the CLI never sees
+# it. Until the key dropped them, the two halves disagreed about every wait that
+# ended in `2>&1 | tail`, which is how subagents write it — and each of those
+# took its lock in the session's name and was then blocked by it.
+out=$(apre sess-a sub-one "$REPO" \
+  "agentbus wait simulator --why piped 2>&1 | tail -3" w-b11)
+assert_allow "$out" "hint (b): the guard sees a wait with its output redirected"
+ab sess-a wait simulator --why piped > /dev/null 2>&1   # what the process gets
+
+out=$(apre sess-a sub-one "$REPO" "maestro test flows/twelve.yaml" w-b12)
+assert_allow "$out" \
+  "hint (b): a redirection is the shell's, so the hint still reaches the CLI"
+out=$(apre sess-a sub-two "$REPO" "maestro test flows/thirteen.yaml" w-b13)
+assert_deny "$out" "hint (b): and the sibling is still refused"
+assert_contains "$(reason_of "$out")" "$ONE" \
+  "hint (b): by the subagent that queued, not by its session"
+
+free_all sess-a
+
+# A bare operator takes the word after it: `> wait.log` is two words the
+# process never receives, not one.
+out=$(apre sess-a sub-one "$REPO" \
+  "agentbus wait simulator --why logged > /tmp/wait.log 2>&1" w-b14)
+assert_allow "$out" "hint (b): the guard sees a wait redirected to a file"
+ab sess-a wait simulator --why logged > /dev/null 2>&1
+
+out=$(apre sess-a sub-two "$REPO" "maestro test flows/fourteen.yaml" w-b15)
+assert_deny "$out" \
+  "hint (b): an operator and its target are both the shell's"
+assert_contains "$(reason_of "$out")" "$ONE" \
+  "hint (b): so the lock is the subagent's that queued"
+
+free_all sess-a
+
 # A hint is one session's. Two sessions running the identical command line
 # compute the identical key, and reading somebody else's would hand a lock to
 # the wrong session — silently, because both answers look plausible.

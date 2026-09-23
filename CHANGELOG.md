@@ -2,6 +2,22 @@
 
 What changed for somebody using it, rather than what changed in the source.
 
+## 3.0.1 — 2026-09-23
+
+**A subagent's `agentbus wait` takes the lock in the subagent's name again, when
+its output is redirected.** The CLI cannot tell which subagent is calling it, so
+the guard, which can, leaves the answer under a key computed from the command's
+words, and the CLI looks it up under the same key. The guard read `2>&1` as one
+of those words and the process never received it, so the two keys differed for
+any command with a redirection on it — and that is how subagents call things.
+On this machine 97 of 125 subagent `wait`s without `--as` ended in one. Each took
+its lock in the session's name, and once a second subagent was live, the one that
+had queued was refused by its own lock. All eleven `steal`s on the log up to
+2026-09-22 were a subagent forcing a lock back off its own parent, eight of them
+saying so in their reason. The same key serves `run`, `claim`, `serve` and
+`release`, which subagents redirect just as habitually. Redirections, and a
+trailing `&`, are dropped from both sides of the key now.
+
 ## 3.0.0 — 2026-09-05
 
 **agent-bus no longer carries messages between sessions, because Claude Code

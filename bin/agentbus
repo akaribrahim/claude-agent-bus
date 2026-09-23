@@ -1929,14 +1929,52 @@ def may_release(lock, me, siblings=None):
     return bool(me.get("party_known"))
 
 
+# `2>&1`, `>out.log`, `> out.log`, `&>/dev/null`, `<<<"$x"`, `<<EOF`: the shell
+# acts on these and the program never sees them. The first group is the file
+# descriptor, the second whatever target came attached to the operator.
+REDIRECTION = re.compile(r"^(?:\d+|&)?(?:>>|>\||>&|>|<<<|<<-?|<&|<>|<)(.*)$")
+
+
+def without_redirections(tokens):
+    """The words a shell hands the program, from the words it was given.
+
+    `shlex` keeps a redirection as a word of the command, so `agentbus wait db
+    2>&1` tokenises to five words where the process gets four. A redirection
+    with its target attached is one word to drop; a bare operator takes the
+    word after it with it. So does a trailing `&`, which `split_segments` does
+    not split on."""
+    out, i = [], 0
+    while i < len(tokens):
+        m = REDIRECTION.match(tokens[i])
+        if m:
+            i += 1 if m.group(1) else 2
+        elif tokens[i] == "&":
+            i += 1
+        else:
+            out.append(tokens[i])
+            i += 1
+    return out
+
+
 def hint_key(tokens):
     """A key both halves of one `agentbus` command can compute independently.
 
     The hook sees the whole command line and knows which subagent is running it;
-    the CLI knows neither. They do share the argv of the `agentbus` call itself —
-    the hook's tokeniser produces exactly what the shell hands the process — so
-    the hook can leave the party under that key and the CLI can pick it up."""
+    the CLI knows neither. They do share the argv of the `agentbus` call itself,
+    so the hook can leave the party under that key and the CLI can pick it up.
+
+    Shared once the redirections are gone, and not before. The hook reads them
+    as words and the process never receives them, so `agentbus wait db --why x
+    2>&1 | tail -3` left its hint under one key and looked for it under another.
+    That is how most subagents call it: of 125 `wait`s without `--as` in this
+    machine's subagent transcripts, 97 ended in a redirection. Each of those
+    missed its hint and took the lock in the session's name, and once a second
+    subagent was live, the one that had queued was blocked by it. All eleven `steal`s on the log to 2026-09-22 were a subagent forcing a
+    lock off its own parent, and eight of them said in their reason that the
+    lock was theirs. Both sides strip, so a `--why ">"` that the shell did pass
+    through is dropped from both and the keys still agree."""
     import hashlib
+    tokens = without_redirections(tokens or [])
     if not tokens:
         return ""
     words = [os.path.basename(tokens[0])] + list(tokens[1:])
